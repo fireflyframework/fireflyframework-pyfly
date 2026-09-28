@@ -28,6 +28,7 @@ from sqlalchemy.dialects import mssql, oracle
 from sqlalchemy.engine import make_url
 from sqlalchemy.schema import CreateTable
 
+from pyfly.config.properties.data import RelationalProperties, ddl_auto_strategy
 from pyfly.data.relational.framework_schema import (
     CACHE_ENTRIES,
     FRAMEWORK_TABLE_PREFIX,
@@ -77,10 +78,20 @@ def test_a_table_name_that_is_not_an_identifier_is_refused() -> None:
 
 @pytest.mark.parametrize(
     ("ddl_auto", "creates"),
-    [("create", True), ("create-drop", True), ("update", True), ("none", False), ("validate", False), (None, False)],
+    [("create", True), ("create-drop", True), ("none", False), ("validate", False), (None, False)],
 )
 def test_the_schema_strategy_decides_whether_stores_create_their_tables(ddl_auto: str | None, creates: bool) -> None:
     assert creates_tables(ddl_auto) is creates
+
+
+def test_update_is_no_strategy_a_store_is_ever_given() -> None:
+    """The effective strategy never is ``update`` (PyFly never alters a table at startup), so a store never gets it
+    from its registry's properties; passed by hand, it is an unknown value and creates nothing."""
+    with pytest.raises(ValueError, match="update is not supported"):
+        ddl_auto_strategy("update", url="sqlite+aiosqlite:///app.db")
+    with pytest.raises(ValueError, match="update is not supported"):
+        RelationalProperties(url="postgresql+asyncpg://db/app", ddl_auto="update")
+    assert creates_tables("update") is False
 
 
 def test_the_ddl_compiles_for_sql_server_with_unicode_keys_and_unbounded_payloads() -> None:

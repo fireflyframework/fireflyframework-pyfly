@@ -114,14 +114,14 @@ __all__ = [
     "OAUTH2_GRANTS",
     "OAUTH2_TOKEN_FAMILIES",
     "ORCHESTRATION_STATE",
-    "SESSIONS",
-    "SESSION_PRINCIPALS",
-    "SESSION_REGISTRATIONS",
     "OUTBOX_CONSUMERS",
     "OUTBOX_DEAD_LETTERS",
     "OUTBOX_DELIVERIES",
     "OUTBOX_EVENTS",
     "PROJECTION_CHECKPOINTS",
+    "SESSIONS",
+    "SESSION_PRINCIPALS",
+    "SESSION_REGISTRATIONS",
     "SNAPSHOTS",
     "USERS",
     "FrameworkSchemaError",
@@ -138,9 +138,9 @@ __all__ = [
     "event_store_table",
     "framework_engine",
     "framework_metadata",
+    "key_string",
     "locks",
     "locks_table",
-    "key_string",
     "long_binary",
     "long_text",
     "module_datasource",
@@ -150,12 +150,6 @@ __all__ = [
     "oauth2_token_families_table",
     "orchestration_state",
     "orchestration_state_table",
-    "session_principals",
-    "session_principals_table",
-    "session_registrations",
-    "session_registrations_table",
-    "sessions",
-    "sessions_table",
     "outbox_consumers",
     "outbox_consumers_table",
     "outbox_dead_letters",
@@ -166,6 +160,12 @@ __all__ = [
     "outbox_events_table",
     "projection_checkpoints",
     "projection_checkpoints_table",
+    "session_principals",
+    "session_principals_table",
+    "session_registrations",
+    "session_registrations_table",
+    "sessions",
+    "sessions_table",
     "snapshots",
     "snapshots_table",
     "users",
@@ -760,14 +760,15 @@ CREATE_ATTEMPTS = 5
 """How many times :func:`ensure_tables` tries to create the missing tables while other processes race it."""
 
 
-_CREATING_STRATEGIES = frozenset({"create", "create-drop", "update"})
+_CREATING_STRATEGIES = frozenset({"create", "create-drop"})
 
 
 def creates_tables(ddl_auto: str | None) -> bool:
     """Whether a store creates its missing framework tables when it starts, under the schema strategy
-    *ddl_auto* (``pyfly.data.relational.ddl-auto``): ``create``, ``create-drop`` and ``update`` do (the
+    *ddl_auto* (the effective ``pyfly.data.relational.ddl-auto``): ``create`` and ``create-drop`` do (the
     framework tables are never dropped); ``none``, ``validate`` and any other value leave the schema to
-    migrations, and the store only checks it."""
+    migrations, and the store only checks it. ``update`` is no strategy a store is given
+    (:func:`~pyfly.config.properties.data.ddl_auto_strategy` refuses it)."""
     return str(ddl_auto or "").strip().lower() in _CREATING_STRATEGIES
 
 
