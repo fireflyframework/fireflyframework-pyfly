@@ -43,9 +43,11 @@ outside the block. Units begun by tasks started inside the block report too (a c
 tracker), except :func:`~pyfly.data.transaction.detached` work, which starts without one: its commits are
 its own. Nested blocks each see the units of the innermost one.
 
-A write auto unit on an autocommit connection (a single-statement :func:`~pyfly.data.transaction.infrastructure_unit`
-on PostgreSQL) commits each statement as it runs: one that ran a statement and then failed, or was cancelled,
-reports ``UNKNOWN`` (it may have committed), never rolled back.
+Some write auto units commit each statement as it runs (``UnitOfWork.autocommit``): a single-statement
+:func:`~pyfly.data.transaction.infrastructure_unit` on PostgreSQL (an autocommit connection), and a MongoDB write
+without a transaction (``save``, ``delete``, a bulk delete, a ``@query`` pipeline with ``$out`` or ``$merge``, and
+every write on a standalone server). One that ran a statement and then failed, or was cancelled, reports
+``UNKNOWN`` (it may have committed), never rolled back; a statement the server rejected counts so too.
 
 Units begun inside an :func:`untracked` block report to no tracker. The framework runs its idempotent
 bookkeeping there, the writes it makes on a call's way that are not the call's effects: numbering the events a

@@ -88,7 +88,8 @@ class TransactionManager(Protocol):
         """Open the short unit a call gets outside a transaction: a read unit or a write unit that will
         commit. *autocommit* ``None`` lets the backend run a read on an autocommit connection where that is
         cheaper; ``True`` asks for it for a single statement that writes; ``False`` refuses it (a
-        server-side cursor needs a transaction)."""
+        server-side cursor needs a transaction). A write unit whose statements commit as they run sets
+        ``unit.autocommit``, so a failure after one of them completes it as ``UNKNOWN``."""
         ...
 
     async def commit(self, unit: UnitOfWork) -> None:

@@ -869,8 +869,9 @@ async def complete_auto_unit(
     """Complete an auto unit after its work returned (*error* ``None``) or raised, and release it.
 
     A write unit commits; a read unit ends without writing (a rollback, nothing on autocommit) and is
-    reported to its synchronizations as committed. A write unit on an autocommit connection (a single
-    statement, :func:`infrastructure_unit`) that ran an operation and then rolled back (it failed, or was
+    reported to its synchronizations as committed. A write unit whose statements commit as they run
+    (``UnitOfWork.autocommit``: a single statement on an autocommit connection, :func:`infrastructure_unit`;
+    a MongoDB write without a transaction) that ran an operation and then rolled back (it failed, or was
     cancelled) is reported as ``UNKNOWN``: its statements committed as they ran, and the rollback undid
     nothing. *since* is the task's :func:`~pyfly.data.transaction.unit_of_work.cancel_requests` when the unit
     was opened. *reset* is the token of the scope the unit was bound with, restored before the

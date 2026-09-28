@@ -32,7 +32,11 @@ propagation (``REQUIRED``, ``REQUIRES_NEW``, ``SUPPORTS``,
   method that writes several times (``save_all``, a delete that runs event actions document by document) is
   atomic, except when the call is one command (``save``, ``delete``, a bulk delete), which MongoDB runs
   atomically on each document it touches and which runs without one (``autocommit=True``), and on a
-  standalone server, which has no transactions.
+  standalone server, which has no transactions. A write unit without a transaction is an autocommit unit
+  (``UnitOfWork.autocommit``): its commands stand on their own as they run, and nothing undoes them, so one
+  that fails after a command ran (an after-insert event action, a write concern failure, an ordered bulk write
+  stopped at a failing document) completes as ``UNKNOWN``: :func:`~pyfly.data.transaction.track_commits` then
+  counts it as work that may have committed, and a saga step is compensated instead of retried.
 - **Failures.** MongoDB aborts a transaction as soon as one of its commands fails, so every driver error in
   a transactional unit marks it rollback-only: a caught duplicate key cannot commit the rest
   (:class:`~pyfly.data.transaction.errors.UnexpectedRollbackError` at the boundary). A commit whose outcome
@@ -264,10 +268,16 @@ class MongoTransactionManager:
 
     async def open_auto_unit(self, *, read_only: bool, autocommit: bool | None = None) -> UnitOfWork:
         """Open the short unit of a call outside a transaction: a session, with a transaction for a write unless
-        *autocommit* is ``True`` (a single-document command) or the server has none."""
+        *autocommit* is ``True`` (a single-document command) or the server has none.
+
+        A write unit without a transaction is an autocommit unit (``UnitOfWork.autocommit``): each command stands
+        on its own as it runs, so one that fails after a command ran completes as ``UNKNOWN``, not rolled back."""
         session = self._client.start_session()
         unit = UnitOfWork(self, self._datasource, session, auto=True, read_only=read_only)
-        if read_only or autocommit is True:
+        if read_only:
+            return unit
+        if autocommit is True:
+            unit.autocommit = True
             return unit
         try:
             transactional = await self.supports_transactions()
@@ -276,6 +286,8 @@ class MongoTransactionManager:
             raise
         if transactional:
             await self._start(unit, unit.definition)
+        else:
+            unit.autocommit = True  # a standalone server: each command stands on its own
         return unit
 
     async def _start(self, unit: UnitOfWork, definition: TransactionDefinition) -> None:

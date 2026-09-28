@@ -493,8 +493,15 @@ class MongoRepository(Generic[T, ID]):
 
     @property
     def _session(self) -> AsyncClientSession:
-        """The ``ClientSession`` of the current call's unit (for a custom method that calls Beanie itself)."""
-        return cast(AsyncClientSession, self._current_unit().resource)
+        """The ``ClientSession`` of the current call's unit (for a custom method that calls Beanie itself).
+
+        A write unit counts the session handed out as an operation begun (``UnitOfWork.operations``): the commands
+        sent with it are the method's own, outside the operation guard, and on a unit without a transaction one
+        that fails after them may have stored them (it completes as ``UNKNOWN``, not rolled back)."""
+        unit = self._current_unit()
+        if not unit.read_only:
+            unit.operations += 1
+        return cast(AsyncClientSession, unit.resource)
 
     def _query(self, **filters: Any) -> Any:
         """A Beanie find query of the documents whose fields equal *filters*, on the current call's session (the
