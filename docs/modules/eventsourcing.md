@@ -142,6 +142,7 @@ await outbox.dead_letters()   # failed on every attempt
 | `poll_interval_s` | `1.0` | How often the relay looks for events enqueued by other processes; an enqueue in this process wakes it when its unit commits. |
 | `publish_timeout` | `60.0` | Seconds a publish may take before the attempt counts as failed. |
 | `create_tables` | `True` | Create the outbox tables when they are missing (otherwise only check them). |
+| `store` | a `SqlOutboxStore` on `datasource` | The outbox store to run on instead: any `OutboxStore` (`pyfly.eda.ports.outbox`); then `datasource`, `tables` and `create_tables` do not apply. |
 
 Before 26.09.08 the outbox was a dictionary in the process: an event enqueued by a unit that then rolled back
 was published anyway, a restart lost everything pending, and nothing was ever removed. It now needs a data

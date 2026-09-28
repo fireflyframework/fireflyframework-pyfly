@@ -19,6 +19,7 @@ guide covers both in depth.
 7. [InMemoryEventBus](#inmemoryeventbus)
 8. [Provider Selection](#provider-selection)
    - [The transactional outbox: `postgres` and `database`](#the-transactional-outbox-postgres-and-database)
+   - [Any broker, transactional: `pyfly.eda.outbox.enabled`](#any-broker-transactional-pyflyedaoutboxenabled)
    - [Postgres: what privileges a serving process actually needs](#postgres-what-privileges-a-serving-process-actually-needs)
    - [Dead letters](#dead-letters)
 9. [Declarative Decorators](#declarative-decorators)
@@ -54,6 +55,7 @@ Application / Domain Services
           +-- PostgresEventBus      (transactional outbox, LISTEN/NOTIFY wake-ups)
           +-- DatabaseEventBus      (transactional outbox on any SQL datasource)
           +-- RabbitMqEventBus      (RabbitMQ via aio-pika)
+          +-- TransactionalEventPublisher  (any of the brokers above behind the transactional outbox)
 ```
 
 Events are wrapped in an `EventEnvelope` that carries the payload alongside
@@ -265,7 +267,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.kafka.dlt.enabled` | `bool` | `true` | Dead-letter a record to `<topic><suffix>`, verbatim, when the serializer cannot read it or its handlers failed on every attempt, and only then commit its offset. `false` logs it and skips it. |
 | `pyfly.eda.kafka.dlt.suffix` | `str` | `.DLT` | Suffix of the dead-letter topic. |
 | `pyfly.eda.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL. |
-| `pyfly.eda.outbox.datasource` | `str` | the primary | The datasource of the `postgres` and `database` buses, by name. |
+| `pyfly.eda.outbox.datasource` | `str` | the primary | The datasource of the outbox, by name: the `postgres` and `database` buses', and the transactional publisher's (`pyfly.eda.outbox.enabled`). |
 | `pyfly.eda.outbox.url` | `str` | | Its URL instead: an alias resolved through the registry (the datasource with that URL, or a new datasource `eda` with the registry's pool settings). |
 | `pyfly.eda.postgres.datasource` / `pyfly.eda.postgres.dsn` | `str` | | The same two keys for `postgres`; `dsn` is the key it always had. Before 26.09.08 `dsn` was required, and the bus opened a connection pool of its own. |
 | `pyfly.eda.postgres.listen-dsn` | `str` | | A direct DSN for the LISTEN connection (behind a pooler in transaction mode); by default it is checked out of the datasource's pool. |
@@ -281,6 +283,12 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.outbox.retention.max-age` | duration | | An event older than this is deleted with the deliveries still owed for it (a group that stopped consuming loses them; a WARNING says how many). Unset: never. |
 | `pyfly.eda.outbox.retention.interval` / `retention.batch-size` | duration / `int` | `1m` / `1000` | How often a relay prunes, and how many events one statement deletes. |
 | `pyfly.eda.outbox.notify` | `bool` | | LISTEN/NOTIFY wake-ups; unset: on when the datasource is PostgreSQL and the LISTEN connection can be opened (the asyncpg driver, or `pyfly.eda.postgres.listen-dsn`); otherwise the relay polls, with a warning. |
+| `pyfly.eda.outbox.enabled` | `bool` | `false` | Put the transactional outbox in front of the provider's publisher (`kafka`, `rabbitmq`, `redis`, `memory`): a publish is part of the caller's unit of work and reaches the broker after the commit, at least once ([Any broker, transactional](#any-broker-transactional-pyflyedaoutboxenabled)). The `database` and `postgres` providers are the outbox already. |
+| `pyfly.eda.outbox.store` | `str` | `auto` | The outbox store: `sql` (the `pyfly_outbox_*` tables on `pyfly.eda.outbox.datasource`), `mongo` (not available until the Mongo outbox store lands: it raises at startup) or `auto` (`mongo` when the application has a Mongo client, `pyfly.data.document.enabled: true`, and no relational datasource: none in its `DataSourceRegistry`, however it is configured, and no `outbox.datasource`/`outbox.url`; else `sql`). |
+| `pyfly.eda.outbox.forward.destinations` | `str` | every destination | The destinations the transactional publisher sends through the outbox (comma-separated; `*`: every one). A publish to another destination goes to the broker after the commit, at most once. |
+| `pyfly.eda.outbox.forward.group` | `str` | `pyfly.forward:<provider>` | The forwarder's consumer group: the processes of one group split the forwarding, so they must forward to the same broker. |
+| `pyfly.eda.outbox.forward.*` | | the `outbox.*` value | The forwarder's `poll-interval`, `batch-size`, `claim-timeout`, `handler-timeout` (the longest one publish may take), `start`, `error-strategy` and `retention.*`, each defaulting to the `pyfly.eda.outbox.*` key of the same name. |
+| `pyfly.eda.outbox.forward.retry.*` | | `listener.retry.*` | The forwarder's retry policy: `max-attempts`, `initial-delay`, `multiplier`, `max-delay`, each defaulting to `pyfly.eda.listener.retry.*`. |
 | `pyfly.eda.domain-events.enabled` | `bool` | `true` | Publish the events aggregates raise as their unit of work commits ([Domain events of aggregates](#domain-events-of-aggregates)). |
 | `pyfly.eda.domain-events.destination` | `str` | | Also publish them through the event publisher, to this destination. |
 | `pyfly.eda.rabbitmq.url` | `str` | `amqp://guest:guest@localhost/` | AMQP connection URL. |
@@ -426,8 +434,8 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
 - **Retention.** The relays delete, in batches, the events every group handled (`retention.delivered`), and
   with `retention.max-age` the older ones whatever is still owed for them. The sweep of handled events reads
   past the events still owed: a group that stopped consuming keeps its backlog, and every sweep (every
-  `retention.interval`, in every relay) reads it again. Remove such a group (`Outbox.unregister(group)`), or
-  bound the backlog with `retention.max-age`.
+  `retention.interval`, in every relay) reads it again. Remove such a group (`bus.outbox.unregister(group)`),
+  or bound the backlog with `retention.max-age`.
 - **Lifecycle and health.** `start()` checks (and creates) the tables, opens the LISTEN connection when a
   handler is subscribed, and starts the relay, serialized and idempotent; a failed start closes what it
   opened. A bus that only publishes opens no LISTEN connection; one whose handlers subscribe after it started
@@ -455,6 +463,134 @@ never reopened while the health indicator said UP.
 **Upgrading from 26.09.07.** The bus no longer reads `pyfly_eda_outbox` and `pyfly_eda_offsets`. Let every
 consumer group drain them before the upgrade (or copy what a group had not consumed into
 `pyfly_outbox_events` and its deliveries), then drop them.
+
+**The store is a port.** The relay, both buses and the event-sourcing `TransactionalOutbox` read and write
+through `OutboxStore` (`pyfly.eda.ports.outbox`): append in the caller's unit, register consumer groups, claim by
+state for a lease, settle fenced by the claim, release, retention. `SqlOutboxStore` (`pyfly.eda.outbox`; its name
+before 26.09.08, `Outbox`, is kept as an alias) is the SQL adapter these sections describe, and
+`DatabaseEventBus(store=...)` and `TransactionalOutbox(publish, store=...)` run on any other. The value types
+(`Delivery`, `PendingDelivery`, `Retention`, `StartPosition`, `PruneResult`) are the port's, re-exported from
+`pyfly.eda.outbox` unchanged. What an adapter must do is the contract suite `tests/support/outbox_contract.py`,
+which the SQL store passes on SQLite, PostgreSQL, MySQL and MariaDB.
+
+### Any broker, transactional: `pyfly.eda.outbox.enabled`
+
+Kafka, RabbitMQ, Redis Streams and the in-process bus publish at once. A `publish()` inside a `@transactional`
+method reaches the broker before the unit commits, and stays there when the unit rolls back; a process that
+dies between its commit and its publish loses the event. `pyfly.eda.outbox.enabled: true` puts the
+transactional outbox in front of the provider's publisher, a `TransactionalEventPublisher`
+(`pyfly.eda.outbox_forwarding`):
+
+```yaml
+pyfly:
+  eda:
+    provider: kafka
+    kafka:
+      bootstrap-servers: kafka:9092
+    destinations: orders
+    group: billing
+    outbox:
+      enabled: true             # the database and postgres providers are the outbox already
+      forward:
+        poll-interval: 1s       # how soon another process forwards what a dead one left
+        retry:
+          max-attempts: 10
+```
+
+- **A publish is part of the caller's unit of work.** `publish()` appends the event to the outbox store (the
+  `pyfly_outbox_*` tables on `pyfly.eda.outbox.datasource`, the primary datasource by default) in the unit bound
+  for that datasource, or in a short unit of its own outside one, owed to the forwarder's consumer group, and
+  wakes the forwarder once that unit commits. Nothing reaches the broker before the commit. `subscribe()` and the
+  consumption of events stay the broker's: `@event_listener` methods consume as they did, with the Kafka and
+  RabbitMQ listener container.
+- **The forwarder publishes after the commit.** `OutboxForwarder` is an outbox relay of the group
+  `pyfly.forward:<provider>` (`pyfly.eda.outbox.forward.group`): it claims what the group is owed and publishes
+  each event to the broker outside every unit of work, with the relay's leases, retries, dead letters and
+  retention (`pyfly.eda.outbox.forward.*`). The publisher is a `CONSUMER_PHASE` lifecycle bean: `start()` starts
+  the broker's bus, checks (or creates) the outbox tables and starts the forwarder; `stop()` stops the forwarder
+  first, after the publish in flight, then the bus. A publish after `stop()` still appends its event, for another
+  process or a restart to forward.
+- **Domain events and command events are covered.** The publisher joins transactions (`joins_transactions`),
+  so `pyfly.eda.domain-events.destination` and the CQRS command bus publish in the committing unit, as with an
+  outbox bus.
+
+What it guarantees:
+
+- **A unit that rolls back publishes nothing**, and **a unit that commits publishes its event at least once**:
+  once in the normal path; again after a publish that failed (after its back-off); and again when the process
+  died after the broker took the event and before the delivery was settled, once the lease ends
+  (`forward.claim-timeout`) and a forwarder (another process, or this one after a restart) claims it. Every copy
+  carries the event's id in the `x-pyfly-event-id` header (a domain event's own id when it is one), the same on
+  every attempt: a consumer deduplicates on it, for instance by recording it in the unit of work of its handler.
+
+  ```python
+  @event_listener(["order.*"])
+  async def on_order(self, envelope: EventEnvelope) -> None:
+      event_id = envelope.headers["x-pyfly-event-id"]
+      if await self.handled.exists_by_id(event_id):   # a copy of an event handled already
+          return
+      await self.handled.save(HandledEvent(id=event_id))   # commits with the handler's own work
+      ...
+  ```
+
+- **Order.** The events are claimed in publication order, and one forwarder at a time publishes a claim in that
+  order, but a failed publish is attempted again after later events, and the forwarders of several processes
+  claim side by side. Consume them as independent facts, or order them yourself (a version in the payload).
+- **Several processes share the forwarding.** The processes whose forwarders run on one outbox with one group
+  split its events, each forwarded by one of them; nothing is forwarded twice except after a lost lease (a
+  crash, or a publish that outlasted `forward.claim-timeout`). They must forward to the same broker: give a
+  deployment that forwards elsewhere from the same database a `forward.group` of its own.
+- **A broker outage is retried, then dead-lettered.** Each attempt that fails (or outlasts
+  `forward.handler-timeout`) is attempted again after the retry policy's back-off (`forward.retry.*`, by default
+  `pyfly.eda.listener.retry.*`); after the last attempt the event goes to the outbox's dead letters
+  (`await publisher.dead_letters()`), or to the application's `EdaDeadLetterStore` when it defines one as a bean
+  (then `publisher.dead_letters()` stays empty: read that store), and the events behind it go on. With the
+  defaults (5 attempts, 1 + 2 + 4 + 8 = 15 s apart) an outage longer than about 15 s dead-letters the events
+  published during it: raise `forward.retry.max-attempts` and `retry.max-delay` to outlast the outages you expect,
+  or set `forward.error-strategy: RETRY` to attempt every event until the broker is back. `LOG_AND_CONTINUE` and
+  `IGNORE` settle a failed forward as done: the event is dropped, at most once.
+- **The event commits in the store's unit.** With the outbox on the datasource of the business changes (the
+  default), they commit together. An outbox on another datasource commits in a unit of that datasource, a second
+  write; a MongoDB business unit has no outbox of its own yet (`pyfly.eda.outbox.store: mongo` raises until the
+  Mongo outbox store lands).
+
+The forwarder's group is registered for `forward.destinations` (every destination by default, also when the list
+holds `*`), so an event another writer of the store appends to one of them is forwarded too. A publish to a
+destination left out of `forward.destinations` goes straight to the broker after the caller's unit commits (at
+once outside one): at most once, and lost if the process dies in between. The group stays registered when
+`outbox.enabled` is turned off, and every other writer of the same tables (an outbox bus) keeps owing it its
+events: remove it (`await SqlOutboxStore("primary").unregister("pyfly.forward:kafka")`) when you switch the layer
+off for good.
+
+The broker's bus builds the envelope it sends when the forwarder publishes: its `timestamp` is the instant of the
+forward, not of the publish in the unit (the event's id is kept, in `x-pyfly-event-id`). With the in-process bus
+(`provider: memory`) a forward is the whole fan-out to the `@event_listener` methods: when one of them raises, the
+forward failed and is attempted again, so the listeners that succeeded receive the event again (and the ones after
+the failing listener wait for the next attempt); handle it as the at-least-once delivery it is.
+
+The health indicator reports the publisher `UP` while it runs, its forwarder's task runs, its outbox's database
+answers and the broker's bus is up, and `DOWN` with the reason otherwise; the details count what was forwarded,
+the failed attempts and the dead letters. `await publisher.pending()` lists what is not forwarded yet.
+
+In a data test (`@DataTest`, `data_slice(..., rollback=True)`), the context's forwarder never sees what the test
+publishes: forward it with a relay round of the test's own, which takes part in the test's transaction
+(`await publisher.relay.run_once()`).
+
+Without the auto-configuration:
+
+```python
+from pyfly.eda.adapters.kafka import KafkaEventBus
+from pyfly.eda.outbox import SqlOutboxStore
+from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
+
+publisher = TransactionalEventPublisher(
+    KafkaEventBus(bootstrap_servers="kafka:9092", topics=["orders"], group="billing"),
+    SqlOutboxStore("primary"),          # the tables on the primary datasource
+    name="kafka",                       # the forwarder's group: pyfly.forward:kafka
+    poll_interval=1.0,
+)
+await publisher.start()
+```
 
 ### Postgres: what privileges a serving process actually needs
 
@@ -486,7 +622,9 @@ The identity column of `pyfly_outbox_events` needs no grant on its sequence. Bef
 
 An `EdaDeadLetterStore` records the events whose handlers failed on every attempt. The outbox buses write
 theirs to `pyfly_outbox_dead_letters` in the unit that settles the delivery, with the consumer group, the
-subscription, the event and the last failure; `bus.outbox.dead_letters(group)` reads them. The Kafka and
+subscription, the event and the last failure; `bus.outbox.dead_letters(group)` reads them. So does the forwarder
+of a transactional publisher, for the events it failed to publish on every attempt
+(`publisher.dead_letters()`), unless the application defines the bean below. The Kafka and
 RabbitMQ buses dead-letter to their broker and record the event in the store the application defines as a
 bean, after the broker has it (best effort there: a failure is logged and counted, not retried, except that
 with the Kafka dead-letter topic off the store is the only copy and the record waits for it).
@@ -504,7 +642,8 @@ class DeadLetters:
         return SqlEdaDeadLetterStore("primary")
 ```
 
-Given such a bean, the outbox buses hand their dead letters to it instead of writing them in the settling unit.
+Given such a bean, the outbox buses and the forwarder hand their dead letters to it instead of writing them in
+the settling unit.
 
 ---
 

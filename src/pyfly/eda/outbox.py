@@ -19,7 +19,14 @@ was never published, and when it commits, the event is there for good. A relay i
 hands every committed event to its subscribers, at least once. There is no dual write, and nothing is lost
 to the order in which transactions commit.
 
-Four framework tables (:mod:`pyfly.data.relational.framework_schema`) hold an outbox, on any SQL backend:
+**The store is a port.** The relay (:class:`OutboxRelay`), the ``database`` and ``postgres`` buses, the
+forwarding relay that makes any broker transactional (:mod:`pyfly.eda.outbox_forwarding`) and the event-sourcing
+``TransactionalOutbox`` read and write through :class:`~pyfly.eda.ports.outbox.OutboxStore` alone.
+:class:`SqlOutboxStore` is its SQL adapter, described below (``Outbox``, its name before 26.09.08, is kept as an
+alias); the value types (:class:`~pyfly.eda.ports.outbox.Delivery`, :class:`~pyfly.eda.ports.outbox.Retention`,
+:class:`~pyfly.eda.ports.outbox.StartPosition`...) are the port's, and this module re-exports them.
+
+Four framework tables (:mod:`pyfly.data.relational.framework_schema`) hold a SQL outbox, on any SQL backend:
 
 - ``pyfly_outbox_events``: one row per event;
 - ``pyfly_outbox_consumers``: the consumer groups, and the destinations each consumes;
@@ -99,6 +106,16 @@ from pyfly.data.transaction.synchronization import TransactionSynchronizationAda
 from pyfly.domain.domain_event import to_json_value
 from pyfly.eda.dlq import EdaDeadLetterEntry, EdaDeadLetterStore
 from pyfly.eda.ports.outbound import EventHandler
+from pyfly.eda.ports.outbox import (
+    ADDRESSED_DESTINATION_PREFIX,
+    EVERY_DESTINATION,
+    Delivery,
+    OutboxStore,
+    PendingDelivery,
+    PruneResult,
+    Retention,
+    StartPosition,
+)
 from pyfly.eda.types import ErrorStrategy, EventEnvelope
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
 
@@ -111,13 +128,28 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-EVERY_DESTINATION = "*"
-"""The destination a consumer group registers to receive the events of every destination."""
-
-ADDRESSED_DESTINATION_PREFIX = "eventsourcing.outbox:"
-"""The destinations of the events owed only to the groups their append names (the event-sourcing
-:class:`~pyfly.eventsourcing.outbox.TransactionalOutbox` appends to ``eventsourcing.outbox:<name>``): a group
-registered for every destination is not owed them, nor given them when it starts at the earliest event."""
+__all__ = [
+    "ADDRESSED_DESTINATION_PREFIX",
+    "DEFAULT_PREFIX",
+    "EVERY_DESTINATION",
+    "Delivery",
+    "Outbox",
+    "OutboxRelay",
+    "OutboxSettings",
+    "OutboxStore",
+    "OutboxTables",
+    "PendingDelivery",
+    "PruneResult",
+    "RelayCounters",
+    "RelayState",
+    "Retention",
+    "SqlOutboxStore",
+    "StartPosition",
+    "Subscription",
+    "describe_error",
+    "encode_json",
+    "subscription_key",
+]
 
 DEFAULT_PREFIX = "pyfly_outbox"
 """The prefix of the default outbox tables (``pyfly_outbox_events`` and the others)."""
@@ -137,53 +169,6 @@ _CASE_CHUNK = 250
 # ---------------------------------------------------------------------------------------------------------
 
 
-class StartPosition(enum.Enum):
-    """Where a consumer group that registers for the first time starts."""
-
-    LATEST = "latest"
-    """With the events published after it registered (what a new Kafka, Redis or RabbitMQ consumer gets)."""
-    EARLIEST = "earliest"
-    """With every event the outbox still holds for its destinations, then the ones published after. An event
-    whose publishing unit is in flight while the group registers can be missed: its publish read the groups
-    before the registration committed, and the registration read the events before the publish committed."""
-
-    @classmethod
-    def of(cls, value: StartPosition | str) -> StartPosition:
-        """*value* as a start position (``latest`` or ``earliest``, any case)."""
-        if isinstance(value, StartPosition):
-            return value
-        try:
-            return cls(str(value).strip().lower())
-        except ValueError:
-            raise ValueError(f"A start position is 'latest' or 'earliest', got {value!r}") from None
-
-
-@dataclass(frozen=True)
-class Retention:
-    """How long the outbox keeps events.
-
-    - *delivered*: an event every group has handled is deleted once it is older than this (``None``: never).
-      The sweep reads past the events some group still owes: an abandoned group's backlog is read again at
-      every sweep (unregister the group, or set *max_age*);
-    - *max_age*: an event older than this is deleted with the deliveries still owed for it, whether or not
-      they were made (``None``: never; a group that stops consuming then keeps its events);
-    - *interval*: how often a relay sweeps, and *batch_size* how many events one statement deletes.
-    """
-
-    delivered: timedelta | None = timedelta(hours=1)
-    max_age: timedelta | None = None
-    interval: timedelta = timedelta(minutes=1)
-    batch_size: int = 1000
-
-    def __post_init__(self) -> None:
-        if self.batch_size < 1:
-            raise ValueError(f"Retention.batch_size must be at least 1, got {self.batch_size}")
-        for name in ("delivered", "max_age"):
-            value = getattr(self, name)
-            if value is not None and value < timedelta(0):
-                raise ValueError(f"Retention.{name} must not be negative, got {value}")
-
-
 @dataclass(frozen=True)
 class OutboxSettings:
     """The settings of an outbox bus, from ``pyfly.eda.outbox.*`` (see :meth:`from_config`)."""
@@ -199,18 +184,22 @@ class OutboxSettings:
     notify: bool | None = None
 
     @classmethod
-    def from_config(cls, config: Any, prefix: str = "pyfly.eda.outbox") -> OutboxSettings:
+    def from_config(
+        cls, config: Any, prefix: str = "pyfly.eda.outbox", *, defaults: OutboxSettings | None = None
+    ) -> OutboxSettings:
         """The settings under *prefix*: ``poll-interval`` (``5s``), ``batch-size`` (``100``), ``claim-timeout``
         (``300s``), ``handler-timeout`` (``60s``; ``0`` or ``none``: unbounded), ``start`` (``latest`` or
         ``earliest``), ``error-strategy`` (``DEAD_LETTER``), ``retention.delivered`` (``1h``; ``none``: keep),
         ``retention.max-age`` (unset: never), ``retention.interval`` (``1m``), ``retention.batch-size``
         (``1000``), ``auto-create-tables`` and ``notify`` (unset: the provider decides). Durations are seconds
         or ``500ms``, ``90s``, ``5m``, ``2h``. A value that does not parse raises ``ValueError`` naming the key.
+        A key that is not set takes its value from *defaults* (the forwarder's ``pyfly.eda.outbox.forward.*``
+        default to ``pyfly.eda.outbox.*``), or the default above.
         """
         from pyfly.config.properties.data import parse_bool, parse_int
         from pyfly.resilience.registry import parse_duration
 
-        defaults = cls()
+        defaults = defaults or cls()
 
         def raw(key: str) -> Any:
             value = config.get(f"{prefix}.{key}")
@@ -234,9 +223,9 @@ class OutboxSettings:
             value = seconds(key, None if default is None else default.total_seconds(), optional=True)
             return None if value is None else timedelta(seconds=value)
 
-        def flag(key: str) -> bool | None:
+        def flag(key: str, default: bool | None) -> bool | None:
             value = raw(key)
-            return None if value is None else parse_bool(value, f"{prefix}.{key}")
+            return default if value is None else parse_bool(value, f"{prefix}.{key}")
 
         strategy = raw("error-strategy")
         try:
@@ -261,7 +250,7 @@ class OutboxSettings:
             error_strategy=error_strategy,
             retention=Retention(
                 delivered=span("retention.delivered", defaults.retention.delivered),
-                max_age=span("retention.max-age", None),
+                max_age=span("retention.max-age", defaults.retention.max_age),
                 interval=interval if interval is not None else defaults.retention.interval,
                 batch_size=(
                     defaults.retention.batch_size
@@ -269,19 +258,9 @@ class OutboxSettings:
                     else parse_int(prune_batch, f"{prefix}.retention.batch-size")
                 ),
             ),
-            create_tables=flag("auto-create-tables"),
-            notify=flag("notify"),
+            create_tables=flag("auto-create-tables", defaults.create_tables),
+            notify=flag("notify", defaults.notify),
         )
-
-
-@dataclass(frozen=True)
-class PruneResult:
-    """What one retention sweep deleted: events every group had handled, and events past their maximum age
-    (with *undelivered* deliveries still owed for them)."""
-
-    delivered: int = 0
-    expired: int = 0
-    undelivered: int = 0
 
 
 @dataclass(frozen=True)
@@ -314,34 +293,6 @@ class OutboxTables:
     def all(self) -> tuple[Table, ...]:
         """Every table, in creation order."""
         return (self.events, self.deliveries, self.consumers, self.dead_letters)
-
-
-@dataclass(frozen=True)
-class Delivery:
-    """A delivery a relay claimed: the event, which attempt this is, and the subscriptions that handled it
-    already. *token* identifies the claim; settling the delivery needs it. *leased_until* is when the claim's
-    lease ends, and *due_at* when the delivery was due before it was claimed (a release gives it back there)."""
-
-    outbox_id: int
-    group: str
-    envelope: EventEnvelope
-    attempts: int
-    done: frozenset[str]
-    token: str
-    last_error: str | None = None
-    leased_until: datetime | None = None
-    due_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class PendingDelivery:
-    """A delivery the outbox still owes a group, as :meth:`Outbox.pending` reads it."""
-
-    outbox_id: int
-    envelope: EventEnvelope
-    attempts: int
-    available_at: datetime
-    last_error: str | None
 
 
 def encode_json(value: Any) -> str:
@@ -397,8 +348,9 @@ class _LeaseLost(Exception):
     """The delivery was claimed again by another relay after this one's lease ended: roll back its settling."""
 
 
-class Outbox:
-    """The outbox tables on one datasource, and the statements that write and read them.
+class SqlOutboxStore:
+    """The :class:`~pyfly.eda.ports.outbox.OutboxStore` on SQL: the outbox tables on one datasource, and the
+    statements that write and read them.
 
     *datasource* is where the tables live: a datasource name, a registry ``DataSource``, an ``AsyncEngine``,
     a transaction manager, or ``None`` (the default datasource). *tables* are the tables (by default the
@@ -479,6 +431,21 @@ class Outbox:
         from pyfly.data.relational.framework_schema import ensure_tables
 
         await ensure_tables(self._target, *self.tables.all(), create=self._create_tables)
+
+    async def stop(self) -> None:
+        """Nothing to release: the store holds no connection of its own (its datasource's registry owns the
+        pool). Idempotent."""
+
+    async def ping(self) -> None:
+        """Run ``SELECT 1`` on the store's datasource, outside the caller's units of work; raises when the
+        database cannot be reached (the buses' health indicators call it)."""
+        from sqlalchemy import text
+
+        from pyfly.data.transaction import infrastructure_unit, outside_transaction
+
+        with outside_transaction():
+            async with infrastructure_unit(self._target, read_only=True, single_statement=True) as session:
+                await session.execute(text("SELECT 1"))
 
     def _gap_locking(self) -> bool:
         """Whether the backend takes gap locks under its default isolation (InnoDB: MySQL and MariaDB)."""
@@ -1173,6 +1140,10 @@ class Outbox:
         return PruneResult(delivered=delivered, expired=expired, undelivered=undelivered)
 
 
+Outbox = SqlOutboxStore
+"""The name :class:`SqlOutboxStore` had before the outbox store became a port (26.09.08), kept as an alias."""
+
+
 # ---------------------------------------------------------------------------------------------------------
 # Subscriptions
 # ---------------------------------------------------------------------------------------------------------
@@ -1247,8 +1218,8 @@ class _WakeAfterCommit(TransactionSynchronizationAdapter):
 
 
 class OutboxRelay:
-    """Hands the events an :class:`Outbox` owes consumer group *group* to its subscriptions (see the module
-    documentation).
+    """Hands the events an outbox store (:class:`~pyfly.eda.ports.outbox.OutboxStore`: a :class:`SqlOutboxStore`,
+    or any other adapter) owes consumer group *group* to its subscriptions (see the module documentation).
 
     - *destinations*: what the group consumes (``None``: every destination); with *register* the relay
       registers the group for them when its first subscription arrives, starting at *start_position*.
@@ -1267,7 +1238,7 @@ class OutboxRelay:
 
     def __init__(
         self,
-        outbox: Outbox,
+        outbox: OutboxStore,
         *,
         group: str,
         destinations: Sequence[str] | None = None,
@@ -1348,8 +1319,8 @@ class OutboxRelay:
         return None if self._destinations is None else list(self._destinations)
 
     @property
-    def outbox(self) -> Outbox:
-        """The outbox the relay reads."""
+    def outbox(self) -> OutboxStore:
+        """The outbox store the relay reads."""
         return self._outbox
 
     @property
@@ -1588,7 +1559,7 @@ class OutboxRelay:
         on every event published to them is owed to the group, whether or not a relay runs. A registering relay
         does it before its first claim, and a bus when it starts with subscriptions. A publish never registers
         (in the publisher's unit it raced the relays that register the same group): the bus that publishes owes
-        its own events to its group instead (:meth:`Outbox.append`'s *include*)."""
+        its own events to its group instead (:meth:`OutboxStore.append`'s *include*)."""
         if self.registered:
             return
         from pyfly.data.transaction import after_commit

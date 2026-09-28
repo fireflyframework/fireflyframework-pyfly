@@ -18,6 +18,7 @@ runtime.
 5. [The @message_listener Decorator](#the-message_listener-decorator)
 6. [Delivery Guarantees](#delivery-guarantees)
    - [Listener Transactions](#listener-transactions)
+   - [Publishing from a Unit of Work](#publishing-from-a-unit-of-work)
 7. [Adapters](#adapters)
    - [InMemoryMessageBroker](#inmemorymessagebroker)
    - [KafkaAdapter](#kafkaadapter)
@@ -408,6 +409,38 @@ skipped a failed record, and `stop()` committed the offset of a handler it had j
 cancelled. The RabbitMQ adapter rejected a failed message without requeue into a queue
 with no dead-letter exchange, and ran a whole backlog at once with no prefetch. A
 listener whose transaction failed once lost its message.
+
+### Publishing from a Unit of Work
+
+The guarantees above are the consuming side's. On the producing side, `publish()` on a
+broker sends at once: called inside a `@transactional` method, it reaches the broker
+before the unit commits and stays there when the unit rolls back, and a process that
+dies between its commit and its publish never sends. That is a dual write, and the
+adapters of `pyfly.messaging` do not remove it.
+
+The transactional outbox of `pyfly.eda` does, for events published through the EDA
+`EventPublisher` (see [Any broker, transactional](events.md#any-broker-transactional-pyflyedaoutboxenabled)).
+With `pyfly.eda.outbox.enabled: true`, a publish on the Kafka, RabbitMQ or Redis bus
+is appended to the outbox tables in the caller's unit of work and forwarded to the
+broker after the commit:
+
+* **A unit that rolls back publishes nothing.**
+* **A unit that commits publishes at least once**: once in the normal path, again
+  after a failed publish, and again when a process died between the broker publish
+  and the settling of its delivery (after the lease, `pyfly.eda.outbox.forward.claim-timeout`).
+  Every copy carries the event's id in the `x-pyfly-event-id` header: deduplicate on
+  it, as a listener deduplicates what the container delivers again.
+* **Order holds per claim, not per group**: the events are claimed and published in
+  publication order, but a failed publish is attempted again after later events, and
+  several processes forward side by side.
+* **Several instances share the forwarding** of one outbox and one group, each event
+  forwarded by one of them; after the last attempt of a broker outage the event waits
+  in the outbox's dead letters (in the application's `EdaDeadLetterStore` when it
+  defines one as a bean).
+
+A message published through `MessageBrokerPort` itself has none of this: publish it
+after the commit (`pyfly.data.transaction.after_commit`) where losing it on a crash is
+acceptable, or through the EDA publisher where it is not.
 
 ## Adapters
 

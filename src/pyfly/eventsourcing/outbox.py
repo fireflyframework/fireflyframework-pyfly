@@ -21,6 +21,9 @@ lifecycle bean), hands every committed event to *publish*, attempts a failed one
 after *max_attempts* keeps it in the dead-letter table (:meth:`TransactionalOutbox.dead_letters`). Delivered
 events are pruned. Several processes may run the same outbox: each event is claimed by one of them.
 
+The outbox reads and writes through the :class:`~pyfly.eda.ports.outbox.OutboxStore` port: by default a
+:class:`~pyfly.eda.outbox.SqlOutboxStore` on the datasource it is given, or any store passed as *store*.
+
 Before 26.09.08 the outbox was a dictionary in the process: an event enqueued by a unit that then rolled
 back was published anyway, a restart lost everything pending, and nothing was ever removed.
 """
@@ -34,7 +37,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from pyfly.eda.outbox import ADDRESSED_DESTINATION_PREFIX, Outbox, OutboxRelay, OutboxTables, Retention
+from pyfly.eda.outbox import OutboxRelay, OutboxTables, SqlOutboxStore
+from pyfly.eda.ports.outbox import ADDRESSED_DESTINATION_PREFIX, OutboxStore, Retention
 from pyfly.eda.types import EventEnvelope
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
@@ -71,6 +75,8 @@ class TransactionalOutbox:
             the event again.
         datasource: where the outbox table lives: a datasource name, a registry ``DataSource``, an
             ``AsyncEngine``, or ``None`` (the default datasource).
+        store: the outbox store to run on instead (an :class:`~pyfly.eda.ports.outbox.OutboxStore`; then
+            neither *datasource*, *tables* nor *create_tables* applies).
         name: the outbox's name; outboxes with different names on one datasource deliver apart.
         max_attempts: the attempts before an event goes to the dead letters.
         poll_interval_s: how often the relay looks for events enqueued by other processes (an enqueue in this
@@ -100,12 +106,17 @@ class TransactionalOutbox:
         tables: OutboxTables | None = None,
         retention: Retention | None = None,
         owner: str | None = None,
+        store: OutboxStore | None = None,
     ) -> None:
         from pyfly.messaging.listener_container import ExponentialBackOff, RetryPolicy
 
+        if store is None:
+            store = SqlOutboxStore(datasource, tables=tables, create_tables=create_tables)
+        elif datasource is not None or tables is not None:
+            raise ValueError("TransactionalOutbox takes a store, or a datasource (and tables) to build one, not both")
         self._publish = publish
         self._group = f"{GROUP_PREFIX}{name}"
-        self._outbox = Outbox(datasource, tables=tables, create_tables=create_tables)
+        self._outbox: OutboxStore = store
         self._relay = OutboxRelay(
             self._outbox,
             group=self._group,
@@ -121,8 +132,8 @@ class TransactionalOutbox:
         self._relay.subscribe("*", self._forward)
 
     @property
-    def outbox(self) -> Outbox:
-        """The outbox table the events are written to."""
+    def outbox(self) -> OutboxStore:
+        """The outbox store the events are written to."""
         return self._outbox
 
     @property
@@ -151,13 +162,17 @@ class TransactionalOutbox:
         await self._publish(StoredEventEnvelope.from_json(json.dumps(envelope.payload)))
 
     async def start(self) -> None:
-        """Check (and create) the outbox tables and start the relay. Idempotent."""
+        """Start the outbox store (check and create its tables) and the relay. Idempotent."""
         await self._outbox.start()
         await self._relay.start()
 
     async def stop(self) -> None:
-        """Stop the relay; what it had not delivered stays in the table. Idempotent."""
-        await self._relay.stop()
+        """Stop the relay, then the store (also when the relay's stop raised); what it had not delivered stays in
+        the store. Idempotent."""
+        try:
+            await self._relay.stop()
+        finally:
+            await self._outbox.stop()
 
     async def pending(self) -> list[OutboxRecord]:
         """The events not delivered yet and still to be attempted (a dead-lettered one is not pending)."""

@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from pyfly.data.relational.datasource_registry import DataSourceRegistry
+    from pyfly.eda.outbox import SqlOutboxStore
 
 
 def _normalise_dsn(dsn: str) -> str:
@@ -80,8 +81,9 @@ class PostgresEventBus(DatabaseEventBus):
     builds a registry of its own for it (with the framework's pool and dialect setup), closed when it stops.
     With neither, the default datasource. *listen_dsn* is a direct URL for the ``LISTEN`` connection, *channel*
     the notification channel, *auto_create_tables* whether missing outbox tables are created. Every other
-    option is :class:`~pyfly.eda.adapters.database.DatabaseEventBus`'s. A publish after :meth:`stop` on a bus
-    that built its own registry builds it for that publish alone, and closes it again.
+    option is :class:`~pyfly.eda.adapters.database.DatabaseEventBus`'s, except *store*: this bus runs on the
+    SQL outbox store it builds (``DatabaseEventBus(store=...)`` runs on another). A publish after :meth:`stop`
+    on a bus that built its own registry builds it for that publish alone, and closes it again.
     """
 
     def __init__(
@@ -99,6 +101,8 @@ class PostgresEventBus(DatabaseEventBus):
     ) -> None:
         if dsn and datasource is not None:
             raise ValueError("PostgresEventBus takes a dsn or a datasource, not both")
+        if options.get("store") is not None:
+            raise ValueError("PostgresEventBus runs on the SQL outbox store (DatabaseEventBus runs on any store)")
         self._dsn = _sqlalchemy_url(dsn) if dsn else None
         self._own_registry: DataSourceRegistry | None = None
         super().__init__(
@@ -112,8 +116,14 @@ class PostgresEventBus(DatabaseEventBus):
             **options,
         )
 
+    @property
+    def _store(self) -> SqlOutboxStore:
+        store = self.sql_store
+        assert store is not None  # built by DatabaseEventBus from the datasource
+        return store
+
     async def _resolve(self) -> None:
-        if self._dsn is None or self.outbox.datasource is not None:
+        if self._dsn is None or self._store.datasource is not None:
             return
         from pyfly.core.config import Config
         from pyfly.data.relational.datasource_registry import DataSourceRegistry
@@ -123,15 +133,15 @@ class PostgresEventBus(DatabaseEventBus):
             registry = DataSourceRegistry(Config({"pyfly": {"data": {"relational": {"url": self._dsn}}}}))
             self._own_registry = registry
             datasource = registry.primary
-        self.outbox.use_datasource(datasource)
+        self._store.use_datasource(datasource)
 
     def _owns_datasource(self) -> bool:
-        return self._dsn is not None and (self._own_registry is not None or self.outbox.datasource is None)
+        return self._dsn is not None and (self._own_registry is not None or self._store.datasource is None)
 
     async def _release_datasource(self) -> None:
         registry, self._own_registry = self._own_registry, None
         if registry is not None:
-            self.outbox.use_datasource(None)
+            self._store.use_datasource(None)
             await registry.close()
 
 
