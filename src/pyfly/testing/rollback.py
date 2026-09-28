@@ -27,8 +27,9 @@ transaction manager is replaced, in the context's ``TransactionManagerRegistry``
 of work of the test as a savepoint of that transaction. Repository calls, ``@transactional`` services,
 ``SessionProvider`` units, the ``AsyncSession`` bean inside a unit and the framework stores all find it.
 Each unit still completes on its own (its savepoint is released or rolled back, and its after-commit
-callbacks run), so a failing unit leaves the test's earlier writes in place, on PostgreSQL too. On exit the
-datasource's own manager is back and the transaction rolls back.
+callbacks run), so a failing unit leaves the test's earlier writes in place, on PostgreSQL too. A read that
+ends well releases its savepoint (in production it rolls back, which undoes nothing), so what a loop writes
+while it reads a stream stays. On exit the datasource's own manager is back and the transaction rolls back.
 
 The units of the task that entered the block, and of the tasks it starts, take part; the context's own
 background work (started before the block) keeps running on the datasource's own connections and commits.
@@ -37,7 +38,13 @@ What differs from production, by construction:
 - every unit of a datasource runs on one connection: units that overlap in time (tasks that each open a
   unit of their own and run at the same time) cannot share it, so run them one after another. A unit that
   starts while another task's unit is open there is refused with ``IllegalTransactionStateError`` before
-  it touches the connection, and the test's transaction goes on;
+  it touches the connection, and the test's transaction goes on. A task may start units in tasks it waits
+  for; one that writes on through its own unit while such a unit is open writes inside that unit's
+  savepoint, and when that unit rolls back the writing unit is marked rollback-only (its commit fails with
+  ``UnexpectedRollbackError``) instead of losing the write;
+- a stream reads its rows when its statement runs, not through a server-side cursor: a cursor left open on
+  the shared connection would hang the other units' statements on MySQL and MariaDB, and on SQLite the scan
+  would see the rows the test writes meanwhile;
 - ``REQUIRES_NEW`` gets a savepoint too, so the outer unit's rollback undoes it;
 - the settings of a transaction are the test transaction's: a unit's isolation level, read-only hint and
   SQLite ``BEGIN IMMEDIATE`` are not applied (a read-only unit still refuses ORM writes), and what a unit sets
@@ -46,7 +53,9 @@ What differs from production, by construction:
   too: a plain SQLite engine gets its ``BEGIN`` from the test's connection, and an ``AUTOCOMMIT`` engine the
   database's default isolation level;
 - DDL inside the test commits on MySQL and MariaDB (their DDL ends the transaction), and a session the
-  application opens itself outside every unit (``async with factory() as session``) commits for real.
+  application opens itself outside every unit (``async with factory() as session``) commits for real, as
+  does a unit of ``@transactional(manager=...)`` naming a manager instance of its own (only the managers of
+  the context's ``TransactionManagerRegistry`` are replaced).
 
 Only relational datasources roll back; a document datasource (MongoDB) is left alone.
 """

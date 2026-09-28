@@ -774,13 +774,22 @@ each covered datasource holds one connection with a transaction open, and the da
 runs every unit of work of the test as a savepoint of that transaction: repository calls, `@transactional`
 services, `SessionProvider` units and the framework stores all take part. Each unit still completes on its own
 (its savepoint is released or rolled back, its after-commit callbacks run), so a failing unit leaves the
-test's earlier writes in place, on PostgreSQL too. What differs from production, by construction:
+test's earlier writes in place, on PostgreSQL too. A read that ends well releases its savepoint (in production
+it rolls back, which undoes nothing), so what a loop writes while it reads a stream (`stream_all()` outside a
+transaction, a save per row) stays, as in production. What differs from production, by construction:
 
 - every unit of a datasource runs on one connection, so the units must nest: tasks that each open a unit of
   their own and run at the same time (`asyncio.gather` of `@transactional` calls or of repository calls, a
   background task started during the test) cannot share it. A unit that starts while another task's unit is
   open there is refused with `IllegalTransactionStateError`, and the test goes on; run such work one after
-  another. A task that waits for the units of tasks it started is fine;
+  another. A task that waits for the units of tasks it started is fine; one that writes on through its own unit
+  while such a unit is open writes inside that unit's savepoint, so when that unit rolls back, the writing
+  unit is marked rollback-only and its commit fails with `UnexpectedRollbackError` (caused by an
+  `IllegalTransactionStateError` that says why) instead of losing the write;
+- a stream (`stream_all()`, `session.stream()`) reads its rows when its statement runs, not through a
+  server-side cursor: a cursor left open on the shared connection would hang the other units' statements on
+  MySQL and MariaDB, and on SQLite the scan would see the rows the test writes meanwhile. It holds the rows
+  of its statement's start, as in production;
 - `REQUIRES_NEW` gets a savepoint too, so the outer unit's rollback undoes it;
 - a unit's isolation level, read-only hint and SQLite `BEGIN IMMEDIATE` are the test transaction's (a
   read-only unit still refuses ORM writes), and what a unit sets with `SET LOCAL` lasts until the test ends
@@ -788,7 +797,8 @@ test's earlier writes in place, on PostgreSQL too. What differs from production,
   plain SQLite engine (without PyFly's `BEGIN` handling) the test's connection sends its `BEGIN` itself, and
   an engine that runs in `AUTOCOMMIT` gets the database's default isolation level for the test;
 - DDL inside the test commits on MySQL and MariaDB, and a session the code opens itself outside every unit
-  commits for real;
+  commits for real, as does a unit of `@transactional(manager=...)` naming a manager instance of its own
+  (the test replaces the managers of the context's `TransactionManagerRegistry` only);
 - the context's background work started before the test runs on its own connections and commits.
 
 Only relational datasources roll back. Use a SQLite **file** (`tmp_path`) or a server for data tests, never

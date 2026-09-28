@@ -22,19 +22,30 @@ writes in place, even on PostgreSQL, where a failed statement ends the whole tra
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import Any
 
 import pytest
 from sqlalchemy import Integer, String, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
 from pyfly.container.bean import bean
 from pyfly.container.stereotypes import configuration, repository, service
+from pyfly.data.query import query
 from pyfly.data.relational.sqlalchemy import Base, Repository
+from pyfly.data.relational.sqlalchemy.repository import STREAM_FIRST_BATCH
 from pyfly.data.relational.sqlalchemy.session import SessionProvider
-from pyfly.data.transaction import Isolation, Propagation, transactional
+from pyfly.data.transaction import (
+    IllegalTransactionStateError,
+    Isolation,
+    Propagation,
+    UnexpectedRollbackError,
+    transactional,
+)
 from pyfly.kernel.exceptions import DuplicateKeyException
 from pyfly.testing import data_slice
 from tests.support.backend_matrix import RelationalBackend
@@ -50,6 +61,12 @@ class _RollbackNote(Base):
 @repository
 class NoteRepository(Repository[_RollbackNote, int]):
     async def find_by_body(self, body: str) -> _RollbackNote | None: ...
+
+
+@repository
+class MissingTableRepository(Repository[_RollbackNote, int]):
+    @query("SELECT count(*) FROM wp11_rollback_missing", native=True)
+    async def count_missing(self) -> int: ...
 
 
 @service
@@ -81,6 +98,32 @@ class NoteService:
     @transactional(read_only=True, isolation=Isolation.SERIALIZABLE)
     async def bodies(self) -> list[str]:
         return sorted(note.body for note in await self._notes.find_all())
+
+
+@service
+class ParentChildService:
+    """A parent unit that starts a child task with a unit of its own, and writes on while the child's unit is
+    open, instead of waiting for it."""
+
+    def __init__(self, notes: NoteRepository) -> None:
+        self._notes = notes
+        self.child_started = asyncio.Event()
+
+    @transactional
+    async def write_beside_a_failing_child(self) -> None:
+        await self._notes.save(_RollbackNote(body="parent-1"))
+        child = asyncio.create_task(self.child_fails_later())
+        await self.child_started.wait()
+        await self._notes.save(_RollbackNote(body="parent-2"))  # the child's unit is still open
+        with pytest.raises(ValueError, match="the child fails"):
+            await child
+
+    @transactional(propagation=Propagation.REQUIRES_NEW)
+    async def child_fails_later(self) -> None:
+        await self._notes.save(_RollbackNote(body="child"))
+        self.child_started.set()
+        await asyncio.sleep(0.2)
+        raise ValueError("the child fails")
 
 
 async def _committed(backend: RelationalBackend) -> int:
@@ -143,6 +186,83 @@ async def test_nested_steps_roll_back_to_their_savepoint(relational_backend: Rel
         notes_service = context.get_bean(NoteService)
         await notes_service.add_with_a_failed_step("outer")
         assert await notes_service.bodies() == ["outer"]
+
+
+@pytest.mark.parametrize("rollback", [False, True], ids=["production", "rollback"])
+async def test_what_a_loop_writes_while_it_reads_a_stream_stays(
+    relational_backend: RelationalBackend, rollback: bool
+) -> None:
+    """A stream read outside a transaction keeps its read auto unit open while the loop body runs, and the units
+    the loop completes meanwhile get savepoints inside that unit's. The read unit's end releases its savepoint:
+    rolling it back, as a read unit ends in production, undid every copy the loop saved, with no error.
+
+    More rows than a stream's first batch: the stream is read on the test's connection, which the loop's units
+    share, so it reads its rows when it opens. With its cursor open, the loop's statements hung the connection
+    on MySQL and MariaDB, and on SQLite the scan went on into the copies the loop had just written."""
+    seeds = STREAM_FIRST_BATCH + 2
+    await relational_backend.create_tables(_RollbackNote)
+    async with await data_slice(NoteRepository, config=relational_backend.config(), rollback=rollback) as context:
+        notes = context.get_bean(NoteRepository)
+        for number in range(seeds):
+            await notes.save(_RollbackNote(body=f"seed-{number}"))
+        copied = 0
+        async with contextlib.aclosing(notes.stream_all()) as stream:
+            async for note in stream:
+                await notes.save(_RollbackNote(body=f"copy-{note.body}"))
+                copied += 1
+        assert copied == seeds
+        assert await notes.count() == 2 * seeds
+        with pytest.raises(ValueError, match="the loop stops"):  # a loop that fails keeps what it wrote before
+            async with contextlib.aclosing(notes.stream_all()) as stream:
+                async for note in stream:
+                    await notes.save(_RollbackNote(body=f"again-{note.body}"))
+                    raise ValueError("the loop stops")
+        assert await notes.count() == 2 * seeds + 1
+    assert await _committed(relational_backend) == (0 if rollback else 2 * seeds + 1)
+
+
+async def test_a_failed_read_leaves_the_test_transaction_usable(relational_backend: RelationalBackend) -> None:
+    """A read unit whose statement fails rolls back to its savepoint (a read unit that ends well releases it): on
+    PostgreSQL, where the failure aborts the transaction, the test goes on writing."""
+    await relational_backend.create_tables(_RollbackNote)
+    async with await data_slice(
+        NoteRepository, MissingTableRepository, config=relational_backend.config(), rollback=True
+    ) as context:
+        notes = context.get_bean(NoteRepository)
+        await notes.save(_RollbackNote(body="before"))
+        with pytest.raises(DBAPIError):
+            await context.get_bean(MissingTableRepository).count_missing()
+        await notes.save(_RollbackNote(body="after"))
+        assert sorted(note.body for note in await notes.find_all()) == ["after", "before"]
+    assert await _committed(relational_backend) == 0
+
+
+@pytest.mark.backends("pg", "mysql", "mariadb")
+@pytest.mark.parametrize("rollback", [False, True], ids=["production", "rollback"])
+async def test_a_parent_that_writes_inside_a_childs_unit_fails_instead_of_losing_the_write(
+    relational_backend: RelationalBackend, rollback: bool
+) -> None:
+    """The child's unit starts inside the parent's (the parent's task started it), but the parent writes on
+    instead of waiting: on the test's one connection that write runs inside the child's savepoint, and the
+    child's rollback undid it, with no error. The parent's unit is marked rollback-only instead, and its
+    commit fails naming why; in production each unit has a connection of its own."""
+    await relational_backend.create_tables(_RollbackNote)
+    async with await data_slice(
+        NoteRepository, ParentChildService, config=relational_backend.config(), rollback=rollback
+    ) as context:
+        notes = context.get_bean(NoteRepository)
+        family = context.get_bean(ParentChildService)
+        if not rollback:
+            await family.write_beside_a_failing_child()
+            assert sorted(note.body for note in await notes.find_all()) == ["parent-1", "parent-2"]
+            return
+        with pytest.raises(UnexpectedRollbackError) as failure:
+            await family.write_beside_a_failing_child()
+        assert isinstance(failure.value.__cause__, IllegalTransactionStateError)
+        assert "inside that unit's savepoint" in str(failure.value.__cause__)
+        assert await notes.count() == 0  # the parent rolled back whole, as the child did
+        await notes.save(_RollbackNote(body="after"))  # and the test's transaction goes on
+        assert await notes.count() == 1
 
 
 async def test_the_original_transaction_managers_are_back_after_the_test(
