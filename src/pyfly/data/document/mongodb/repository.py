@@ -337,6 +337,7 @@ class MongoRepository(Generic[T, ID]):
         self._transaction_managers: TransactionManagerRegistry | None = None
         self._sort_names: PropertyResolver | None = None
         self._filter_names: PropertyResolver | None = None
+        self._field_names: PropertyResolver | None = None
         self._is_new_hook = _persistable_hook(self._model)
         # An allow-list with a typo fails here, when the context builds the repository, not on the first read.
         if type(self).__sortable__ is not None:
@@ -558,17 +559,28 @@ class MongoRepository(Generic[T, ID]):
         filter of an inheritance hierarchy (what Beanie's own queries add)."""
         return cast(dict[str, Any], self._model.find(filter_document).get_filter_query())  # type: ignore[attr-defined]
 
-    def _order_path(self, order: Order) -> str:
-        return field_path(self._model, order.property, usage="sort", resolver=self._sort_resolver())
+    def _order_path(self, order: Order, *, trusted: bool = False) -> str:
+        """The stored name of *order*'s property: any field of the document for an order the repository's own
+        code declares (*trusted*: a derived query's ``order_by``), the ``__sortable__`` fields for any other."""
+        if trusted:
+            if self._field_names is None:
+                self._field_names = PropertyResolver.for_entity(self._model)
+            resolver = self._field_names
+        else:
+            resolver = self._sort_resolver()
+        return field_path(self._model, order.property, usage="sort", resolver=resolver)
 
-    def _sort_plan(self, sort: Sort | None, *, tiebreak: bool = False) -> tuple[list[tuple[str, int]], dict[str, Any]]:
+    def _sort_plan(
+        self, sort: Sort | None, *, tiebreak: bool = False, trusted: int = 0
+    ) -> tuple[list[tuple[str, int]], dict[str, Any]]:
         """The sort specification of *sort* and the computed keys it needs (``$addFields``): a key per order that
         ignores case, and a NULL key per order whose NULL placement is not MongoDB's own (first ascending, last
-        descending). With *tiebreak*, ``_id`` ends the orders (deterministic pages)."""
+        descending). With *tiebreak*, ``_id`` ends the orders (deterministic pages). The first *trusted* orders
+        are the repository's own (a derived query's ``order_by``): ``__sortable__`` does not narrow them."""
         spec: list[tuple[str, int]] = []
         computed: dict[str, Any] = {}
         for index, order in enumerate(sort.orders if sort is not None else ()):
-            path = self._order_path(order)
+            path = self._order_path(order, trusted=index < trusted)
             direction = pymongo.ASCENDING if order.direction == "asc" else pymongo.DESCENDING
             nulls = order.null_handling
             native_first = order.direction == "asc"
@@ -598,10 +610,11 @@ class MongoRepository(Generic[T, ID]):
         skip: int | None = None,
         limit: int | None = None,
         tiebreak: bool = False,
+        trusted: int = 0,
     ) -> list[T]:
         """The documents matching *filter_document*, sorted and cut (one ``find``, or one ``aggregate`` when
         an order needs computed keys)."""
-        spec, computed = self._sort_plan(sort, tiebreak=tiebreak)
+        spec, computed = self._sort_plan(sort, tiebreak=tiebreak, trusted=trusted)
         model = self._model
         if computed:
             pipeline: list[dict[str, Any]] = [
@@ -637,24 +650,34 @@ class MongoRepository(Generic[T, ID]):
             found = await self._collection().find_one(self._criteria(filter_document), {ID_FIELD: 1}, session=session)
         return found is not None
 
-    async def _page(self, filter_document: dict[str, Any], pageable: Pageable) -> Page[T]:
+    async def _page(self, filter_document: dict[str, Any], pageable: Pageable, *, trusted: int = 0) -> Page[T]:
         if not pageable.is_paged:
-            items = await self._find(filter_document, sort=pageable.sort)
+            items = await self._find(filter_document, sort=pageable.sort, trusted=trusted)
             return Page(items=items, total=len(items), page=pageable.page, size=len(items) or 1)
         items = await self._find(
-            filter_document, sort=pageable.sort, skip=pageable.offset, limit=pageable.size, tiebreak=True
+            filter_document,
+            sort=pageable.sort,
+            skip=pageable.offset,
+            limit=pageable.size,
+            tiebreak=True,
+            trusted=trusted,
         )
         total = _total_from_content(pageable, len(items))
         if total is None:
             total = await self._count(filter_document)
         return Page(items=items, total=total, page=pageable.page, size=pageable.size)
 
-    async def _slice(self, filter_document: dict[str, Any], pageable: Pageable) -> Slice[T]:
+    async def _slice(self, filter_document: dict[str, Any], pageable: Pageable, *, trusted: int = 0) -> Slice[T]:
         if not pageable.is_paged:
-            items = await self._find(filter_document, sort=pageable.sort)
+            items = await self._find(filter_document, sort=pageable.sort, trusted=trusted)
             return Slice(items=items, page=pageable.page, size=len(items) or 1, has_next=False)
         rows = await self._find(
-            filter_document, sort=pageable.sort, skip=pageable.offset, limit=pageable.size + 1, tiebreak=True
+            filter_document,
+            sort=pageable.sort,
+            skip=pageable.offset,
+            limit=pageable.size + 1,
+            tiebreak=True,
+            trusted=trusted,
         )
         has_next = len(rows) > pageable.size
         return Slice(items=rows[: pageable.size], page=pageable.page, size=pageable.size, has_next=has_next)

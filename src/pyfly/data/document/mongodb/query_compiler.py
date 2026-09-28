@@ -139,14 +139,16 @@ class MongoDerivedQuery:
         self, repository: Any, filter_document: dict[str, Any], *, pageable: Pageable | None, sort: Sort | None
     ) -> Any:
         kind = self.shape.kind
+        # The name's own orders are the repository's: __sortable__ narrows only the caller's Sort or Pageable.
+        trusted = len(self.parsed.order_clauses)
         if kind is ResultKind.PAGE or kind is ResultKind.SLICE:
             if pageable is None:
                 raise InvalidQueryMethodError(f"{self.name}: a Page or Slice result needs a Pageable argument")
             ordered = Pageable(page=pageable.page, size=pageable.size, sort=self.orders(pageable.sort))
             if kind is ResultKind.PAGE:
-                page: Page[Any] = await repository._page(filter_document, ordered)
+                page: Page[Any] = await repository._page(filter_document, ordered, trusted=trusted)
                 return page
-            window: Slice[Any] = await repository._slice(filter_document, ordered)
+            window: Slice[Any] = await repository._slice(filter_document, ordered, trusted=trusted)
             return window
         order = self.orders(pageable.sort if pageable is not None else sort)
         skip = pageable.offset if pageable is not None and pageable.is_paged else None
@@ -154,10 +156,10 @@ class MongoDerivedQuery:
         if kind is ResultKind.ONE:
             limit = 2
         if self.shape.element in (ElementKind.PROJECTION, ElementKind.MAPPING):
-            rows = await _raw_rows(repository, filter_document, order, skip, limit, self._projected_paths())
+            rows = await _raw_rows(repository, filter_document, order, skip, limit, self._projected_paths(), trusted)
             results: list[Any] = [self._shape_row(row) for row in rows]
         else:
-            results = await repository._find(filter_document, sort=order, skip=skip, limit=limit)
+            results = await repository._find(filter_document, sort=order, skip=skip, limit=limit, trusted=trusted)
         if kind is ResultKind.ONE:
             if len(results) > 1:
                 raise IncorrectResultSizeException(
@@ -204,8 +206,9 @@ async def _raw_rows(
     skip: int | None,
     limit: int | None,
     projection: dict[str, int] | None,
+    trusted: int = 0,
 ) -> list[dict[str, Any]]:
-    spec, computed = repository._sort_plan(order)
+    spec, computed = repository._sort_plan(order, trusted=trusted)
     criteria_document = repository._criteria(filter_document)
     async with repository._operation() as session:
         collection = repository._collection()

@@ -247,6 +247,29 @@ async def test_a_derived_query_on_an_unknown_field_fails_at_startup_instead_of_d
     assert await MongoRepository(SemNote).count() == 2
 
 
+async def test_sortable_narrows_the_callers_sort_but_not_a_derived_order_by(db: BeanieDatabase) -> None:
+    class Narrowed(MongoRepository[SemNote, str]):
+        __sortable__ = ("title",)
+
+        async def find_by_status_order_by_score_desc(self, status: str) -> list[SemNote]: ...
+
+        async def find_by_status(self, status: str, sort: Sort) -> list[SemNote]: ...
+
+    repository = Narrowed()
+    MongoRepositoryBeanPostProcessor().after_init(repository, "narrowed")
+    await repository.save_all([SemNote(title=t, status="s", score=n) for t, n in (("a", 1), ("b", 3), ("c", 2))])
+    assert [note.title for note in await repository.find_by_status_order_by_score_desc("s")] == ["b", "c", "a"]
+    assert [note.title for note in await repository.find_by_status("s", Sort.by(Order.desc("title")))] == [
+        "c",
+        "b",
+        "a",
+    ]
+    with pytest.raises(InvalidPropertyError):
+        await repository.find_by_status("s", Sort.by("score"))
+    with pytest.raises(InvalidPropertyError):
+        await repository.find_all(Sort.by("score"))
+
+
 async def test_a_derived_query_by_id_converts_the_id(db: BeanieDatabase) -> None:
     repository = _notes()
     saved = await repository.save_all([SemNote(title="by-id"), SemNote(title="other")])
