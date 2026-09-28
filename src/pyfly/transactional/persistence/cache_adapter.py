@@ -27,6 +27,13 @@ a state saved or deleted inside a unit of work is written once the unit commits,
 back; outside one it is written at once. Reads always run at once (a state saved in the current unit is not
 seen before the commit). The cache holds the state's JSON text, never a live object: a live ORM entity a
 step returned is stored as its text, not referenced.
+
+Concurrent writes are ordered differently than by the SQL provider, whose write outside the unit waits for the
+row lock of a unit that wrote the same execution: here it lands at once, and the unit's deferred write lands
+after it, at the commit. The engines never write one execution's state from two tasks at once (a background
+workflow run started inside a unit starts after that unit commits,
+:class:`~pyfly.transactional.workflow.engine.WorkflowEngine`), so this shows only when an application writes
+an execution's state itself, inside a unit and outside it at the same time.
 """
 
 from __future__ import annotations

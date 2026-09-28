@@ -1213,6 +1213,17 @@ work is written once the unit commits and dropped if it rolls back, and outside
 a unit it is written at once. The cache holds the state's JSON text, never a
 live object.
 
+The two providers order concurrent writes differently, though. A write the SQL
+provider makes outside the unit waits for the row lock of the unit that wrote
+the same execution, so it lands after that unit's commit. The cache provider
+writes it at once, and the unit's deferred write lands after it, at the commit.
+The engines never write one execution's state from two tasks at once: a saga or
+TCC writes its state from the task that runs it, and a background workflow run
+started inside a unit starts after that unit commits (see
+[Background runs and shutdown](#background-runs-and-shutdown)). The difference
+shows only when an application writes an execution's state itself, inside a
+unit and outside it at the same time.
+
 ### InMemoryPersistenceAdapter
 
 A standalone in-memory `TransactionalPersistencePort` that stores all state in
@@ -1962,7 +1973,35 @@ workflow_registry._definitions[definition.id] = definition  # or expose register
 
 An ASYNC workflow (and `WorkflowEngine.start_async`) runs in a background task
 started with the transaction state cleared, so it never joins, nor outlives, the
-caller's unit of work. The auto-configured `WorkflowRuns` bean (a lifecycle bean
+caller's unit of work.
+
+**Started inside a unit of work** (`@transactional`, a `TransactionTemplate`
+block, a `@transactional` step), the run starts once that unit commits, as
+Spring's `TransactionSynchronization.afterCommit` would start it. Its `PENDING`
+state is saved in the unit (the `sqlalchemy` provider joins it, the `cache`
+provider writes it at the commit), and the run is started by an after-commit
+synchronization registered right after that save. The states the run writes
+(`RUNNING`, then its final state) therefore always come after `PENDING`, with
+every provider. The other outcomes:
+
+- **The unit rolls back.** The run never starts, and its `PENDING` state is
+  deleted: a provider outside the unit (`memory`, `redis`, or `sqlalchemy` on
+  another datasource) wrote it at once.
+- **The commit outcome is unknown** (`CommitOutcomeUnknownError`). The run is not
+  started, a warning names it, and its `PENDING` state is kept, since the unit may
+  have committed. The recovery scan reports it once it is stale.
+- **The unit commits while the engine drains** (the context is stopping). The
+  run is not started either: a warning names it, and its `PENDING` state is kept.
+
+`start` and `start_async` still return `PENDING` at once, but the run does not
+progress before the commit, so do not wait inside the unit for it to progress
+(its signals, its queries, its completion). A start inside a
+`Propagation.NESTED` scope that rolls back to its savepoint still runs when the
+unit commits: synchronizations belong to the unit, not to a savepoint. Outside a
+unit of work the run starts at once. Through 26.09.07 the run started at once
+inside a unit too, so a caller that rolled back still ran the workflow.
+
+The auto-configured `WorkflowRuns` bean (a lifecycle bean
 of `CONSUMER_PHASE`) drains those runs when the application context stops,
 before any `@pre_destroy`: a run started just before shutdown (by a one-shot
 shell command, say) completes, and so do the fire-and-forget `async_` steps the
