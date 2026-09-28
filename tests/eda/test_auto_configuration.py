@@ -562,10 +562,13 @@ class TestAutoOutboxStoreInAnApplicationContext:
         replica-set lane runs such a context for real (``tests/integration/test_mongo_outbox_application.py``)."""
         import pytest
 
+        from pyfly.context.application_context import ApplicationContext
+        from pyfly.data.relational.auto_configuration import DataSourceAutoConfiguration
+
         for provider in ("memory", "database"):
-            with pytest.raises(Exception) as raised:
-                context = await self._start(
-                    {
+            context = ApplicationContext(
+                pyfly_config(
+                    base={
                         "pyfly.data.document.enabled": "true",
                         "pyfly.data.document.uri": "mongodb://localhost:1",
                         "pyfly.data.document.server-selection-timeout": "0.2",
@@ -573,7 +576,14 @@ class TestAutoOutboxStoreInAnApplicationContext:
                         "pyfly.eda.outbox.enabled": "true",
                     }
                 )
-                await context.stop()
+            )
+            context.register_bean(DataSourceAutoConfiguration)
+            context.register_bean(EdaAutoConfiguration)
+            try:
+                with pytest.raises(Exception) as raised:
+                    await context.start()
+            finally:
+                await context.stop()  # the lifecycle beans that started before the failure (the domain events')
             chain = _cause_chain(raised.value)
             assert not any("No primary datasource" in link for link in chain), (provider, chain)
             assert _raised_in(raised.value, "mongo_outbox.py", "start"), (provider, chain)
