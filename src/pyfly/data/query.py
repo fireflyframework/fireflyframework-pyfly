@@ -105,9 +105,10 @@ def modifying(
 ) -> Any:
     """Mark a ``@query`` method as a statement that changes rows (``UPDATE``, ``DELETE``, ``INSERT``).
 
-    The method returns the number of rows the statement changed (or ``None`` when annotated ``-> None``), and
-    runs in a write unit of work. Without it, a changing statement is refused when the repository is built.
-    Use it bare (``@modifying``) or with options (:class:`ModifyingOptions`), above or below ``@query``.
+    The method returns the number of rows the statement changed (annotated ``-> int`` or ``-> int | None``; it
+    returns ``None`` when annotated ``-> None``), and runs in a write unit of work. Without it, a changing
+    statement is refused when the repository is built. Use it bare (``@modifying``) or with options
+    (:class:`ModifyingOptions`), above or below ``@query``.
     """
     options = ModifyingOptions(flush_automatically=flush_automatically, clear_automatically=clear_automatically)
 

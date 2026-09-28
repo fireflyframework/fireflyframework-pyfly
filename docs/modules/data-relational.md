@@ -711,7 +711,7 @@ class OrderRepository(Repository[Order, UUID]):
     async def find_several(self, ids: list[UUID]) -> list[Order]: ...
 ```
 
-Named parameters (`:param_name`) are the method's parameters, and in JPQL `?1` is the first one after `self`; the method takes its arguments by position or by keyword. `IN (:ids)` (or `IN :ids`) binds a collection (a list, a tuple, a set...), one value per element. A `UUID` binds as SQLAlchemy's `Uuid` and an aware `datetime` as `UtcDateTime` (a collection of them by its elements), as entity columns of those types store them; other values bind as the driver takes them. A parameter the query does not declare, or a `:name` the method does not have, fails at startup.
+Named parameters (`:param_name`) are the method's parameters, and in JPQL `?1` is the first one after `self`; the method takes its arguments by position or by keyword. `IN (:ids)` (or `IN :ids`) binds a collection (a list, a tuple, a set...), one value per element. A `UUID` binds as SQLAlchemy's `Uuid` and an aware `datetime` as `UtcDateTime` (a collection of them by its elements), as entity columns of those types store them; other values bind as the driver takes them. A parameter the query does not declare, or a `:name` the method does not have, fails at startup, and so does a `Pageable` or `Sort` parameter (before 26.09.08 it was silently ignored): write `ORDER BY` and `LIMIT` in the query, or page a derived query.
 
 ### Native SQL
 
