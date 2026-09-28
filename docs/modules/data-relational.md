@@ -590,7 +590,7 @@ A derived method is checked against its entity when the repository is built, as 
 | `list[T]`, with a `sort: Sort` parameter | every match, sorted (names validated, as `find_all(Sort)` validates them) |
 | `list[P]` or `P \| None`, `P` a `@projection` | objects with the projection's fields, selecting only those columns |
 
-`count_by_` returns `int`, `exists_by_` returns `bool` (one `SELECT 1 ... LIMIT 1`, never a `COUNT` of every match), and `delete_by_` returns the number of deleted rows (`-> int` or no annotation), nothing (`-> None`), or the deleted entities (`-> list[T]`). Arguments bind by position or by keyword: `await repo.find_by_status_and_role(role="admin", status="open")`.
+`count_by_` returns `int`, `exists_by_` returns `bool` (one `SELECT 1 ... LIMIT 1`, never a `COUNT` of every match), whether annotated `int` and `bool`, `int | None` and `bool | None` (they never return `None`), or not at all, and `delete_by_` returns the number of deleted rows (`-> int`, `-> int | None` or no annotation), nothing (`-> None`), or the deleted entities (`-> list[T]`). Arguments bind by position or by keyword: `await repo.find_by_status_and_role(role="admin", status="open")`.
 
 ### Operators and Precedence
 

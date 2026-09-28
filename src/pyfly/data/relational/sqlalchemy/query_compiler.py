@@ -47,8 +47,9 @@ What each prefix runs:
 * ``find_by``   -> ``SELECT`` of the entity (or a projection's columns), shaped by the return annotation:
   ``list[T]``, ``T | None`` (``IncorrectResultSizeException`` when two rows match), ``Page[T]`` or
   ``Slice[T]`` with a ``Pageable`` argument, and ``list[T]`` ordered by a ``Sort`` argument;
-* ``count_by``  -> ``SELECT count(*)`` -> ``int``;
-* ``exists_by`` -> ``SELECT 1 ... LIMIT 1`` (``statements.exists_probe``) -> ``bool``;
+* ``count_by``  -> ``SELECT count(*)`` -> ``int`` (annotated ``int``, ``int | None`` or not at all);
+* ``exists_by`` -> ``SELECT 1 ... LIMIT 1`` (``statements.exists_probe``) -> ``bool`` (annotated ``bool``,
+  ``bool | None`` or not at all);
 * ``delete_by`` -> the number of deleted rows (or ``None`` for ``-> None``, the deleted entities for
   ``-> list[T]``): on a ``SoftDeleteRepository`` a soft delete of the live rows that match; elsewhere one bulk
   ``DELETE`` when the mapper has no cascade, version or delete listener (``statements.bulk_delete_safe``), and
@@ -810,14 +811,27 @@ def _static_criteria(repository: Repository[Any, Any] | None) -> tuple[Any, ...]
     return None
 
 
+def _is_scalar(return_type: Any, scalar: type) -> bool:
+    """Whether *return_type* is *scalar* or ``scalar | None`` (as a ``delete_by`` count may be), ``Any``, or not
+    annotated (``None``): what a ``count_by`` (``int``) or an ``exists_by`` (``bool``) method may declare. The
+    method returns *scalar*, never ``None``."""
+    if return_type in (None, scalar, Any):
+        return True
+    try:
+        shape = result_shape(return_type)
+    except InvalidQueryMethodError:
+        return False
+    return shape.kind is ResultKind.ONE and shape.element is ElementKind.SCALAR and shape.type is scalar
+
+
 def _shape_of(prefix: str, return_type: Any, entity: type, name: str) -> ResultShape:
     """The result shape of a derived query with *prefix* returning *return_type* (``None``: not annotated)."""
     if prefix == "count_by":
-        if return_type not in (None, int, Any):
+        if not _is_scalar(return_type, int):
             raise InvalidQueryMethodError(f"{name}: a count_by method returns int, not {return_type}")
         return ResultShape(ResultKind.ONE, ElementKind.SCALAR, int)
     if prefix == "exists_by":
-        if return_type not in (None, bool, Any):
+        if not _is_scalar(return_type, bool):
             raise InvalidQueryMethodError(f"{name}: an exists_by method returns bool, not {return_type}")
         return ResultShape(ResultKind.ONE, ElementKind.SCALAR, bool)
     if return_type is None or return_type is Any:

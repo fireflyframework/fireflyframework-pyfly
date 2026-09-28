@@ -921,6 +921,14 @@ class _ValidWithQuery(_Valid):
     async def by_tag(self, tag: str) -> list[CheckedItem]: ...
 
 
+class _OptionalScalars(Repository[CheckedItem, int]):
+    """A count and an exists annotated ``| None``, as a ``delete_by`` or a ``@modifying`` count may be."""
+
+    async def count_by_tag(self, tag: str) -> int | None: ...
+
+    async def exists_by_tag(self, tag: str) -> bool | None: ...
+
+
 class TestDerivedMethodsAreCheckedAtStartup:
     """A derived method that cannot work fails when the post-processor builds the repository, not on its first
     call (Spring rejects such a method at bootstrap)."""
@@ -958,6 +966,19 @@ class TestDerivedMethodsAreCheckedAtStartup:
         repository = processor.after_init(_Valid(CheckedItem), "valid")
         compiled = {name for name in vars(repository) if not name.startswith("_")}
         assert compiled == {name for name in vars(_Valid) if not name.startswith("_")}
+
+    async def test_a_count_or_an_exists_may_be_annotated_optional(
+        self, processor: RepositoryBeanPostProcessor, session: AsyncSession
+    ):
+        """``count_by -> int | None`` and ``exists_by -> bool | None`` build, as ``delete_by -> int | None`` and a
+        ``@modifying`` ``-> int | None`` do, and return the count and the answer (never ``None``)."""
+        session.add_all([CheckedItem(id=1, name="a", tag="x"), CheckedItem(id=2, name="b", tag="x")])
+        await session.flush()
+        repository = processor.after_init(_OptionalScalars(CheckedItem, session), "optional")
+        assert await repository.count_by_tag("x") == 2
+        assert await repository.count_by_tag("y") == 0
+        assert await repository.exists_by_tag("x") is True
+        assert await repository.exists_by_tag("y") is False
 
     def test_a_transient_repository_compiles_its_methods_once(
         self, processor: RepositoryBeanPostProcessor, monkeypatch: pytest.MonkeyPatch
