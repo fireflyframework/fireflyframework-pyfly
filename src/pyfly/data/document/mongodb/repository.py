@@ -1166,7 +1166,12 @@ class MongoRepository(Generic[T, ID]):
                         return
                 yield cast(T, parse_obj(model, row))  # type: ignore[arg-type]
         finally:
-            await cursor.close()
+            if unit.completed:
+                await cursor.close()  # its session's unit is over: no other command can run on it any more
+            else:
+                # killCursors on the unit's session, under its guard like every other command on it.
+                async with unit.operation():
+                    await cursor.close()
 
     # ------------------------------------------------------------------
     # Specification extensions (PyFly)

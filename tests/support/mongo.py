@@ -86,10 +86,17 @@ class BeanieDatabase:
 
 
 @contextlib.asynccontextmanager
-async def beanie_database(url: str, models: Sequence[type], **client_options: Any) -> AsyncIterator[BeanieDatabase]:
-    """Bind *models* to a new database on the server at *url*, and drop it afterwards."""
+async def beanie_database(
+    url: str,
+    models: Sequence[type],
+    *,
+    listeners: Sequence[monitoring.CommandListener] = (),
+    **client_options: Any,
+) -> AsyncIterator[BeanieDatabase]:
+    """Bind *models* to a new database on the server at *url*, and drop it afterwards; the client's commands go to
+    the database's :class:`CommandLog` and to *listeners*."""
     log = CommandLog()
-    client: AsyncMongoClient[Any] = AsyncMongoClient(url, event_listeners=[log], **client_options)
+    client: AsyncMongoClient[Any] = AsyncMongoClient(url, event_listeners=[log, *listeners], **client_options)
     name = f"pyfly_t_{uuid.uuid4().hex[:12]}"
     try:
         await init_beanie(database=client[name], document_models=list(models))

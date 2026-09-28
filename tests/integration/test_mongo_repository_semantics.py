@@ -28,6 +28,7 @@ client sent (:class:`~tests.support.mongo.CommandLog`), so a round trip too many
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
@@ -36,6 +37,7 @@ import pytest
 from beanie import Delete, Document, Insert, PydanticObjectId, Save, Update, ValidateOnSave, after_event, before_event
 from bson import ObjectId
 from pydantic import Field, field_validator
+from pymongo import monitoring
 
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.post_processor import MongoRepositoryBeanPostProcessor
@@ -45,6 +47,7 @@ from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.transaction import TransactionTemplate
+from pyfly.data.transaction.unit_of_work import UnitOfWork
 from pyfly.kernel.exceptions import DuplicateKeyException, OptimisticLockingFailureException
 from tests.support.mongo import BeanieDatabase, beanie_database
 
@@ -578,3 +581,54 @@ async def test_stream_all_runs_on_its_own_unit_until_exhausted(db: BeanieDatabas
     assert streamed == list(range(24, -1, -1))
     filtered = [note.title async for note in repository.stream_all(Sort.by("title"), score=3)]
     assert filtered == ["s03"]
+
+
+class _KillCursorsProbe(monitoring.CommandListener):
+    """Records, for each ``killCursors`` the client sends, whether the task sending it holds *unit*'s guard."""
+
+    def __init__(self) -> None:
+        self.unit: UnitOfWork | None = None
+        self.under_guard: list[bool] = []
+
+    def started(self, event: monitoring.CommandStartedEvent) -> None:
+        if event.command_name == "killCursors" and self.unit is not None:
+            self.under_guard.append(self.unit.guard.owner is asyncio.current_task())
+
+    def succeeded(self, event: monitoring.CommandSucceededEvent) -> None:
+        pass
+
+    def failed(self, event: monitoring.CommandFailedEvent) -> None:
+        pass
+
+
+async def test_stream_all_closed_early_waits_for_the_guard_a_sibling_holds(mongo_rs_url: str) -> None:
+    """Closing a stream early sends ``killCursors`` on the unit's session: inside a transaction it waits for the
+    operation guard like every other command, so it never interleaves with a ``gather`` sibling's command."""
+    probe = _KillCursorsProbe()
+    async with beanie_database(mongo_rs_url, MODELS, listeners=[probe]) as database:
+        repository: MongoRepository[SemNote, str] = MongoRepository(SemNote)
+        # More documents than the first batch holds (101): the server keeps the cursor open after it.
+        await repository.save_all([SemNote(title=f"k{index:03d}") for index in range(150)])
+        async with TransactionTemplate(MongoTransactionManager.for_client(database.client)).transaction():
+            unit = repository._current_unit()
+            probe.unit = unit
+            stream = repository.stream_all()
+            assert (await anext(stream)).title == "k000"
+            held, release = asyncio.Event(), asyncio.Event()
+
+            async def sibling() -> None:
+                async with unit.operation():
+                    held.set()
+                    await release.wait()
+
+            holder = asyncio.create_task(sibling())
+            try:
+                await held.wait()
+                closing = asyncio.create_task(stream.aclose())  # type: ignore[attr-defined]
+                done, _pending = await asyncio.wait({closing}, timeout=0.5)
+                assert not done, "the stream sent killCursors while a sibling held the operation guard"
+            finally:
+                release.set()
+                await holder
+            await closing
+        assert probe.under_guard == [True]
