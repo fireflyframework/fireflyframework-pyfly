@@ -460,7 +460,7 @@ class ShellRunnerPort(Protocol):
 |--------|-------------|-------------|
 | `register_command(key, handler, *, help_text, group, params)` | `None` | Register a command. `key` is the command name (kebab-case). `handler` is the callable. `group` nests the command under a sub-group (e.g. `group="db"` → `db <key>`). `params` is a list of `ShellParam` descriptors for the command's CLI parameters. |
 | `run(args)` | `int` | Execute the shell with the given argument list and return the exit code. Pass `None` or `[]` for no arguments. |
-| `run_interactive()` | `None` | Start an interactive REPL loop. Reads input lines (off the event loop, so background work keeps running), tokenises them, and runs the command on the application's loop. Exits on `EOF` or `Ctrl+C`. |
+| `run_interactive()` | `None` | Start an interactive REPL loop. Reads input lines (off the event loop, so background work keeps running), tokenizes them, and runs the command on the application's loop. Exits on `EOF` or `Ctrl+C`. |
 
 ---
 
@@ -534,7 +534,7 @@ and the `CommandLineRunner` beans run.
   test): it runs an async command with `asyncio.run()`, and raises
   `RuntimeError` for one while a loop is running.
 
-Until 26.09.07, an async command called with a running loop ran on a private
+Through 26.09.07, an async command called with a running loop ran on a private
 `asyncio.run()` loop in a worker thread, while the loop that called it was
 blocked. It failed on every backend but SQLite ("attached to a different loop",
 "another operation is in progress", "Cannot use AsyncMongoClient in different

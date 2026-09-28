@@ -147,7 +147,7 @@ in flight at once (the default is 1: no overlap). Keep it well below the
 connection pool's size when the job is `@transactional`. `fixed_delay` takes no
 `concurrent` (a `ValueError`): it starts a run after the previous one ended.
 
-Until 26.09.07 `fixed_rate` and `cron` submitted a run every period whether the
+Through 26.09.07 `fixed_rate` and `cron` submitted a run every period whether the
 previous one had ended or not, so a slow job overlapped itself without bound.
 
 ### cron
@@ -482,7 +482,7 @@ A loop only ever waits (for its next fire time, a free slot or its run's end),
 so stopping it never cancels a run: every run in flight finishes, whatever its
 trigger. When the caller cuts the drain short (the application context bounds
 it by `pyfly.context.shutdown-timeout`), the runs still going are cancelled and
-awaited. Until 26.09.07 `stop()` cancelled an in-flight `fixed_delay` run at once
+awaited. Through 26.09.07 `stop()` cancelled an in-flight `fixed_delay` run at once
 (rolling its transaction back) while it let `fixed_rate` and `cron` runs finish.
 
 `TaskScheduler` is a lifecycle bean of `CONSUMER_PHASE`: the application context
@@ -842,7 +842,7 @@ class AlertingHandler(AsyncUncaughtExceptionHandler):
         alerts.raise_incident(f"{method.__qualname__} failed: {error}")
 ```
 
-Until 26.09.07 `@async_method` awaited coroutine methods inline: the call ran in
+Through 26.09.07 `@async_method` awaited coroutine methods inline: the call ran in
 the caller's transaction, blocked the caller for its whole duration, and its
 failure rolled the caller back.
 

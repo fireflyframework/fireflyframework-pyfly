@@ -368,7 +368,7 @@ commits behind the engine's back:
   the engine (and its commit is not shielded); a step that calls another system
   should make that call idempotent, since a cancelled call's outcome is unknown.
 
-Until 26.09.07 a saga cancelled a failed layer's running siblings (one cancelled
+Through 26.09.07 a saga cancelled a failed layer's running siblings (one cancelled
 mid-commit stayed `RUNNING` and was never compensated), a cancelled saga left its
 step tasks running and committing, a step whose timeout fired during `COMMIT` was
 retried and committed twice, a workflow compensated while its siblings were still

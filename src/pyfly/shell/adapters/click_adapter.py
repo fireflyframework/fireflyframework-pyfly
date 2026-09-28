@@ -33,7 +33,7 @@ the Mongo client were created on:
 
 The synchronous :meth:`ClickShellAdapter.invoke` is for loop-less use (a script, a sync test): it runs an async
 command with ``asyncio.run()``, and refuses one while a loop is running (use :meth:`ClickShellAdapter.ainvoke`
-there). Until 26.09.07 an async command called with a running loop ran on a private ``asyncio.run()`` loop in a
+there). Through 26.09.07 an async command called with a running loop ran on a private ``asyncio.run()`` loop in a
 worker thread, where the application's engine, pool and Mongo client failed (every backend but SQLite), and the
 REPL blocked the application's loop for the whole session.
 """
