@@ -721,13 +721,13 @@ exceptions into PyFly exceptions before deciding the status:
 | `JSONExceptionConverter` | `json.JSONDecodeError` | `InvalidRequestException` | 400 |
 | `TimeoutExceptionConverter` | `TimeoutError` / `asyncio.TimeoutError` | `OperationTimeoutException` | 504 |
 | `SQLAlchemyIntegrityExceptionConverter` | `sqlalchemy.exc.IntegrityError` | `DataIntegrityException` (`DuplicateKeyException` for a unique key), a `ConflictException` naming the constraint, never the SQL or its values | 409 |
-| `PersistenceExceptionConverter` | any other persistence error the data layer translates (`StaleDataError`) | `OptimisticLockingFailureException` | 409 |
+| `PersistenceExceptionConverter` | any other persistence error the data layer translates (`StaleDataError`, MariaDB error 1020, MongoDB duplicate-key and write-conflict errors) | its kernel exception (`OptimisticLockingFailureException`, `DuplicateKeyException`...) | 409 |
 | `HttpxExceptionConverter` | `httpx.TimeoutException` (and subclasses) | `GatewayTimeoutException` | 504 |
 | `HttpxExceptionConverter` | other `httpx.HTTPError` subclasses | `BadGatewayException` | 502 |
 | `CircuitBreakerExceptionConverter` | `CircuitBreakerException` (open circuit) | `ServiceUnavailableException` | 503 |
 
-The SQLAlchemy, httpx, and circuit-breaker converters are **lazy-loaded**: each
-converter's `can_handle()` method performs its own `import` at check time, so the
+The SQLAlchemy, persistence, httpx and circuit-breaker converters are **lazy-loaded**:
+each converter's `can_handle()` method performs its own `import` at check time, so the
 converter silently returns `False` (and is a no-op) when the corresponding library
 is not installed. No optional dependency is required for the other three converters
 (`pydantic`, `json`, and stdlib `TimeoutError`).

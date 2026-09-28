@@ -142,7 +142,7 @@ await outbox.dead_letters()   # failed on every attempt
 | `poll_interval_s` | `1.0` | How often the relay looks for events enqueued by other processes; an enqueue in this process wakes it when its unit commits. |
 | `publish_timeout` | `60.0` | Seconds a publish may take before the attempt counts as failed. |
 | `create_tables` | `True` | Create the outbox tables when they are missing (otherwise only check them). |
-| `store` | a `SqlOutboxStore` on `datasource` | The outbox store to run on instead: any `OutboxStore` (`pyfly.eda.ports.outbox`); then `datasource`, `tables` and `create_tables` do not apply. |
+| `store` | a `SqlOutboxStore` on `datasource` | The outbox store to run on instead: any `OutboxStore` (`pyfly.eda.ports.outbox`); then `create_tables` does not apply, and passing `datasource` or `tables` as well raises `ValueError`. |
 
 Before 26.09.08 the outbox was a dictionary in the process: an event enqueued by a unit that then rolled back
 was published anyway, a restart lost everything pending, and nothing was ever removed. It now needs a data
@@ -187,7 +187,8 @@ position, and raises `ValueError` for an id that is not on the stream (it used t
 events that were waiting when it was called (not those that commit meanwhile, so it returns under any write
 rate). An `EventStore` written against the earlier SPI (a `stream_all` without `after_position`) is still
 projected, with its place kept in memory by event id, without checkpoints or a lease (a
-`projection_store_without_positions` WARNING says so).
+`projection_store_without_positions` WARNING says so); passing it `checkpoints=` or `start_from="latest"`
+raises `TypeError`.
 
 ### Checkpoints
 
