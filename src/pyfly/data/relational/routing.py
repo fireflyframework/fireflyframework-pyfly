@@ -21,14 +21,14 @@ with no replica configured, the factory always uses the primary (current behavio
 ``@transactional(read_only=True)`` itself routes a new unit to the datasource's replica through the
 transaction manager, so a service needs neither this factory nor :func:`read_only` for that.
 
-Usage::
+Usage (``factory()`` returns a new session outside any unit of work, which the caller closes)::
 
     factory = ctx.get_bean(RoutingSessionFactory)
 
     async def list_users() -> list[User]:
-        with read_only():                 # routes to the replica when one is configured
-            session = factory()
-            ...
+        with read_only():                        # routes to the replica when one is configured
+            async with factory() as session:     # closed, and its connection returned, on exit
+                ...
 """
 
 from __future__ import annotations

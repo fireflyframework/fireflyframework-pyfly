@@ -54,6 +54,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
   - [Paginated Specification Queries](#paginated-specification-queries)
 - [Transaction Management](#transaction-management)
   - [Unit of Work](#unit-of-work)
+  - [Concurrency Control](#concurrency-control)
   - [Programmatic Transactions](#programmatic-transactions)
   - [reactive_transactional](#reactive_transactional)
 - [Schema Strategy (ddl-auto)](#schema-strategy-ddl-auto)
@@ -87,7 +88,7 @@ PyFly Data Relational implements the Repository pattern with Spring Data-style d
 
 ## Architecture Overview
 
-All concrete types live in the SQLAlchemy adapter package. The namespace `pyfly.data.relational` is a pass-through and does not re-export anything.
+All concrete types live in the SQLAlchemy adapter package. The namespace `pyfly.data.relational` re-exports only the read-replica routing helpers (`RoutingSessionFactory`, `read_only`, `is_read_only`); import everything else from `pyfly.data.relational.sqlalchemy`.
 
 ```python
 from pyfly.data.relational.sqlalchemy import (
@@ -625,8 +626,10 @@ class OrderRepository(Repository[Order, UUID]):
     # Equals (default operator)
     async def find_by_status(self, status: str) -> list[Order]: ...
 
-    # One result, or None
-    async def find_by_reference(self, reference: str) -> Order | None: ...
+    # One result, or None (more than one match raises IncorrectResultSizeException)
+    async def find_by_customer_id_and_status_and_total(
+        self, customer_id: str, status: str, total: float
+    ) -> Order | None: ...
 
     # Multiple conditions with AND
     async def find_by_customer_id_and_status(
@@ -654,8 +657,8 @@ class OrderRepository(Repository[Order, UUID]):
     async def find_by_status_in(self, statuses: list[str]) -> list[Order]: ...
 
     # IS NULL / IS NOT NULL (zero arguments consumed)
-    async def find_by_deleted_at_is_null(self) -> list[Order]: ...
-    async def find_by_email_is_not_null(self) -> list[User]: ...
+    async def find_by_updated_by_is_null(self) -> list[Order]: ...
+    async def find_by_created_by_is_not_null(self) -> list[Order]: ...
 
     # A page of results (the Pageable binds no value)
     async def find_by_customer_id(self, customer_id: str, pageable: Pageable) -> Page[Order]: ...
@@ -1098,7 +1101,7 @@ A repository call resolves its session when it runs:
 - **Outside a transaction**, the outermost repository call opens a short **auto unit** of its own, and
   nested repository calls inside it share it (a custom method calling `count()` and `exists_by_id()` is
   one unit):
-  - a **read** method (`find*`, `count*`, `exists*`, `stream*`, `get*`) gets a read unit. On
+  - a **read** method (`find*`, `count*`, `exists*`, `stream*`, `scroll*`, `get*`) gets a read unit. On
     PostgreSQL it runs on an `AUTOCOMMIT` connection, one round trip instead of three, unless the
     datasource has [after-begin customizers](#after-begin-customizers) (their transaction-local settings
     need a transaction). Elsewhere it is a short transaction that ends without writing. A read unit whose
@@ -1263,6 +1266,54 @@ in the block checks out another pooled connection of its datasource, and the blo
 the caller holds: on SQLite a write unit the block would open beside a write unit this task holds is refused
 at once with `IllegalTransactionStateError`, instead of waiting `busy_timeout` for its own lock.
 
+### Concurrency Control
+
+A unit of work does not stop two units from reading the same row and then each writing a value computed
+from what it read: under the default isolation both commit, and the second overwrites the first (a lost
+update), or both pass a check that the other one's write would have failed. The classic case is a
+balance: two withdrawals of 60 from an account holding 100 each read 100, each see enough funds, and both
+succeed. PyFly offers the three answers Spring does; choose one for each write path.
+
+| Option | How | What the losing call gets | Fits when |
+|--------|-----|---------------------------|-----------|
+| Guarded atomic update | One `UPDATE ... WHERE id = :id AND balance >= :amount`: a `@modifying` query, or a Core `update()` on the unit's session | The statement changes no row, and the caller decides what that means | The check fits in the statement's `WHERE`; no transaction is needed around it |
+| Pessimistic lock | `find_by_id(id, lock=LockMode.PESSIMISTIC_WRITE)` inside `@transactional` | It waits at the read until the first unit ends, then reads what that unit left | Domain logic runs in Python between the read and the write |
+| Optimistic lock | `VersionedMixin` on the entity | Its commit fails with `OptimisticLockingFailureException` (HTTP 409) | Conflicts are rare, and a retry or a 409 is acceptable |
+
+**A guarded atomic update** puts the check and the change in one statement, so two of them can never both
+take the same funds: the row lock (PostgreSQL, MySQL, MariaDB) or SQLite's single writer serializes
+them, and each evaluates its `WHERE` on the row the other one left. It needs no transaction around it: a
+call outside one runs in a write auto unit that commits.
+
+```python
+class AccountRepository(Repository[Account, UUID]):
+    @modifying
+    @query("UPDATE Account a SET a.balance = a.balance - :amount WHERE a.id = :id AND a.balance >= :amount")
+    async def withdraw(self, id: UUID, amount: int) -> int: ...
+
+
+if await accounts.withdraw(account_id, 60) == 0:
+    raise InsufficientFunds(account_id)          # the balance did not cover it (or no such account)
+```
+
+**A pessimistic lock** keeps the domain logic in the entity or aggregate: the read takes the row lock
+(`SELECT ... FOR UPDATE`) and holds it until the unit ends, so a second unit that locks the same row waits
+and then sees the first one's result (see [Fetch plans and locks](#fetch-plans-and-locks) for the modes).
+On SQLite, where the clause is not rendered, a write unit holds the database's write lock from its `BEGIN
+IMMEDIATE`, and a second write unit waits up to `pyfly.data.relational.sqlite.busy-timeout` for it. Every
+path that writes the row must take the lock; a writer that does not can still overwrite it.
+
+**An optimistic lock** adds a `version` column that every `UPDATE` checks (see
+[VersionedMixin](#versionedmixin-optimistic-locking)): nothing waits, and the unit whose version is stale
+fails at its flush or commit with `OptimisticLockingFailureException`. Retry the whole unit, never a
+statement inside it: put `@retry(exceptions=(OptimisticLockingFailureException,))` outside the
+`@transactional` boundary, as [Retries and Transactions](resilience.md#retries-and-transactions) explains.
+
+The flagship sample, `samples/lumen`, uses two of them: its deposit and withdrawal handlers lock the wallet
+row, and its money-transfer saga, whose steps run outside a caller's transaction, changes balances with
+one guarded `UPDATE`. `tests/test_concurrent_balance_changes.py` there races two withdrawals of 60 from
+100 on a SQLite file and on PostgreSQL.
+
 ### Programmatic Transactions
 
 `TransactionTemplate` has the same semantics as `@transactional`:
@@ -1369,8 +1420,8 @@ all in the `dev` profile) and `none` for a database server, as Spring Boot does.
 enabled it is `none` whatever the database, and setting `create` or `create-drop` beside them fails the startup:
 the tables `create_all()` would add hide a missing migration until the deploy that finally adds it fails with
 "table already exists". Pair migrations with `validate` instead. `false`, `off` and `no` mean `none` (YAML reads
-`ddl-auto: off` as a boolean); any other value, `update` included, fails the startup naming the key. Until
-26.09.08 the default was `create` on every database and a typo silently became `create`.
+`ddl-auto: off` as a boolean); any other value, `update` included, fails the startup naming the key. Through
+26.09.07 the default was `create` on every database and a typo silently became `create`.
 
 **Order.** The startup migrations run first, then the schema strategy, then every other lifecycle bean (the
 framework stores that check their tables, your own beans). The lifecycle phases say so:
@@ -1399,7 +1450,7 @@ waiting on the server and dropped the table later, under every other process.
 
 | Config key | Default | Description |
 |------------|---------|-------------|
-| `pyfly.data.relational.ddl-auto` | `create` on SQLite, `none` otherwise | `none`, `validate`, `create` or `create-drop`. |
+| `pyfly.data.relational.ddl-auto` | `create` on SQLite (or no URL in the `dev` profile); `none` on a database server, and whenever `migrations.enabled` | `none`, `validate`, `create` or `create-drop`. |
 | `pyfly.data.relational.schema.lock-timeout` | `300` | Seconds an instance waits for another one's schema changes. |
 | `pyfly.data.relational.schema.drop-timeout` | `10` | Seconds the `create-drop` teardown may take. |
 
@@ -1490,7 +1541,8 @@ An `env.py` written by hand can take the same helpers, or list the framework tab
 
 Every SQLAlchemy engine the application uses is built by one
 `DataSourceRegistry`: the primary, its read replica, the named datasources, and the datasources the
-framework modules need (event store, snapshots, saga persistence, the PostgreSQL cache). Before
+framework stores need (event store, snapshots, saga persistence, the SQL cache and the others listed in
+[Module Datasources](#module-datasources)). Before
 26.09.08 each module built its own engine from a URL, so one database could carry seven pools, only
 the primary got the pool settings, and only the primary was disposed on shutdown.
 
@@ -1568,10 +1620,11 @@ factory to its manager (`reactive_transactional(factory)`, a `_session_factory` 
 - The framework disposes what it disposed before: the registry's engines, and an `AsyncEngine`
   bean the registry does not own (through the engine lifecycle). The engine under your session
   factory bean stays yours to dispose.
-- Beside a `DataSourceRegistry` bean, the modules that look the registry up by configuration (event
-  store, snapshots, saga persistence, the PostgreSQL cache) keep the configuration's registry; the
-  context closes both when it stops. Return `DataSourceRegistry.for_config(config)` from your bean to
-  keep one registry.
+- Beside a `DataSourceRegistry` bean, the framework modules (event store, snapshots, projection
+  checkpoints, saga persistence, the SQL cache, the scheduler lock, the OAuth2 token store, the session
+  stores and the outbox) resolve their datasources in that bean. The configuration's registry still
+  exists beside it, and the context closes both when it stops. Return
+  `DataSourceRegistry.for_config(config)` from your bean to keep one registry.
 - `primary_transaction_manager` itself is not a replacement point: replace the session factory,
   the engine or the registry.
 - Contexts started on one `Config` share its registry, and with it their transaction managers: the
@@ -1588,15 +1641,18 @@ primary, and a WARNING says so, once per engine (or registry) and run:
 
 - An engine bean the registry does not own, or a session factory bean over an engine of its own,
   while `pyfly.data.relational.url` is configured: every unit of work runs on your engine, and
-  `DataSourceRegistry.primary` keeps the URL for the modules that look the registry up (event store,
-  snapshots, saga persistence, the PostgreSQL cache) and for health and pool metrics. It logs
-  `relational_engine_not_in_registry`. Leave the URL unset when your engine is the only primary.
+  `DataSourceRegistry.primary` keeps the URL for the framework modules that resolve their datasource in
+  the registry (event store, snapshots, saga persistence, the SQL cache and the other framework
+  stores) and for health and pool metrics. It logs `relational_engine_not_in_registry`. Leave the URL
+  unset when your engine is the only primary; a framework store you enable then needs a `datasource` or
+  `url` key of its own (see [Module Datasources](#module-datasources)), since the registry has no primary
+  to give it.
 - A session factory bean over a named datasource or a replica of the registry: the `primary` units
   and the units that name that datasource are two units on one database, and
   `DataSourceRegistry.primary` keeps the URL. It logs `relational_primary_on_named_datasource`.
 - A `DataSourceRegistry` bean of your own while `pyfly.data.relational.url` is configured: the units
-  of work and the relational beans run on your registry, and the modules that look the registry up by
-  configuration build engines and pools of their own in the configuration's. It logs
+  of work, the relational beans and the framework modules run on your registry, and the
+  configuration's registry, built from `pyfly.data.relational`, exists beside it. It logs
   `relational_registry_not_the_configurations`.
 
 A session factory over the registry's own primary engine is no split. Driver arguments, pool
@@ -1674,7 +1730,7 @@ such as `event-store` in YAML, where the environment can still override its keys
 |-----|---------|-------------|
 | `pyfly.data.relational.url` | — (required) | Primary datasource URL. |
 | `pyfly.data.relational.echo` | `false` | Log SQL: `true`, `false`, or `debug` (also logs result rows). |
-| `pyfly.data.relational.ddl-auto` | `create` on SQLite, `none` otherwise | Schema strategy of `engine_lifecycle` (`none`, `validate`, `create`, `create-drop`; see [Schema Strategy](#schema-strategy-ddl-auto)). |
+| `pyfly.data.relational.ddl-auto` | `create` on SQLite (or no URL in the `dev` profile); `none` on a database server, and whenever `migrations.enabled` | Schema strategy of `engine_lifecycle` (`none`, `validate`, `create`, `create-drop`; see [Schema Strategy](#schema-strategy-ddl-auto)). |
 | `pyfly.data.relational.schema.lock-timeout` | `300` | Seconds an instance waits for another one's schema changes. |
 | `pyfly.data.relational.schema.drop-timeout` | `10` | Seconds the `create-drop` teardown may take. |
 | `pyfly.data.relational.migrations.*` | — | Startup migrations: `enabled`, `config`, `revision`, `models` (see [Run Migrations on Startup](#run-migrations-on-startup-flyway-style)). |
@@ -1776,31 +1832,38 @@ registry builds therefore gets the following setup:
 
 ### Module Datasources
 
-The per-module URL keys are aliases that resolve through the registry:
+Each framework store that keeps data in a relational database runs on a datasource of the context's
+`DataSourceRegistry` bean (an application's own registry bean is the one they use). Its per-module keys
+say which:
 
-- `pyfly.eventsourcing.store.url`;
-- `pyfly.eventsourcing.snapshot.url`;
-- `pyfly.transactional.persistence.sqlalchemy.url`;
-- `pyfly.cache.postgres.url`;
-- `pyfly.scheduling.lock.url`.
+| Store | Name a datasource | Or give its URL | Name a new URL registers |
+|-------|-------------------|-----------------|--------------------------|
+| Event store | `pyfly.eventsourcing.store.datasource` | `pyfly.eventsourcing.store.url` | `event-store` |
+| Snapshot store | `pyfly.eventsourcing.snapshot.datasource` | `pyfly.eventsourcing.snapshot.url` | `snapshot-store` |
+| Projection checkpoints | `pyfly.eventsourcing.projection.checkpoint.datasource` | `pyfly.eventsourcing.projection.checkpoint.url` | `projection-checkpoints` |
+| Saga persistence | `pyfly.transactional.persistence.sqlalchemy.datasource` | `pyfly.transactional.persistence.sqlalchemy.url` | `transactional-persistence` |
+| SQL cache | `pyfly.cache.postgres.datasource` | `pyfly.cache.postgres.url` | `cache` |
+| Scheduler lock | `pyfly.scheduling.lock.datasource` | `pyfly.scheduling.lock.url` | `scheduling-lock` |
+| OAuth2 token store | `pyfly.security.oauth2.token-store.datasource` | `pyfly.security.oauth2.token-store.url` | `oauth2-token-store` |
+| Session store | `pyfly.session.postgres.datasource` | `pyfly.session.postgres.url` | `session` |
+| Session registry | `pyfly.session.concurrency.postgres.datasource` | `pyfly.session.concurrency.postgres.url` | `session-registry` |
+| Outbox and database event bus | `pyfly.eda.outbox.datasource` (`pyfly.eda.postgres.datasource`) | `pyfly.eda.outbox.url` (`pyfly.eda.postgres.dsn`) | `eda` |
 
-Each resolves the same way:
+A store resolves its datasource the same way everywhere:
 
-- **No URL** means the primary datasource.
+- **Neither key** means the primary datasource.
+- **A datasource name** is looked up in the registry (`primary` or a named datasource).
 - **A URL identical to a registered datasource's** (the password aside, SQLite paths made absolute)
   reuses that datasource's engine.
 - **Another URL** registers a named datasource that gets the same treatment (pool, connect arguments,
-  SQLite setup, credential hook). The name is `event-store`, `snapshot-store`,
-  `transactional-persistence`, `cache` or `scheduling-lock`.
+  SQLite setup, credential hook), under the name in the last column.
+- **Both keys** are an error.
 
-The saga persistence, the SQL cache and the scheduler lock also take a `datasource` key beside the URL
-(`pyfly.transactional.persistence.sqlalchemy.datasource`, `pyfly.cache.postgres.datasource`,
-`pyfly.scheduling.lock.datasource`) that names a datasource of the registry instead; setting both is an
-error. They look the datasource up in the context's `DataSourceRegistry` bean, so an application's own
-registry bean is the one they use.
-
-A module with no URL and no primary fails with an error naming both keys. It used to fall back to
-`./app.db`, or for the cache to `localhost:5432/cache`.
+With neither key and no primary, the projection checkpoints take the event store's datasource when
+that one has a key of its own; any other store fails at startup with an error naming its keys. The
+stores used to fall back to `./app.db`, or for the cache to `localhost:5432/cache`. The event store
+also reads `pyfly.eventsourcing.store.position-strategy` (`auto`, `head-row` or `xid8`; see
+[Event Sourcing](eventsourcing.md)).
 
 ```python
 datasource = registry.resolve(config.get("pyfly.myfeature.url"), name="my-feature",
@@ -1809,12 +1872,12 @@ datasource = registry.resolve(config.get("pyfly.myfeature.url"), name="my-featur
 
 ### Framework Tables
 
-The tables the framework keeps in an application's database (`pyfly_orchestration_state`,
+Every table the framework keeps in an application's database, the `pyfly_*` tables (`pyfly_orchestration_state`,
 `pyfly_cache_entries`, `pyfly_locks`, `pyfly_users`, the event store's `pyfly_event_store`,
 `pyfly_event_store_head`, `pyfly_snapshots` and `pyfly_projection_checkpoints`, the transactional outbox's
 `pyfly_outbox_events`, `pyfly_outbox_deliveries`, `pyfly_outbox_consumers` and `pyfly_outbox_dead_letters`, the
 OAuth2 token store's `pyfly_oauth2_grants` and `pyfly_oauth2_token_families`, and the sessions' `pyfly_sessions`,
-`pyfly_session_registrations` and `pyfly_session_principals`) are SQLAlchemy Core tables on one `MetaData`,
+`pyfly_session_registrations` and `pyfly_session_principals`), is a SQLAlchemy Core table on one `MetaData`,
 `pyfly.data.relational.framework_schema.framework_metadata`, with portable types: bounded `KeyString` keys compared exactly (a binary collation on MySQL and MariaDB, whose default
 collations ignore case and accents), `UtcTimestamp` instants (UTC with microseconds on every backend, aware in
 Python: `TIMESTAMPTZ` on PostgreSQL, `DATETIME(6)` on MySQL and MariaDB), `LONGTEXT`/`LONGBLOB` payloads on
@@ -1951,15 +2014,11 @@ rebuild its connection string or restart the application.
 
 ## Read/Write Routing (Read Replicas)
 
-PyFly can route read-only work to a database **read replica** while keeping writes on the primary — the equivalent of Spring's `AbstractRoutingDataSource` driven by `@Transactional(readOnly = true)`. Routing is **opt-in**: with no replica configured, every session goes to the primary, so behavior is unchanged for existing apps.
-
-```python
-from pyfly.data.relational.routing import RoutingSessionFactory, read_only, is_read_only
-```
+PyFly can route read-only work to a database **read replica** while keeping writes on the primary — the equivalent of Spring's `AbstractRoutingDataSource` driven by `@Transactional(readOnly = true)`. Routing is **opt-in**: with no replica configured, every unit of work and every session goes to the primary, so the same code runs unchanged in environments without a replica.
 
 ### Enabling a Replica
 
-Set the replica URL under `pyfly.data.relational.read-replica.url`. The [datasource registry](#datasource-registry) builds the replica's engine with the primary's settings (pool, connect arguments, credential hook) and `routing_session_factory` routes to its `async_sessionmaker`:
+Set the replica URL under `pyfly.data.relational.read-replica.url` (a named datasource takes `pyfly.data.relational.datasources.<name>.read-replica.url`). The [datasource registry](#datasource-registry) builds the replica's engine with the primary's settings (pool, connect arguments, credential hook):
 
 ```yaml
 pyfly:
@@ -1970,22 +2029,48 @@ pyfly:
         url: postgresql+asyncpg://user:pass@replica:5432/app
 ```
 
-When `read-replica.url` is absent, `routing_session_factory` is still registered but has no replica — it always returns a primary session.
+### @transactional(read_only=True) Routes to the Replica
+
+This is the recommended way to use a replica. A **new** read-only unit of work runs on its datasource's replica when one is configured: mark the service method `@transactional(read_only=True)` (or open `TransactionTemplate(read_only=True)`), and every repository call inside it joins that unit. The unit also refuses writes (see [Isolation, read-only and timeout](#isolation-read-only-and-timeout)).
+
+```python
+from pyfly.container import service
+from pyfly.data import transactional
+
+
+@service
+class UserService:
+    def __init__(self, users: UserRepository) -> None:
+        self._users = users
+
+    @transactional(read_only=True)              # a new unit on the replica, when one is configured
+    async def list_users(self) -> list[User]:
+        return await self._users.find_all()
+
+    @transactional()                            # the primary
+    async def create_user(self, name: str) -> User:
+        return await self._users.save(User(name=name))
+```
+
+Routing applies when the unit is new. A read-only method called inside a read-write unit that is already open joins that unit, on the primary. A repository call outside any transaction runs in an auto unit on the primary.
 
 ### RoutingSessionFactory
 
-`RoutingSessionFactory` is a drop-in replacement for an `async_sessionmaker` call site: calling the factory (`factory()`) returns an `AsyncSession`, routed by context.
+`RoutingSessionFactory` (the `routing_session_factory` bean) is for code that opens its own sessions instead of using repositories. Calling it (`factory()`) returns a **new** `AsyncSession`, routed by context. That session is not part of any unit of work: the caller owns it and must close it, so always open it with `async with`.
 
 | Member | Returns | Description |
 |--------|---------|-------------|
-| `factory()` (`__call__`) | `AsyncSession` | Routes by context: the replica when inside a `read_only()` block **and** a replica is configured; otherwise the primary. |
+| `factory()` (`__call__`) | `AsyncSession` | The replica when a replica is configured **and** the context is read-only (a `read_only()` block, or a read-only transactional boundary); otherwise the primary. |
 | `factory.primary()` | `AsyncSession` | Forces a primary (read/write) session regardless of context. |
 | `factory.replica()` | `AsyncSession` | Forces a replica session; falls back to the primary when none is configured. |
 | `factory.has_replica` | `bool` | Whether a replica session maker is configured. |
+| `factory.primary_factory` | `Callable[[], AsyncSession]` | The primary's session factory (the `async_sessionmaker` the transaction manager maps). |
+
+When `read-replica.url` is absent, `routing_session_factory` is still registered but has no replica: it always returns a primary session.
 
 ### read_only() and is_read_only()
 
-The `read_only()` context manager marks the enclosed block read-only so the factory routes to the replica (the `@Transactional(readOnly = true)` analogue). It is backed by a `ContextVar`, so it is safe across `async`/await and supports nesting — the prior value is restored on exit. `is_read_only()` reports whether the current context is marked read-only.
+The `read_only()` context manager marks the enclosed block read-only, so `factory()` routes to the replica. It is backed by a `ContextVar`, so it is safe across `async`/`await` and supports nesting (the prior value is restored on exit). `is_read_only()` reports whether the current context is read-only: inside a `read_only()` block, or inside a read-only transactional boundary. `read_only()` affects only the routing factory; it does not open a unit of work or refuse writes.
 
 ```python
 from pyfly.container import service
@@ -1994,25 +2079,18 @@ from sqlalchemy import select
 
 
 @service
-class UserService:
+class UserReport:
     def __init__(self, sessions: RoutingSessionFactory) -> None:
         self._sessions = sessions
 
-    async def list_users(self) -> list[User]:
-        with read_only():                       # routes to the replica when one is configured
-            session = self._sessions()          # AsyncSession bound to the replica
-            result = await session.execute(select(User))
-            return list(result.scalars())
-
-    async def create_user(self, name: str) -> User:
-        session = self._sessions()              # no read_only() -> primary (read/write)
-        user = User(name=name)
-        session.add(user)
-        await session.commit()
-        return user
+    async def user_names(self) -> list[str]:
+        with read_only():                                  # routes to the replica when one is configured
+            async with self._sessions() as session:        # closed (and its connection returned) on exit
+                result = await session.execute(select(User.name))
+                return list(result.scalars())
 ```
 
-Outside any `read_only()` block, `factory()` always returns a primary session. Inside one, it returns a replica session **only if** a replica is configured; otherwise it falls back to the primary, so the same code runs unchanged in environments without a replica.
+Outside a read-only context, `factory()` returns a primary session. Inside one, it returns a replica session **only if** a replica is configured; otherwise it falls back to the primary. For writes, prefer a repository inside `@transactional`: a session from the factory commits only what the caller commits on it.
 
 **Source:** `src/pyfly/data/relational/routing.py` · bean: `RelationalAutoConfiguration.routing_session_factory`
 
@@ -2263,11 +2341,15 @@ Resolved per call, in this order:
 1. `manager=` (a `TransactionManager` or a datasource name) or `datasource="name"`, on the method or on
    a class-level `@transactional`;
 2. the legacy attributes: `self._session_factory` (an `async_sessionmaker`, mapped to its registry
-   datasource; a factory you built yourself gets a manager of its own) and `self._motor_client`. A
-   service that exposes **both** raises `IllegalTransactionStateError` unless a datasource is named:
-   one arm would commit while the other rolled back;
-3. the running application context's default datasource (`primary`). A service with no factory
-   attribute works, and so does a plain function.
+   datasource; a factory you built yourself gets a manager of its own) and `self._motor_client` (a
+   PyMongo `AsyncMongoClient`, mapped to the MongoDB transaction manager of that client; any other
+   client raises `IllegalTransactionStateError`). A service that exposes **both** raises
+   `IllegalTransactionStateError` unless a datasource is named: one arm would commit while the other
+   rolled back;
+3. the running application context's default datasource: `primary`, or the document datasource when
+   `pyfly.data.document.transaction.default` is true, which it is by default in an application whose
+   relational layer is off (see [Data Document](data-document.md)). A service with no factory attribute
+   works, and so does a plain function.
 
 A unit on one datasource never satisfies a join on another: a `REQUIRED` call on `reporting` inside a
 unit on `primary` begins `reporting`'s own unit (there is no two-phase commit between them).
@@ -2408,10 +2490,16 @@ with track_commits() as commits:
         raise
 ```
 
-A single-statement `infrastructure_unit()` runs on an autocommit connection on PostgreSQL, where its statement
-commits as it runs: one that ran its statement and then failed or was cancelled reports `unknown` (it may have
-committed), never rolled back. Through 26.09.07 it reported rolled back, so a step whose outbox append, cache
-write or state upsert had committed could be retried and write twice.
+A write that commits as it runs reports `unknown` (it may have committed), never rolled back, when something
+fails after it ran, so a step whose outbox append, cache write or state upsert did commit is compensated
+rather than retried into a second write:
+
+- a single-statement `infrastructure_unit()` on an autocommit connection (PostgreSQL) whose statement ran and
+  that then failed or was cancelled;
+- a MongoDB write outside a transaction (a single-command `save`, `delete` or `delete_by_id`, a `$out` or
+  `$merge` pipeline, and every write on a standalone server) followed by a failure: an after-insert or
+  after-save event action, a write concern, or a lost connection (see
+  [MongoDB transactions](data-document.md)).
 
 The framework's own bookkeeping, the idempotent writes it makes on a call's way that are not the call's
 effects, runs in `untracked()` blocks, which no tracker counts: numbering the committed events a read of the
@@ -2723,7 +2811,7 @@ from its own statements; the web layer still answers 409 without SQL for them (`
 The `RepositoryBeanPostProcessor` is a `BeanPostProcessor` that runs after each repository bean is initialized. It scans the repository class for stub methods and replaces them with real query implementations.
 
 It runs for every repository the container creates, whatever its scope: a singleton, a `@lazy` one
-first resolved during startup, and a `TRANSIENT`, `REQUEST` or custom-scoped one (until 26.09.07
+first resolved during startup, and a `TRANSIENT`, `REQUEST` or custom-scoped one (through 26.09.07
 those kept their stubs, and `find_by_*` answered `None`). It declares `@order(HIGHEST_PRECEDENCE +
 100)`, ahead of the AOP post-processor, so an aspect on `repository.*.*` wraps the compiled
 derived and `@query` methods instead of being replaced by them.
@@ -2761,7 +2849,10 @@ Any other body is a hand-written implementation and is never replaced, however l
 
 > **Before 26.09.08** a body was a stub when its code held no literal constant, so hand-written bodies built from names, attributes and positional calls were silently replaced by a derived query (a hand-written soft delete became a physical `DELETE`), and stubs declared on an intermediate base class were never compiled.
 
-Register the post-processor in your application context:
+With `pyfly.data.relational.enabled`, `RelationalAutoConfiguration` registers the post-processor (the
+`repository_post_processor` bean), bound to the context's transaction managers. Register one by hand only
+when the relational layer is not enabled; a repository whose stubs no post-processor compiled fails the
+start (`RepositoryWiringCheck`):
 
 ```python
 from pyfly.data.relational.sqlalchemy import RepositoryBeanPostProcessor
