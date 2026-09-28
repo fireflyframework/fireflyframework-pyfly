@@ -23,20 +23,23 @@ commits or rolls back on its own (there is no two-phase commit between them).
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+from beanie import Indexed
 from pymongo import AsyncMongoClient
 from sqlalchemy import Identity, Integer, String, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
 from pyfly.data import Isolation, transactional
 from pyfly.data.document.mongodb import mongo_transactional
-from pyfly.data.document.mongodb.document import BaseDocument
+from pyfly.data.document.mongodb.document import AggregateDocument, BaseDocument
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
 from pyfly.data.relational.sqlalchemy.entity import Base
@@ -49,6 +52,9 @@ from pyfly.data.transaction import (
     install_registry,
     uninstall_registry,
 )
+from pyfly.domain import DomainEvent
+from pyfly.eda.domain_events import DomainEventPublisher
+from pyfly.kernel.exceptions import DuplicateKeyException
 from tests.support.mongo import beanie_database
 
 
@@ -186,6 +192,22 @@ class UnifiedDoc(BaseDocument):
         name = "unified_docs"
 
 
+@dataclass(frozen=True)
+class UnifiedRenamed(DomainEvent):
+    name: str = ""
+
+
+class UnifiedAggregate(AggregateDocument):
+    name: Indexed(str, unique=True)  # type: ignore[valid-type]
+
+    class Settings:
+        name = "unified_aggregates"
+
+    def rename(self, name: str) -> None:
+        self.name = name
+        self.raise_event(UnifiedRenamed(name=name))
+
+
 @dataclass
 class Polyglot:
     service: Any
@@ -197,7 +219,7 @@ class Polyglot:
 async def polyglot(tmp_path: Path, mongo_rs_url: str) -> AsyncIterator[Polyglot]:
     """A relational SQLite file database and a MongoDB replica set, each with its own transaction manager."""
     service, _url, engine = await _relational_service(tmp_path)
-    async with beanie_database(mongo_rs_url, [UnifiedDoc]) as documents:
+    async with beanie_database(mongo_rs_url, [UnifiedDoc, UnifiedAggregate]) as documents:
         service._motor_client = documents.client
         service.docs = MongoRepository(UnifiedDoc)
         try:
@@ -305,3 +327,45 @@ async def test_a_required_document_unit_inside_a_relational_unit_starts_its_own(
     assert await _doc_names(polyglot) == ["document"]  # the document unit had committed on its own
     assert seen["relational"] is not None and seen["document"] is not None
     assert seen["relational"] is not seen["document"]
+
+
+@pytest.mark.asyncio
+async def test_an_aggregate_document_ties_its_events_to_a_document_unit_only(polyglot: Polyglot) -> None:
+    """An event an aggregate document raises inside a relational unit, with no document unit around it, is not
+    tied to the relational unit: it is published when a document unit saves the document. A failed save leaves it
+    pending, and the relational unit's commit does not publish the event of a document that was never saved."""
+    service = polyglot.service
+    aggregates: MongoRepository[UnifiedAggregate, str] = MongoRepository(UnifiedAggregate)
+    await aggregates.save(UnifiedAggregate(name="taken"))
+    bus = ApplicationEventBus()
+    seen: list[str] = []
+
+    async def on_renamed(event: UnifiedRenamed) -> None:
+        seen.append(event.name)
+
+    bus.subscribe(UnifiedRenamed, on_renamed)
+    publisher = DomainEventPublisher(ApplicationEventPublisher(bus))
+
+    class Outer:
+        _session_factory = service._session_factory
+
+        @transactional()
+        async def rename(self, aggregate: UnifiedAggregate, name: str) -> None:
+            await service.repo.save(UnifiedRow(name=f"renamed to {name}"))
+            aggregate.rename(name)
+            with contextlib.suppress(DuplicateKeyException):
+                await aggregates.save(aggregate)
+
+    await publisher.start()
+    try:
+        clashing = UnifiedAggregate(name="new")
+        await Outer().rename(clashing, "taken")  # the document save fails, the relational unit commits
+        assert await _names(polyglot.engine) == ["renamed to taken"]
+        assert seen == []
+        assert [event.name for event in clashing.pending_events()] == ["taken"]
+        saved = UnifiedAggregate(name="other")
+        await Outer().rename(saved, "renamed")  # published once, as the document save commits
+        assert seen == ["renamed"]
+        assert saved.pending_events() == []
+    finally:
+        await publisher.stop()

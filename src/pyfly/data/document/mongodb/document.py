@@ -45,6 +45,8 @@ from beanie import Document, Insert, Replace, Save, SaveChanges, Update, before_
 from pydantic import Field, PrivateAttr, field_validator
 
 from pyfly.data.auditing import AuditingHandler, active_auditing_handler
+from pyfly.data.transaction.context import EMPTY, TransactionState, bind_state, current_state, reset_state
+from pyfly.data.transaction.unit_of_work import UnitOfWork
 from pyfly.domain.aggregate_root import AggregateRoot
 from pyfly.domain.domain_event import DomainEvent
 
@@ -166,10 +168,12 @@ class AggregateDocument(BaseDocument):
     published when the unit of work that saves it commits (the relational ``AggregateRoot``'s contract, for
     Beanie, whose documents cannot inherit ``AggregateRoot``'s slots).
 
-    An event raised inside a unit of work is tied to that unit; the pending events of a document
-    :class:`~pyfly.data.document.mongodb.repository.MongoRepository` saves are tied to the unit of the save.
-    The application's ``DomainEventPublisher`` publishes them as the unit commits; a unit that rolls back
-    publishes nothing, and the events stay pending on the document::
+    An event raised inside a unit of work of the document's datasource is tied to that unit; the pending events
+    of a document :class:`~pyfly.data.document.mongodb.repository.MongoRepository` saves are tied to the unit of
+    the save. The application's ``DomainEventPublisher`` publishes them as the unit commits; a unit that rolls
+    back publishes nothing, and the events stay pending on the document. A unit of another datasource (a
+    relational ``@transactional`` around the code) never takes them: its commit says nothing about the
+    document, whose save may still fail::
 
         class Order(AggregateDocument):
             status: str = "NEW"
@@ -185,8 +189,14 @@ class AggregateDocument(BaseDocument):
         return self._pending_events
 
     def raise_event(self, event: DomainEvent) -> None:
-        """Queue *event* for publication when the unit of work commits."""
-        AggregateRoot.raise_event(cast(Any, self), event)
+        """Queue *event* for publication when the document's unit of work commits (see the class documentation):
+        the aggregate observers see the document's unit as the innermost one, or no unit at all."""
+        unit = _document_unit(type(self))
+        token = bind_state(TransactionState(scopes=((unit.datasource, unit),)) if unit is not None else EMPTY)
+        try:
+            AggregateRoot.raise_event(cast(Any, self), event)
+        finally:
+            reset_state(token)
 
     def pending_events(self) -> list[DomainEvent]:
         """A snapshot of the pending events."""
@@ -197,3 +207,22 @@ class AggregateDocument(BaseDocument):
         events = self._pending_events
         self._pending_events = []
         return events
+
+
+def _document_unit(document_class: type[Document]) -> UnitOfWork | None:
+    """The innermost open unit of work on the client *document_class* is bound to (``None`` outside one, or when
+    the class is not bound to a database yet)."""
+    from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
+
+    try:
+        client = document_class.get_pymongo_collection().database.client
+    except Exception:  # noqa: BLE001 — not initialized (init_beanie has not run): no unit can hold it
+        return None
+    state = current_state()
+    candidates = [unit for _name, unit in reversed(state.scopes)]
+    candidates += [bound for _name, bound in reversed(state.units) if isinstance(bound, UnitOfWork)]
+    for unit in candidates:
+        manager = unit.manager
+        if isinstance(manager, MongoTransactionManager) and manager.owns(client) and not unit.completed:
+            return unit
+    return None

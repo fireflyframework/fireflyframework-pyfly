@@ -144,7 +144,7 @@ class OrderDocument(AggregateDocument):
         self.raise_event(OrderConfirmed(order_id=str(self.id)))
 ```
 
-The application's `DomainEventPublisher` (`pyfly.eda.domain_events`) publishes them as the document's unit of work commits: an event raised inside a unit is tied to it, and the pending events of a document `MongoRepository.save`/`save_all` writes are tied to the unit of the save. A unit that rolls back publishes nothing, and the events stay pending on the document. Listeners declared with a transaction phase run at that phase (`AFTER_COMMIT`: once the unit committed).
+The application's `DomainEventPublisher` (`pyfly.eda.domain_events`) publishes them as the document's unit of work commits: an event raised inside a unit of the document's datasource is tied to it, and the pending events of a document `MongoRepository.save`/`save_all` writes are tied to the unit of the save. A unit that rolls back publishes nothing, and the events stay pending on the document. A unit of another datasource never takes a document's events: an event raised inside a relational `@transactional` alone stays pending until a document unit saves the document, so the relational commit never publishes the event of a document whose save failed. Listeners declared with a transaction phase run at that phase (`AFTER_COMMIT`: once the unit committed).
 
 ### Settings Class
 
