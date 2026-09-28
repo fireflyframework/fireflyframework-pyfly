@@ -15,7 +15,8 @@
 
 Subclasses supply adapter-specific factories (``_create_eq``, ``_create_noop``)
 while inheriting the shared ``by()``, ``from_dict()``, and ``from_example()``
-algorithms.
+algorithms. An adapter reads its own kind of example object (a mapped entity, a document) by overriding
+``_example_values``.
 """
 
 from __future__ import annotations
@@ -55,16 +56,21 @@ class BaseFilterUtils(ABC):
     def from_example(cls, example: Any) -> Any:
         """Create a specification from an example entity/DTO.
 
-        Extracts non-``None`` field values and creates eq filters for each.
-        Supports dataclasses and any object with ``__dict__``.
+        Extracts non-``None`` field values and creates eq filters for each (``_example_values``): a
+        dataclass's fields, or the public attributes of any other object (a name with a leading underscore,
+        such as an ORM's instance state, is not a field). An adapter reads its entities through their mapping.
         """
-        if dataclasses.is_dataclass(example) and not isinstance(example, type):
-            fields = {f.name: getattr(example, f.name) for f in dataclasses.fields(example)}
-        else:
-            fields = vars(example)
-
+        fields = cls._example_values(example)
         specs = [cls._create_eq(field, value) for field, value in fields.items() if value is not None]
         return cls._combine_and(specs)
+
+    @classmethod
+    def _example_values(cls, example: Any) -> dict[str, Any]:
+        """The fields of *example* by name: a dataclass's fields, or the public attributes of any other
+        object."""
+        if dataclasses.is_dataclass(example) and not isinstance(example, type):
+            return {f.name: getattr(example, f.name) for f in dataclasses.fields(example)}
+        return {name: value for name, value in vars(example).items() if not name.startswith("_")}
 
     @classmethod
     def _combine_and(cls, specs: list[Any]) -> Any:

@@ -24,10 +24,16 @@ T = TypeVar("T")
 
 @runtime_checkable
 class TaskExecutorPort(Protocol):
-    """Port for executing async tasks."""
+    """Port for executing async tasks.
+
+    The ``TaskScheduler`` submits its runs and the ``@async_method`` calls through it. An implementation runs
+    each coroutine outside the submitter's unit of work (the built-in executors start it with
+    :func:`pyfly.data.transaction.detached`), and its :meth:`stop` waits for the tasks in flight, cancelling
+    and awaiting them when it is cancelled itself.
+    """
 
     async def submit(self, coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
-        """Submit a coroutine for execution. Returns an asyncio.Task."""
+        """Submit a coroutine for execution, outside the caller's unit of work. Returns an asyncio.Task."""
         ...
 
     async def start(self) -> None:
@@ -35,5 +41,5 @@ class TaskExecutorPort(Protocol):
         ...
 
     async def stop(self) -> None:
-        """Stop the executor, releasing resources."""
+        """Stop the executor: wait for the tasks in flight, then release resources."""
         ...

@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.09.08` | 2026-09-28 | The data layer on a unit of work: Spring `@transactional` semantics on every backend, one `DataSourceRegistry` for every engine, repositories that commit per call outside a transaction, the framework stores in the business transaction, MongoDB transactions, and a backend matrix (SQLite, PostgreSQL, MySQL, MariaDB, MongoDB replica set). Several breaking changes: see the changelog. |
 | `26.09.07` | 2026-09-24 | Identifiers survive PII redaction and `PHONE` means a phone number; the Postgres outbox DDL runs only when the tables are missing; the CQRS cache bridge subscribes one handler per rule instead of the wildcard. |
 | `26.09.06` | 2026-09-24 | Deferred user `@bean` factories, Kafka partition keys and dead-letter topics, cross-runtime event envelopes, `ManagementRoutesContributor` and `@write_operation`, mounted routes in `/openapi.json`, a real `MeterProvider`, and a transient `AsyncSession`. |
 | `26.09.05` | 2026-09-23 | Native webapps, branded welcome/errors, existing-model administration, and bilingual book appendices. |
@@ -90,17 +91,17 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.09.07"
+print(pyfly.__version__)  # → "26.09.08"
 ```
 
 ```bash
-pyfly --version            # → 26.09.07
+pyfly --version            # → 26.09.08
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.09.07) (Python 3.13.9)
+:: PyFly Framework :: (v26.09.08) (Python 3.13.9)
 ```
 
 ---

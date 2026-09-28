@@ -51,7 +51,7 @@ Implements `ShellRunnerPort` using `click.Group` as the root command.
 
 - **Constructor params:** `name` (app name), `help_text` (root help string)
 - **Grouped commands:** Commands with a `group` parameter are nested under `click.Group` sub-commands (e.g. `db migrate`, `db rollback`)
-- **Async handlers:** Async command handlers are automatically wrapped — `asyncio.run()` is used when no event loop is running, `ThreadPoolExecutor` fallback when inside a running loop
+- **Async handlers:** `run()`, `run_interactive()` and `ainvoke()` await an async command on the running loop, the application's (where its engine, pools and clients live); the synchronous `invoke()` runs one with `asyncio.run()` when no loop is running and refuses it (`RuntimeError`) inside a running loop. The REPL reads its input in a daemon thread, so the loop keeps running scheduled jobs and consumers between commands. See [Shell](../modules/shell.md#async-commands-run-on-the-applications-loop).
 
 ### Parameter Mapping
 
@@ -90,9 +90,10 @@ adapter.register_command(
 
 | Method | Description |
 |--------|-------------|
-| `invoke(args)` | Synchronous invocation returning `(exit_code, output)` |
-| `run(args)` | Async invocation returning exit code |
-| `run_interactive()` | Simple REPL loop — reads lines, splits tokens, dispatches |
+| `invoke(args)` | Synchronous invocation returning `(exit_code, output)`, without a running loop |
+| `ainvoke(args)` | Invocation on the running loop returning `(exit_code, output)` |
+| `run(args)` | Runs one command on the running loop, prints its output, returns the exit code |
+| `run_interactive()` | REPL loop — reads lines off the loop, splits tokens, runs each on the loop |
 
 ---
 

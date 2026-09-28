@@ -15,17 +15,32 @@
 
 from __future__ import annotations
 
+import functools
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import String
+from sqlalchemy import ForeignKey, String, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
+from pyfly.data import post_processor as base_post_processor_module
+from pyfly.data.page import Page
+from pyfly.data.pageable import Pageable, Sort
+from pyfly.data.post_processor import describe_method, is_stub
+from pyfly.data.query_parser import InvalidQueryMethodError, QueryMethodParser
+from pyfly.data.relational.sqlalchemy import post_processor as post_processor_module
+from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, SoftDeleteMixin
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
-from pyfly.data.relational.sqlalchemy.query import query
+from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query
+from pyfly.data.relational.sqlalchemy.query_compiler import QueryMethodCompiler
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime
+from tests.support.backend_matrix import RelationalBackend, enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -98,8 +113,10 @@ class AllDerivedTypesRepo(Repository[PPItem, UUID]):
 
 
 @pytest.fixture
-async def engine():
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(eng)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng
@@ -439,3 +456,609 @@ class TestConcreteMethodsPreserved:
         results = await repo.find_by_name("Alice")
         assert len(results) == 1
         assert results[0].name == "Alice"
+
+
+# ===========================================================================
+# 8. Stubs are recognized by the shape of their body (C002)
+# ===========================================================================
+
+
+class StubOwner(Base):
+    __tablename__ = "pp_stub_owner"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    email: Mapped[str] = mapped_column(String(100))
+
+
+class StubDoc(Base):
+    __tablename__ = "pp_stub_doc"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    owner_id: Mapped[str] = mapped_column(ForeignKey("pp_stub_owner.id"))
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True, default=None)
+
+
+class HandWrittenRepo(Repository[StubDoc, str]):
+    """Hand-written find_by_/count_by_/delete_by_ bodies without a single literal: none is a stub."""
+
+    async def find_by_name(self, name: str) -> list[StubDoc]:
+        result = await self._session.execute(select(StubDoc).where(func.lower(StubDoc.name) == func.lower(name)))
+        return list(result.scalars().all())
+
+    async def find_by_owner_email(self, email: str) -> list[StubDoc]:
+        """A join lookup: the entity has no ``owner_email`` property."""
+        statement = select(StubDoc).join(StubOwner, StubOwner.id == StubDoc.owner_id).where(StubOwner.email == email)
+        return list((await self._session.execute(statement)).scalars().all())
+
+    async def count_by_name(self, name: str) -> int:
+        return len(await self.find_by_name(name))
+
+    async def exists_by_name(self, name: str) -> bool:
+        return bool(await self.find_by_name(name))
+
+    async def delete_by_owner_id(self, owner_id: str) -> int:
+        """A soft delete: the rows stay, with ``deleted_at`` set."""
+        rows = (await self._session.execute(select(StubDoc).where(StubDoc.owner_id == owner_id))).scalars().all()
+        for row in rows:
+            row.deleted_at = datetime.now(UTC)
+        await self._session.flush()
+        return len(rows)
+
+
+class StubShapesRepo(Repository[StubDoc, str]):
+    """Every body shape that is a stub."""
+
+    async def find_by_name(self, name: str) -> list[StubDoc]: ...
+
+    async def count_by_name(self, name: str) -> int:
+        pass
+
+    async def exists_by_name(self, name: str) -> bool:
+        """Documented, and no body at all."""
+
+    async def find_by_owner_id(self, owner_id: str) -> list[StubDoc]:
+        """Documented stub."""
+        ...
+
+    async def count_by_owner_id(self, owner_id: str) -> int:
+        raise NotImplementedError
+
+    async def exists_by_owner_id(self, owner_id: str) -> bool:
+        raise NotImplementedError()
+
+    async def find_by_id_in(self, ids: list[str]) -> list[StubDoc]:
+        raise NotImplementedError("derived")
+
+
+class StubBase(Repository[StubDoc, str]):
+    """An intermediate base: its stubs are compiled for every repository that extends it."""
+
+    async def find_by_name(self, name: str) -> list[StubDoc]: ...
+
+    async def count_by_name(self, name: str) -> int: ...
+
+
+class InheritingRepo(StubBase):
+    """Inherits find_by_name as a stub, and overrides count_by_name with a real body."""
+
+    async def count_by_name(self, name: str) -> int:
+        return len(await self.find_by_name(name)) * 100
+
+
+@pytest.fixture
+async def file_session(relational_backend: RelationalBackend) -> AsyncIterator[AsyncSession]:
+    """A session on the sqlite-file lane (foreign keys on), with two owners and three documents."""
+    await relational_backend.create_tables(StubOwner, StubDoc)
+    engine = relational_backend.create_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all([StubOwner(id="o1", email="alice@example.com"), StubOwner(id="o2", email="bob@example.com")])
+        await session.flush()
+        session.add_all(
+            [
+                StubDoc(id="d1", name="MixedCase", owner_id="o1"),
+                StubDoc(id="d2", name="other", owner_id="o1"),
+                StubDoc(id="d3", name="other", owner_id="o2"),
+            ]
+        )
+        await session.flush()
+        yield session
+
+
+@pytest.mark.backends("sqlite-file")
+class TestStubDetection:
+    """A body with real code is never replaced, however little it holds; every stub shape is compiled."""
+
+    async def test_hand_written_bodies_without_literals_survive(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = HandWrittenRepo(StubDoc, file_session)
+        processor.after_init(repo, "handWritten")
+
+        assert not {
+            "find_by_name",
+            "find_by_owner_email",
+            "count_by_name",
+            "exists_by_name",
+            "delete_by_owner_id",
+        } & set(vars(repo))
+        assert [doc.id for doc in await repo.find_by_name("mixedcase")] == ["d1"]
+        assert sorted(doc.id for doc in await repo.find_by_owner_email("alice@example.com")) == ["d1", "d2"]
+        assert await repo.count_by_name("OTHER") == 2
+        assert await repo.exists_by_name("MIXEDCASE") is True
+
+    async def test_a_hand_written_soft_delete_keeps_its_rows(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = HandWrittenRepo(StubDoc, file_session)
+        processor.after_init(repo, "handWritten")
+
+        assert await repo.delete_by_owner_id("o1") == 2
+        rows = (await file_session.execute(text("SELECT id, deleted_at FROM pp_stub_doc ORDER BY id"))).all()
+        assert [(row[0], row[1] is not None) for row in rows] == [("d1", True), ("d2", True), ("d3", False)]
+
+    async def test_every_stub_shape_is_compiled(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = StubShapesRepo(StubDoc, file_session)
+        processor.after_init(repo, "stubShapes")
+
+        assert {
+            "find_by_name",
+            "count_by_name",
+            "exists_by_name",
+            "find_by_owner_id",
+            "count_by_owner_id",
+            "exists_by_owner_id",
+            "find_by_id_in",
+        } <= set(vars(repo))
+        assert [doc.id for doc in await repo.find_by_name("other")] in (["d2", "d3"], ["d3", "d2"])
+        assert await repo.count_by_name("other") == 2
+        assert await repo.exists_by_name("MixedCase") is True
+        assert sorted(doc.id for doc in await repo.find_by_owner_id("o1")) == ["d1", "d2"]
+        assert await repo.count_by_owner_id("o2") == 1
+        assert await repo.exists_by_owner_id("o3") is False
+        assert sorted(doc.id for doc in await repo.find_by_id_in(["d1", "d3"])) == ["d1", "d3"]
+
+    async def test_stubs_of_an_intermediate_base_are_compiled(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = InheritingRepo(StubDoc, file_session)
+        processor.after_init(repo, "inheriting")
+
+        assert sorted(doc.id for doc in await repo.find_by_name("other")) == ["d2", "d3"]
+        # The subclass's real override of the base's stub is kept.
+        assert "count_by_name" not in vars(repo)
+        assert await repo.count_by_name("other") == 200
+
+
+class SignatureShapesRepo(Repository[StubDoc, str]):
+    async def find_by_owner_id_and_name(self, owner_id: str, *, name: str) -> list[StubDoc]: ...
+
+    async def count_by_name_or_owner_id(self, *values: str) -> int: ...
+
+    async def exists_by_name(self, name: str = "other") -> bool: ...
+
+
+@pytest.mark.backends("sqlite-file")
+class TestArgumentBinding:
+    """A compiled method takes its arguments as the stub declares them."""
+
+    async def test_keyword_only_variadic_and_default_parameters(
+        self, processor: RepositoryBeanPostProcessor, file_session: AsyncSession
+    ):
+        repo = processor.after_init(SignatureShapesRepo(StubDoc, file_session), "signatures")
+        assert [doc.id for doc in await repo.find_by_owner_id_and_name("o1", name="other")] == ["d2"]
+        with pytest.raises(TypeError, match="find_by_owner_id_and_name"):
+            await repo.find_by_owner_id_and_name("o1", "other")
+        assert await repo.count_by_name_or_owner_id("MixedCase", "o2") == 2
+        assert await repo.exists_by_name() is True
+        assert await repo.exists_by_name("nothing") is False
+
+
+class HookedOrder(SoftDeleteMixin, Base):
+    __tablename__ = "pp_hooked_order"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    status: Mapped[str] = mapped_column(String(20))
+
+
+class HookedOrderRepository(SoftDeleteRepository[HookedOrder, int]):
+    pass
+
+
+class HookedStubRepository(SoftDeleteRepository[HookedOrder, int]):
+    async def find_by_status(self, status: str) -> list[HookedOrder]: ...
+
+    async def delete_by_status(self, status: str) -> int: ...
+
+
+class LegacyHooksProcessor(RepositoryBeanPostProcessor):
+    """A processor written against the legacy hooks: it overrides ``_compile_derived`` and ``_wrap_derived_method``
+    only, and records when each runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    def _compile_derived(self, parsed: Any, entity: Any, bean: Any, *, return_type: Any = None) -> Any:
+        self.calls.append(f"compile {parsed.prefix}")
+        return super()._compile_derived(parsed, entity, bean, return_type=return_type)
+
+    def _wrap_derived_method(self, compiled_fn: Any) -> Any:
+        wrapped = super()._wrap_derived_method(compiled_fn)
+        calls = self.calls
+
+        async def recorded(self_arg: Any, *args: Any) -> Any:
+            calls.append("call")
+            return await wrapped(self_arg, *args)
+
+        return recorded
+
+
+class WrapOnlyProcessor(RepositoryBeanPostProcessor):
+    """A processor that overrides ``_wrap_derived_method`` alone."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wrapped = 0
+
+    def _wrap_derived_method(self, compiled_fn: Any) -> Any:
+        self.wrapped += 1
+        return super()._wrap_derived_method(compiled_fn)
+
+
+@pytest.mark.backends("sqlite-file")
+class TestLegacyHooks:
+    """``_compile_derived`` and ``_wrap_derived_method`` still give a working method, for the repository the call is
+    made on."""
+
+    async def test_the_hooks_compile_a_soft_delete(self, relational_backend: RelationalBackend):
+        await relational_backend.create_tables(HookedOrder)
+        engine = relational_backend.create_engine()
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            session.add_all([HookedOrder(id=1, status="open"), HookedOrder(id=2, status="done")])
+            await session.flush()
+            processor = RepositoryBeanPostProcessor()
+            repo = HookedOrderRepository(HookedOrder, session)
+            parsed = processor._query_parser.parse("delete_by_status")
+            method = processor._wrap_derived_method(processor._compile_derived(parsed, HookedOrder, repo))
+            assert await method(repo, "open") == 1
+            rows = (await session.execute(text("SELECT id, deleted_at FROM pp_hooked_order ORDER BY id"))).all()
+            assert [(row[0], row[1] is not None) for row in rows] == [(1, True), (2, False)]
+
+    async def test_a_processor_that_overrides_the_hooks_builds_its_methods_with_them(
+        self, relational_backend: RelationalBackend
+    ):
+        """``after_init`` builds a derived method through a subclass's ``_compile_derived`` and
+        ``_wrap_derived_method``, as it did before the processor compiled derived queries its own way: overriding
+        them is never silently bypassed."""
+        await relational_backend.create_tables(HookedOrder)
+        engine = relational_backend.create_engine()
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            session.add_all([HookedOrder(id=1, status="open"), HookedOrder(id=2, status="done")])
+            await session.flush()
+            processor = LegacyHooksProcessor()
+            repo = processor.after_init(HookedStubRepository(HookedOrder, session), "hooked")
+            assert processor.calls == ["compile find_by", "compile delete_by"]
+            assert [order.id for order in await repo.find_by_status(status="done")] == [2]
+            assert await repo.delete_by_status("open") == 1
+            assert processor.calls[2:] == ["call", "call"]
+            rows = (await session.execute(text("SELECT id, deleted_at FROM pp_hooked_order ORDER BY id"))).all()
+            assert [(row[0], row[1] is not None) for row in rows] == [(1, True), (2, False)]
+
+            wrap_only = WrapOnlyProcessor()
+            again = wrap_only.after_init(HookedStubRepository(HookedOrder, session), "hooked_again")
+            assert wrap_only.wrapped == 2
+            assert [order.id for order in await again.find_by_status("done")] == [2]
+
+
+class TestIsStub:
+    """``is_stub`` reads the body's shape, whatever the Python version compiles it to."""
+
+    def test_stub_shapes(self):
+        async def ellipsis(self, x): ...
+
+        async def documented(self, x):
+            """Doc."""
+
+        def sync_pass(self, x):
+            pass
+
+        async def raises(self, x):
+            raise NotImplementedError
+
+        async def raises_with_message(self, x):
+            raise NotImplementedError("not yet")
+
+        for function in (ellipsis, documented, sync_pass, raises, raises_with_message):
+            assert is_stub(function), function.__name__
+
+    def test_real_bodies(self):
+        async def delegating(self, x):
+            return await self.find_all_by_spec(x)
+
+        async def returns_argument(self, x):
+            return x
+
+        async def returns_literal(self, x):
+            return "x"
+
+        async def raises_something_else(self, x):
+            raise ValueError
+
+        async def documented_and_real(self, x):
+            """Doc."""
+            return await self.find_all_by_spec(x)
+
+        for function in (delegating, returns_argument, returns_literal, raises_something_else, documented_and_real):
+            assert not is_stub(function), function.__name__
+
+    def test_a_wrapped_stub_is_read_through_its_wrappers(self):
+        async def stub(self, x): ...
+
+        @functools.wraps(stub)
+        async def wrapper(self, x):
+            return await stub(self, x)
+
+        assert is_stub(wrapper)
+        assert not is_stub(len)
+
+
+# ===========================================================================
+# 9. Derived methods are checked against their entity when the repository is built (C128)
+# ===========================================================================
+
+
+class CheckedItem(Base):
+    __tablename__ = "pp_checked_item"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(String(40))
+    tag: Mapped[str] = mapped_column(String(20))
+    balance: Mapped[int] = mapped_column(default=0)
+    active: Mapped[bool] = mapped_column(default=True)
+    owner_id: Mapped[str | None] = mapped_column(ForeignKey("pp_stub_owner.id"), nullable=True)
+    owner: Mapped[StubOwner | None] = relationship()
+
+    @property
+    def label(self) -> str:
+        return f"{self.name}/{self.tag}"
+
+
+class _Typo(Repository[CheckedItem, int]):
+    async def find_by_nmae(self, name: str) -> list[CheckedItem]: ...
+
+
+class _NotAProperty(Repository[CheckedItem, int]):
+    async def find_by_label(self, label: str) -> list[CheckedItem]: ...
+
+
+class _MissingArgument(Repository[CheckedItem, int]):
+    async def delete_by_tag(self, tag: str, item_id: int) -> int: ...
+
+
+class _MissingParameter(Repository[CheckedItem, int]):
+    async def find_by_balance_between(self, low: int) -> list[CheckedItem]: ...
+
+
+class _PageWithoutPageable(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> Page[CheckedItem]: ...
+
+
+class _PageableOnASingleResult(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str, pageable: Pageable) -> CheckedItem | None: ...
+
+
+class _FoldedNumber(Repository[CheckedItem, int]):
+    async def find_by_balance_ignore_case(self, balance: int) -> list[CheckedItem]: ...
+
+
+class _TrueOnAString(Repository[CheckedItem, int]):
+    async def find_by_name_true(self) -> list[CheckedItem]: ...
+
+
+class _RelationshipIn(Repository[CheckedItem, int]):
+    async def find_by_owner_in(self, owners: list[StubOwner]) -> list[CheckedItem]: ...
+
+
+class _CountAsList(Repository[CheckedItem, int]):
+    async def count_by_tag(self, tag: str) -> list[CheckedItem]: ...
+
+
+class _ExistsAsInt(Repository[CheckedItem, int]):
+    async def exists_by_tag(self, tag: str) -> int: ...
+
+
+class _DeleteAsString(Repository[CheckedItem, int]):
+    async def delete_by_tag(self, tag: str) -> str: ...
+
+
+class _FindScalars(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> list[int]: ...
+
+
+class _TwoResultTypes(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> int | str: ...
+
+
+class _UnresolvedAnnotation(Repository[CheckedItem, int]):
+    async def find_by_tag(self, tag: str) -> list[Missing]: ...  # type: ignore[name-defined]  # noqa: F821
+
+
+class _OrderByUnknown(Repository[CheckedItem, int]):
+    async def find_by_tag_order_by_label(self, tag: str) -> list[CheckedItem]: ...
+
+
+class _BadQuery(Repository[CheckedItem, int]):
+    @query("SELECT c FROM CheckedItem c WHERE c.nmae = :name")
+    async def by_name(self, name: str) -> list[CheckedItem]: ...
+
+
+class _Valid(Repository[CheckedItem, int]):
+    """Everything that is checked, done right."""
+
+    async def find_by_tag_and_balance_between(self, tag: str, low: int, high: int) -> list[CheckedItem]: ...
+
+    async def find_by_name_ignore_case(self, name: str) -> CheckedItem | None: ...
+
+    async def find_by_active_true_order_by_balance_desc(self, pageable: Pageable) -> Page[CheckedItem]: ...
+
+    async def find_by_owner(self, owner: StubOwner | None) -> list[CheckedItem]: ...
+
+    async def find_by_tag_in(self, tags: list[str], sort: Sort) -> list[CheckedItem]: ...
+
+    async def count_by_tag(self, tag: str) -> int: ...
+
+    async def exists_by_tag(self, tag: str) -> bool: ...
+
+    async def delete_by_tag(self, tag: str) -> None: ...
+
+
+class _ValidWithQuery(_Valid):
+    @query("SELECT c FROM CheckedItem c WHERE c.tag = :tag")
+    async def by_tag(self, tag: str) -> list[CheckedItem]: ...
+
+
+class _OptionalScalars(Repository[CheckedItem, int]):
+    """A count and an exists annotated ``| None``, as a ``delete_by`` or a ``@modifying`` count may be."""
+
+    async def count_by_tag(self, tag: str) -> int | None: ...
+
+    async def exists_by_tag(self, tag: str) -> bool | None: ...
+
+
+class TestDerivedMethodsAreCheckedAtStartup:
+    """A derived method that cannot work fails when the post-processor builds the repository, not on its first
+    call (Spring rejects such a method at bootstrap)."""
+
+    @pytest.mark.parametrize(
+        ("repository_type", "message"),
+        [
+            (_Typo, "'nmae' names no property"),
+            (_NotAProperty, "'label' names no property"),
+            (_MissingArgument, "takes 1 argument .* declares 2 value parameters"),
+            (_MissingParameter, "takes 2 arguments .* declares 1 value parameter"),
+            (_PageWithoutPageable, "needs a Pageable"),
+            (_PageableOnASingleResult, "several entities takes a Pageable"),
+            (_FoldedNumber, "cannot ignore case"),
+            (_TrueOnAString, "not a boolean property"),
+            (_RelationshipIn, "is a relationship"),
+            (_CountAsList, "count_by method returns int"),
+            (_ExistsAsInt, "exists_by method returns bool"),
+            (_DeleteAsString, "delete_by method returns int"),
+            (_FindScalars, "find_by method returns CheckedItem entities"),
+            (_TwoResultTypes, "one type"),
+            (_UnresolvedAnnotation, "annotations do not resolve"),
+            (_OrderByUnknown, "order_by_label"),
+            (_BadQuery, "no attribute or column 'nmae'"),
+        ],
+    )
+    def test_the_repository_fails_to_build(
+        self, processor: RepositoryBeanPostProcessor, repository_type: type[Repository[CheckedItem, int]], message: str
+    ):
+        with pytest.raises(InvalidQueryMethodError, match=message) as raised:
+            processor.after_init(repository_type(CheckedItem), repository_type.__name__)
+        assert repository_type.__name__ in str(raised.value)
+
+    def test_a_valid_repository_builds(self, processor: RepositoryBeanPostProcessor):
+        repository = processor.after_init(_Valid(CheckedItem), "valid")
+        compiled = {name for name in vars(repository) if not name.startswith("_")}
+        assert compiled == {name for name in vars(_Valid) if not name.startswith("_")}
+
+    async def test_a_count_or_an_exists_may_be_annotated_optional(
+        self, processor: RepositoryBeanPostProcessor, session: AsyncSession
+    ):
+        """``count_by -> int | None`` and ``exists_by -> bool | None`` build, as ``delete_by -> int | None`` and a
+        ``@modifying`` ``-> int | None`` do, and return the count and the answer (never ``None``)."""
+        session.add_all([CheckedItem(id=1, name="a", tag="x"), CheckedItem(id=2, name="b", tag="x")])
+        await session.flush()
+        repository = processor.after_init(_OptionalScalars(CheckedItem, session), "optional")
+        assert await repository.count_by_tag("x") == 2
+        assert await repository.count_by_tag("y") == 0
+        assert await repository.exists_by_tag("x") is True
+        assert await repository.exists_by_tag("y") is False
+
+    def test_a_transient_repository_compiles_its_methods_once(
+        self, processor: RepositoryBeanPostProcessor, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The methods are built for the first instance of a class and bound to every later one: a transient or
+        request-scoped repository describes, parses and compiles nothing per instance."""
+        first = processor.after_init(_ValidWithQuery(CheckedItem), "first")
+        built: list[str] = []
+        for owner, name in (
+            (QueryMethodCompiler, "compile"),
+            (QueryExecutor, "compile_query_method"),
+            (QueryMethodParser, "parse"),
+        ):
+            monkeypatch.setattr(owner, name, _counted(getattr(owner, name), built, name))
+        for module in (post_processor_module, base_post_processor_module):
+            monkeypatch.setattr(module, "describe_method", _counted(describe_method, built, "describe_method"))
+        second = RepositoryBeanPostProcessor().after_init(_ValidWithQuery(CheckedItem), "second")
+        assert built == []
+        for name in ("count_by_tag", "by_tag"):
+            assert getattr(second, name).__func__ is getattr(first, name).__func__
+            assert getattr(second, name).__self__ is second and getattr(first, name).__self__ is first
+
+    async def test_each_instance_runs_on_its_own_session(self, processor: RepositoryBeanPostProcessor, seeded_session):
+        """A shared implementation reads the repository it is called on: its session, its unit of work."""
+        seeded = processor.after_init(MixedRepo(PPItem, seeded_session), "seeded")
+        engine = seeded_session.bind
+        async with AsyncSession(engine) as empty_session:
+            empty = processor.after_init(MixedRepo(PPItem, empty_session), "empty")
+            assert [item.name for item in await seeded.find_by_name("Alice")] == ["Alice"]
+            assert [item.name for item in await seeded.find_by_role_query("user")] == ["Bob", "Dave"]
+            assert await empty.find_by_name("Alice") == []  # the seeded rows are not committed
+            assert await empty.find_by_role_query("user") == []
+
+    def test_a_processor_that_builds_methods_its_own_way_builds_them_per_instance(self):
+        built: list[int] = []
+
+        class Tracing(RepositoryBeanPostProcessor):
+            def _implement_derived(self, bean: Any, method: Any) -> Any:
+                built.append(id(bean))
+                return super()._implement_derived(bean, method)
+
+        first, second = _Valid(CheckedItem), _Valid(CheckedItem)
+        Tracing().after_init(first, "first")
+        Tracing().after_init(second, "second")
+        assert set(built) == {id(first), id(second)}
+
+    @pytest.mark.parametrize("how", ["subclass", "instance"])
+    def test_a_processor_with_a_compiler_of_its_own_compiles_with_it(
+        self, processor: RepositoryBeanPostProcessor, how: str
+    ):
+        """The derived queries another processor compiled for the same repository class are not reused by a
+        processor whose compiler is its own, set by its class or on the instance."""
+        processor.after_init(_Valid(CheckedItem), "default")  # compiles _Valid's derived queries
+        compiled: list[str] = []
+
+        class Recording(QueryMethodCompiler):
+            def compile(self, parsed: Any, entity: Any, **kwargs: Any) -> Any:
+                compiled.append(parsed.prefix)
+                return super().compile(parsed, entity, **kwargs)
+
+        class OwnCompiler(RepositoryBeanPostProcessor):
+            def __init__(self) -> None:
+                super().__init__()
+                self._query_compiler = Recording()
+
+        custom = OwnCompiler() if how == "subclass" else RepositoryBeanPostProcessor()
+        custom._query_compiler = Recording()
+        custom.after_init(_Valid(CheckedItem), "custom")
+        assert sorted(compiled) == ["count_by", "delete_by", "exists_by", *["find_by"] * 5]
+        compiled.clear()
+        processor.after_init(_Valid(CheckedItem), "default again")  # the default processor's plan, untouched
+        assert compiled == []
+
+
+def _counted(function: Any, calls: list[str], name: str) -> Any:
+    """*function*, recording *name* in *calls* each time it runs."""
+
+    @functools.wraps(function)
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(name)
+        return function(*args, **kwargs)
+
+    return counted

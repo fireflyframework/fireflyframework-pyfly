@@ -132,3 +132,23 @@ class TestExtraActuatorEndpoints:
         links = client.get("/actuator").json()["_links"]
         for eid in ("beans", "configprops", "mappings", "scheduledtasks", "threaddump", "caches", "conditions"):
             assert eid in links
+
+
+class TestConditionDescriptions:
+    def test_a_missing_bean_condition_that_counts_singletons_only_says_so(self):
+        from pyfly.actuator.endpoints.conditions_endpoint import _describe
+        from pyfly.context.conditions import conditional_on_missing_bean
+
+        class Engine:
+            pass
+
+        @conditional_on_missing_bean(Engine, singletons_only=True)
+        class Scoped:
+            pass
+
+        @conditional_on_missing_bean(Engine)
+        class AnyScope:
+            pass
+
+        assert _describe(Scoped.__pyfly_conditions__[0]) == "@conditional_on_missing_bean(Engine, singletons_only=True)"
+        assert _describe(AnyScope.__pyfly_conditions__[0]) == "@conditional_on_missing_bean(Engine)"

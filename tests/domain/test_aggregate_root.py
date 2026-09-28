@@ -92,3 +92,41 @@ def test_domain_event_assigns_id_and_timestamp_automatically() -> None:
     assert e1.event_id != e2.event_id
     assert e1.occurred_at is not None
     assert e1.event_type == "OrderPlaced"
+
+
+class _Mapped(AggregateRoot[int]):
+    """An aggregate built the way an ORM loads a row: without running ``AggregateRoot.__init__``."""
+
+    @classmethod
+    def loaded(cls) -> _Mapped:
+        return cls.__new__(cls)
+
+
+def test_an_aggregate_built_without_its_init_still_collects_events() -> None:
+    """An ORM-mapped aggregate (``class Order(Base, AggregateRoot[int])``) is loaded without
+    ``AggregateRoot.__init__``: raising, reading and draining its events must still work."""
+    order = _Mapped.loaded()
+    assert order.pending_events() == []
+    order.raise_event(OrderShipped(order_id="o-9"))
+    assert [type(e) for e in order.clear_events()] == [OrderShipped]
+    assert order.clear_events() == []
+
+
+def test_event_observers_see_every_raised_event_until_removed() -> None:
+    from pyfly.domain.aggregate_root import add_event_observer, remove_event_observer
+
+    seen: list[tuple[str | None, str]] = []
+
+    def observe(aggregate: AggregateRoot[object], event: DomainEvent) -> None:
+        seen.append((aggregate.id if isinstance(aggregate.id, str) else None, event.event_type))
+
+    add_event_observer(observe)
+    add_event_observer(observe)  # idempotent
+    try:
+        _Order(id="o-1").place(total=5)
+    finally:
+        remove_event_observer(observe)
+    _Order(id="o-2").place(total=5)
+    remove_event_observer(observe)  # idempotent
+
+    assert seen == [("o-1", "OrderPlaced")]

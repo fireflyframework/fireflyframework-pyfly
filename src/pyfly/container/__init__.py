@@ -18,6 +18,7 @@ from pyfly.container.bean import Qualifier, bean, primary
 from pyfly.container.container import Container
 from pyfly.container.exceptions import (
     BeanCreationException,
+    BeanCreationNotAllowedError,
     BeanCurrentlyInCreationError,
     NoSuchBeanError,
     NoUniqueBeanError,
@@ -40,6 +41,7 @@ from pyfly.container.types import Scope, ScopeHandler
 __all__ = [
     "Autowired",
     "BeanCreationException",
+    "BeanCreationNotAllowedError",
     "BeanCurrentlyInCreationError",
     "Container",
     "HIGHEST_PRECEDENCE",

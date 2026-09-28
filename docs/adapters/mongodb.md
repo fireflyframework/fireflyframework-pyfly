@@ -2,7 +2,7 @@
 
 > **Module:** Data Document — [Module Guide](../modules/data-document.md)
 > **Package:** `pyfly.data.document.mongodb`
-> **Backend:** Motor 3.3+, Beanie 1.25+ (ODM)
+> **Backend:** pymongo 4.x async client (`AsyncMongoClient`), Beanie 2.1+ (ODM)
 
 ## Quick Start
 
@@ -48,8 +48,18 @@ class OrderRepository(MongoRepository[OrderDocument, str]):
 | `pyfly.data.document.enabled` | `bool` | `false` | Enable the MongoDB adapter |
 | `pyfly.data.document.uri` | `str` | `"mongodb://localhost:27017"` | MongoDB connection URI |
 | `pyfly.data.document.database` | `str` | `"pyfly"` | Database name |
+| `pyfly.data.document.datasource` | `str` | `"document"` | Datasource name of the document units of work |
 | `pyfly.data.document.min_pool_size` | `int` | `0` | Minimum connection pool size |
 | `pyfly.data.document.max_pool_size` | `int` | `100` | Maximum connection pool size |
+| `pyfly.data.document.max-idle-time`, `connect-timeout`, `server-selection-timeout`, `socket-timeout`, `wait-queue-timeout` | `float` (seconds) | pymongo's | Pool and connection timeouts |
+| `pyfly.data.document.app-name` | `str` | none | Application name the server logs |
+| `pyfly.data.document.tz-aware` | `bool` | `true` | Datetimes come back as aware UTC values |
+| `pyfly.data.document.uuid-representation` | `str` | `"standard"` | How UUIDs are stored |
+| `pyfly.data.document.options` | map | `{}` | Any other `AsyncMongoClient` keyword argument |
+| `pyfly.data.document.models` | list | `[]` | Document classes or packages to initialize besides the repositories' |
+| `pyfly.data.document.transaction.read-concern` / `write-concern` / `max-commit-time` | | the client's | Transaction options |
+| `pyfly.data.document.transaction.default` | `bool` | when no relational layer | Whether the document datasource is `@transactional`'s default |
+| `pyfly.data.document.health.timeout` | `float` | `2.0` | Seconds the readiness check waits for `ping` |
 
 ---
 
@@ -57,15 +67,17 @@ class OrderRepository(MongoRepository[OrderDocument, str]):
 
 ### BaseDocument
 
-`BaseDocument` extends Beanie's `Document` with audit fields:
+`BaseDocument` extends Beanie's `Document` with audit fields, kept current on every write with the application's `AuditorAware` and `DateTimeProvider`:
 
-- `created_at` — Timestamp set on insert
-- `updated_at` — Timestamp updated on modification
-- `created_by` / `updated_by` — Audit user tracking
+- `created_at` — set on insert (aware UTC)
+- `updated_at` — set on insert and every update (aware UTC)
+- `created_by` / `updated_by` — the auditor on insert, and the current auditor on every update
+
+`AggregateDocument` adds `raise_event()`: domain events published when the unit of work that saves the document commits.
 
 ### Beanie Initialization
 
-The adapter calls `init_beanie()` at startup to register all document models with the Motor client. Document discovery is automatic via the DI container.
+The adapter calls `init_beanie()` at startup to bind the document models to the database: every repository's document, the documents their `Link` fields reach and the configured `models`. Beanie binds a class to one database per process: contexts that configure the same client share it, and a context that would rebind the documents to another database fails to start (one document datasource per process).
 
 ### MongoQueryMethodCompiler
 
@@ -77,10 +89,10 @@ Wires compiled query methods onto `MongoRepository` subclasses at startup — id
 
 ### Transactions
 
-Use the unified **`@transactional`** (from `pyfly.data`) for multi-document transactions — the
-same annotation as the relational backend. On a service exposing a Motor client as
-`self._motor_client`, it opens a session + transaction and injects it as the `session` keyword
-argument (requires a MongoDB replica set):
+Use the unified **`@transactional`** (from `pyfly.data`) for multi-document transactions: the same annotation, and
+the same unit-of-work semantics, as the relational backend. The `MongoTransactionManager` binds the unit's
+`ClientSession` to the running task, and every `MongoRepository` call inside the unit passes it to the driver
+(requires a MongoDB replica set; a standalone server refuses a transaction with a clear error):
 
 ```python
 from pyfly.container import service
@@ -89,22 +101,37 @@ from pyfly.data import transactional
 
 @service
 class AccountService:
-    def __init__(self, motor_client) -> None:
-        self._motor_client = motor_client  # selects the MongoDB transaction manager
+    def __init__(self, accounts: AccountRepository) -> None:
+        self._accounts = accounts
 
-    @transactional()
-    async def transfer(self, from_id: str, to_id: str, amount: float, *, session=None) -> None:
-        ...
+    @transactional(datasource="document")
+    async def transfer(self, from_id: str, to_id: str, amount: float) -> None:
+        source = await self._accounts.find_by_id(from_id)
+        target = await self._accounts.find_by_id(to_id)
+        source.balance -= amount
+        target.balance += amount
+        await self._accounts.save_all([source, target])
 ```
 
+Every propagation but `NESTED` (MongoDB has no savepoints: `NestedTransactionNotSupportedError`) works as on the
+relational backend, and only `Isolation.DEFAULT` is accepted (MongoDB has no isolation levels). A legacy service
+exposing `self._motor_client` (an `AsyncMongoClient`) still selects the MongoDB manager, and a coroutine that
+declares a `session` parameter still receives the unit's session; `current_session()` gives it to code that calls
+Beanie directly. Outside a transaction, repository reads run without one and writes in a short unit of their own.
+
 > `from pyfly.data.document.mongodb import mongo_transactional` still works but is a **deprecated
-> alias** of `@transactional`.
+> alias** of `@transactional`, and `run_mongo_transaction` is deprecated too (it runs through the unit of
+> work).
 
 ---
 
 ## Testing
 
-Use a test MongoDB instance or [mongomock-motor](https://github.com/michaelkryukov/mongomock-motor) for unit tests. Configure a dedicated test database:
+Test against a real MongoDB replica set: `pyfly.testing.testcontainers.mongodb_replica_set_container()` starts a
+single-node one (MongoDB 7, `rs0`, `directConnection=true`) that runs transactions, and
+`pyfly_config_for(container)` points `pyfly.data.document.uri` at it. The repositories pass a session on every
+call, and a transaction needs a replica set, so test against a real server rather than an in-memory fake.
+Configure a dedicated test database:
 
 ```yaml
 # pyfly-test.yaml

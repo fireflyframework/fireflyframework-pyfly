@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Outbound ports: the Spring-parity repository hierarchy and session interface.
+"""Outbound ports: the Spring-parity repository hierarchy and the (deprecated) session port.
 
 The repository protocols mirror Spring Data's reactive lineage, adapted to
 asyncio (``async def`` returning materialised values + an ``AsyncIterator``
@@ -20,9 +20,14 @@ streaming method as the ``Flux<T>`` analogue):
     CrudRepository[T, ID]
        └─ ReactiveSortingRepository[T, ID]        # + find_all(Sort), stream_all
              └─ PagingAndSortingRepository[T, ID]  # + find_all(Pageable) -> Page[T]
+                   └─ BatchRepository[T, ID]       # + delete_*_in_batch, find_slice(Pageable) -> Slice[T]
 
 ``RepositoryPort`` is retained as the hexagonal "secondary port" name and is an
 alias of :class:`CrudRepository` so the framework has a single CRUD vocabulary.
+
+:class:`Persistable` is the optional hook an entity implements to tell ``save`` whether it is new (Spring's
+``Persistable.isNew()``): an entity with an application-assigned key that knows it was never stored is then
+inserted at once, without the lookup a merge needs.
 """
 
 from __future__ import annotations
@@ -30,8 +35,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, TypeVar, overload, runtime_checkable
 
-from pyfly.data.page import Page
+from pyfly.data.page import Page, Slice
 from pyfly.data.pageable import Pageable, Sort
+from pyfly.data.transaction.manager import TransactionManager
 
 T = TypeVar("T")
 ID = TypeVar("ID")
@@ -93,17 +99,42 @@ class PagingAndSortingRepository(ReactiveSortingRepository[T, ID], Protocol[T, I
     async def find_all(self, criteria: Pageable, **filters: Any) -> Page[T]: ...
 
 
+@runtime_checkable
+class BatchRepository(PagingAndSortingRepository[T, ID], Protocol[T, ID]):
+    """Adds bulk deletes and count-free paging (Spring ``JpaRepository``'s ``deleteAllInBatch`` and
+    ``deleteAllByIdInBatch``, and ``Slice``).
+
+    ``delete_all``/``delete_all_by_id`` delete entity by entity, so the backend's cascades, version checks and
+    delete hooks run; the ``*_in_batch`` forms are one bulk statement per chunk that bypasses them, by design.
+    ``find_slice`` returns a page and whether another one follows, with no count query.
+    """
+
+    async def delete_all_in_batch(self, entities: list[T] | None = None) -> None: ...
+
+    async def delete_all_by_id_in_batch(self, ids: list[ID]) -> None: ...
+
+    async def find_slice(self, pageable: Pageable, **filters: Any) -> Slice[T]: ...
+
+
+@runtime_checkable
+class Persistable(Protocol):
+    """An entity that tells ``save`` whether it is new (Spring's ``Persistable``).
+
+    Without it, an entity is new when its version is ``None`` (a versioned entity), else when its primary key
+    is ``None``; an entity that is not new is merged (a lookup, then an ``UPDATE`` or an ``INSERT``). Implement
+    ``is_new`` as a method (or a property) on the entity class; a mapped column of that name is not a hook.
+    """
+
+    def is_new(self) -> bool: ...
+
+
 # Backwards-compatible hexagonal alias — the generic outbound CRUD port now
 # shares the Spring-parity contract (one CRUD vocabulary across the framework).
 RepositoryPort = CrudRepository
 
 
-@runtime_checkable
-class SessionPort(Protocol):
-    """Abstract session interface for transaction management."""
-
-    async def begin(self) -> Any: ...
-
-    async def commit(self) -> None: ...
-
-    async def rollback(self) -> None: ...
+# Deprecated: nothing implemented the old three-method SessionPort. Transactions are driven through the
+# TransactionManager SPI of the unit of work (begin/commit/rollback per datasource, savepoints, auto units),
+# which every backend adapter implements.
+SessionPort = TransactionManager
+"""Deprecated alias of :class:`pyfly.data.transaction.manager.TransactionManager`."""

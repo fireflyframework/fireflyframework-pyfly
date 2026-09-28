@@ -110,11 +110,13 @@ PyFlyException
 |   +-- ValidationException
 |   +-- ResourceNotFoundException
 |   +-- ConflictException
+|   |   +-- DataIntegrityException
+|   |   |   +-- DuplicateKeyException
+|   |   +-- ConcurrencyException
+|   |       +-- OptimisticLockingFailureException
 |   +-- PreconditionFailedException
 |   +-- GoneException
 |   +-- InvalidRequestException
-|   +-- DataIntegrityException
-|   +-- ConcurrencyException
 |   +-- LockedResourceException
 |   +-- MethodNotAllowedException
 |   +-- UnsupportedMediaTypeException
@@ -324,7 +326,10 @@ raise InvalidRequestException(
 
 ### DataIntegrityException
 
-Raised when a data integrity constraint is violated.
+Raised when a data integrity constraint is violated. It is a `ConflictException` (HTTP 409). Repositories
+and units of work raise it themselves for a backend's integrity error, `DuplicateKeyException` for a unique
+key, with `context["violation"]` and `context["constraint"]` and no SQL in the message (see the relational
+module's *Persistence Exception Translation*).
 
 ```python
 raise DataIntegrityException(
@@ -338,7 +343,9 @@ raise DataIntegrityException(
 
 ### ConcurrencyException
 
-Raised on concurrent modification conflicts.
+Raised on concurrent modification conflicts. It is a `ConflictException` (HTTP 409). Repositories and units
+of work raise its subclass `OptimisticLockingFailureException` when a `VersionedMixin` entity was changed by
+another transaction since it was read.
 
 ```python
 raise ConcurrencyException(
@@ -713,18 +720,19 @@ exceptions into PyFly exceptions before deciding the status:
 | `PydanticExceptionConverter` | `pydantic.ValidationError` | `ValidationException` | 422 |
 | `JSONExceptionConverter` | `json.JSONDecodeError` | `InvalidRequestException` | 400 |
 | `TimeoutExceptionConverter` | `TimeoutError` / `asyncio.TimeoutError` | `OperationTimeoutException` | 504 |
-| `SQLAlchemyIntegrityExceptionConverter` | `sqlalchemy.exc.IntegrityError` | `ConflictException` | 409 |
+| `SQLAlchemyIntegrityExceptionConverter` | `sqlalchemy.exc.IntegrityError` | `DataIntegrityException` (`DuplicateKeyException` for a unique key), a `ConflictException` naming the constraint, never the SQL or its values | 409 |
+| `PersistenceExceptionConverter` | any other persistence error the data layer translates (`StaleDataError`, MariaDB error 1020, MongoDB duplicate-key and write-conflict errors) | its kernel exception (`OptimisticLockingFailureException`, `DuplicateKeyException`...) | 409 |
 | `HttpxExceptionConverter` | `httpx.TimeoutException` (and subclasses) | `GatewayTimeoutException` | 504 |
 | `HttpxExceptionConverter` | other `httpx.HTTPError` subclasses | `BadGatewayException` | 502 |
 | `CircuitBreakerExceptionConverter` | `CircuitBreakerException` (open circuit) | `ServiceUnavailableException` | 503 |
 
-The SQLAlchemy, httpx, and circuit-breaker converters are **lazy-loaded**: each
-converter's `can_handle()` method performs its own `import` at check time, so the
+The SQLAlchemy, persistence, httpx and circuit-breaker converters are **lazy-loaded**:
+each converter's `can_handle()` method performs its own `import` at check time, so the
 converter silently returns `False` (and is a no-op) when the corresponding library
 is not installed. No optional dependency is required for the other three converters
 (`pydantic`, `json`, and stdlib `TimeoutError`).
 
-All six built-in converters are auto-discovered and registered via
+All seven built-in converters are auto-discovered and registered via
 `default_exception_converters()`. User-registered `ExceptionConverter` beans are
 appended to the chain after the built-ins. If no converter matches, the handler
 returns a generic `500` response without leaking internal details.

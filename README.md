@@ -13,7 +13,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.09.07-brightgreen" alt="Version: 26.09.07"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.09.08-brightgreen" alt="Version: 26.09.08"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -311,7 +311,7 @@ This bean is created only when (1) no user-provided `CacheAdapter` exists and (2
 | `server_hypercorn` | `HypercornServerAutoConfiguration` | `hypercorn` | `HypercornServerAdapter` | none |
 | `event-loop` | `EventLoopAutoConfiguration` | `uvloop` / `winloop` | Event loop policy | `asyncio` |
 | `relational` | `RelationalAutoConfiguration` | `sqlalchemy` | `Repository[T, ID]` | none |
-| `document` | `DocumentAutoConfiguration` | `motor`, `beanie` | `MongoRepository[T, ID]` | none |
+| `document` | `DocumentAutoConfiguration` | `beanie` (+ `pyfly.data.document.enabled`) | PyMongo `AsyncMongoClient`, `MongoRepository[T, ID]`, `MongoTransactionManager` | none |
 | `messaging` | `MessagingAutoConfiguration` | `aiokafka` / `aio-pika` | `KafkaAdapter` / `RabbitMQAdapter` | `InMemoryMessageBroker` |
 | `cache` | `CacheAutoConfiguration` | `redis.asyncio` | `RedisCacheAdapter` | `InMemoryCache` |
 | `client` | `ClientAutoConfiguration` | `httpx` | `HttpxClientAdapter` | none |
@@ -492,6 +492,7 @@ from pyfly.eventsourcing import (
     AggregateRoot, DomainEvent, domain_event,
     EventStore, SqlAlchemyEventStore, TransactionalOutbox,
 )
+from pyfly.eventsourcing.repository import EventSourcedRepository
 
 @domain_event
 @dataclass(frozen=True)
@@ -532,20 +533,18 @@ class Account(AggregateRoot):
     def _on_deposit(self, e: MoneyDeposited) -> None:
         self.balance += e.amount
 
-# Persisting and rebuilding
-store: EventStore = SqlAlchemyEventStore(session_factory)
+# Persisting and rebuilding. The event_store bean is a SqlAlchemyEventStore on a datasource of the
+# registry with pyfly.eventsourcing.store.provider: sqlalchemy (an InMemoryEventStore otherwise).
+store: EventStore = context.get_bean(EventStore)
+repo = EventSourcedRepository(store, factory=Account)
+
 account = Account.open("acc-42", "Alice", 100)
 account.deposit(25)
-await store.append(account.id, account.pending_events(), expected_version=account.version - len(account.pending_events()))
-account.mark_committed()
+await repo.save(account)            # appends the pending events at the version the aggregate was loaded with
 
 # Later — reconstruct from the log:
-events = await store.load("acc-42")
-rebuilt = Account()
-rebuilt.id = "acc-42"
-for envelope in events:
-    rebuilt.replay(envelope.event_type, envelope.event)
-assert rebuilt.balance == 125
+rebuilt = await repo.load("acc-42")
+assert rebuilt is not None and rebuilt.balance == 125
 ```
 
 **Highlights:** `AggregateRoot` with `when()`/`apply()`/`replay()`, optimistic concurrency via `expected_version`, snapshots (`SnapshotStore`), `TransactionalOutbox` for at-least-once publishing, `Projection` + `ProjectionRunner` for read models, `EventUpcaster` for schema evolution. Adapters: `InMemoryEventStore`, `SqlAlchemyEventStore`. See [docs/modules/eventsourcing.md](docs/modules/eventsourcing.md).
@@ -811,15 +810,14 @@ class Order(AggregateRoot[str]):
         assert self.id is not None
         self.raise_event(OrderShipped(order_id=self.id, tracking_number=tracking_number))
 
-# Application service:
+# Application service, inside @transactional:
 order = Order("o-1", Money(100, "EUR"))
 order.ship("trk-42")
-
-events = order.clear_events()      # drained by the repository
-# repository.save(order); for e in events: bus.publish(e)
+# await orders.save(order): the DomainEventPublisher (on by default) publishes OrderShipped as the
+# unit of work commits, and drops it when the unit rolls back (see docs/modules/domain.md)
 ```
 
-For domain-tier microservices, the **`@enable_domain_stack`** starter activates CQRS, the transactional engine (saga/workflow/TCC), event sourcing, the rule engine, and the relational data layer in a single decorator — mirroring `fireflyframework-starter-domain` (Java) and `AddFireflyDomain` (.NET):
+For domain-tier microservices, the **`@enable_domain_stack`** starter activates CQRS, the transactional engine (saga/workflow/TCC), event sourcing, the rule engine, and the relational data layer (set `pyfly.data.relational.url`; only the `dev` profile falls back to `./app.db`) in a single decorator — mirroring `fireflyframework-starter-domain` (Java) and `AddFireflyDomain` (.NET):
 
 ```python
 from pyfly.core import pyfly_application
@@ -840,7 +838,7 @@ from pyfly.starters.domain import (
 )
 ```
 
-See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD microservice that uses every primitive: a layered split (interfaces / models / core / web / sdk), a real `Wallet` aggregate built on a `Money` value object, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), CQRS handlers, an event-sourced ledger, domain-event publishing, and a money-transfer saga with full compensation. See [docs/modules/domain.md](docs/modules/domain.md).
+See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD microservice that uses every primitive: a layered split (interfaces / models / core / web / sdk), a real `Wallet` aggregate built on a `Money` value object, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), CQRS handlers that publish domain events on the EDA bus, an event-sourced ledger, a money-transfer saga with full compensation, and a balance invariant kept under concurrent withdrawals (a pessimistic lock, and a guarded atomic `UPDATE`). See [docs/modules/domain.md](docs/modules/domain.md).
 
 ---
 
@@ -852,13 +850,13 @@ See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD micros
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.7-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.8-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.7-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.8-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.7-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.8-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -1186,6 +1184,7 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
+- **`v26.09.08`** (2026-09-28) — **the data layer on a unit of work**: Spring `@transactional` semantics on every backend (all seven propagations, rollback-only, isolation, read-only replica routing, timeouts), one `DataSourceRegistry` for every engine, repositories that commit per call outside a transaction, the framework's stores in the business transaction, MongoDB transactions on a replica set, and a tested matrix of SQLite, PostgreSQL, MySQL, MariaDB and MongoDB. Several changes are breaking: read the upgrade guide in the [CHANGELOG](CHANGELOG.md).
 - **`v26.06.114`** (2026-06-26) — **security overhaul**: full **RFC 9700 / OAuth 2.1** alignment and broad **Spring Security parity** — a complete OAuth 2.1 / OIDC **authorization server** (PKCE, OIDC id tokens, JWKS, introspection/revocation, DCR, PAR, JAR), **DPoP / mTLS** sender-constrained tokens, form / HTTP-Basic / X.509 login, an `AuthenticationManager` / `UserDetailsService` SPI, a delegating password encoder (bcrypt / PBKDF2 / scrypt / Argon2), and secure-by-default hardening (PKCE-default, CSRF-on, ROPC opt-in, signing-secret fail-fast). See the [Security](docs/modules/security.md) and [OAuth2](docs/modules/oauth2.md) guides.
 - **`v26.06.113`** (2026-06-17) — **server-layer observability**: per-server metrics (active connections, in-flight requests, workers, uptime) across Uvicorn / Granian / Hypercorn, correct multi-worker Prometheus aggregation, and a live admin **Observability** dashboard.
 - **`v26.06.112`** (2026-06-16) — *PyFly by Example* figures rebuilt in one polished, vector visual language (English + Spanish editions).

@@ -13,6 +13,7 @@
 # limitations under the License.
 """SQLAlchemy data access adapter — default RepositoryPort implementation."""
 
+from pyfly.data.query import modifying
 from pyfly.data.relational.sqlalchemy.auditing import AuditingEntityListener
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, SoftDeleteMixin, VersionedMixin
 from pyfly.data.relational.sqlalchemy.filter import FilterOperator, FilterUtils
@@ -20,8 +21,12 @@ from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostPr
 from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query
 from pyfly.data.relational.sqlalchemy.query_compiler import QueryMethodCompiler
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
+from pyfly.data.relational.sqlalchemy.soft_delete_criteria import including_deleted
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from pyfly.data.relational.sqlalchemy.statements import LockMode
+from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.relational.sqlalchemy.transactional import (
     Isolation,
     Propagation,
@@ -29,6 +34,7 @@ from pyfly.data.relational.sqlalchemy.transactional import (
     reactive_transactional,
     transactional,
 )
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 
 __all__ = [
     "AuditingEntityListener",
@@ -37,16 +43,23 @@ __all__ = [
     "FilterOperator",
     "FilterUtils",
     "Isolation",
+    "LockMode",
     "Propagation",
     "QueryExecutor",
     "QueryMethodCompiler",
     "Repository",
     "RepositoryBeanPostProcessor",
+    "ScopedAsyncSession",
+    "SessionProvider",
     "SoftDeleteMixin",
     "SoftDeleteRepository",
     "Specification",
+    "SqlAlchemyTransactionManager",
+    "UtcDateTime",
     "VersionedMixin",
     "_active_session_var",
+    "including_deleted",
+    "modifying",
     "query",
     "reactive_transactional",
     "transactional",

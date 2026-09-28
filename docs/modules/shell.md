@@ -460,7 +460,7 @@ class ShellRunnerPort(Protocol):
 |--------|-------------|-------------|
 | `register_command(key, handler, *, help_text, group, params)` | `None` | Register a command. `key` is the command name (kebab-case). `handler` is the callable. `group` nests the command under a sub-group (e.g. `group="db"` → `db <key>`). `params` is a list of `ShellParam` descriptors for the command's CLI parameters. |
 | `run(args)` | `int` | Execute the shell with the given argument list and return the exit code. Pass `None` or `[]` for no arguments. |
-| `run_interactive()` | `None` | Start an interactive REPL loop. Reads input lines, tokenises them, and dispatches to the appropriate command. Exits on `EOF` or `Ctrl+C`. |
+| `run_interactive()` | `None` | Start an interactive REPL loop. Reads input lines (off the event loop, so background work keeps running), tokenizes them, and runs the command on the application's loop. Exits on `EOF` or `Ctrl+C`. |
 
 ---
 
@@ -513,14 +513,33 @@ Each `ShellParam` is converted by `_build_click_param()`:
 Option names are auto-generated from the parameter name: underscores become
 hyphens (e.g. `max_retries` → `--max-retries`).
 
-#### Async Handler Wrapping
+#### Async Commands Run on the Application's Loop
 
-Click is a synchronous library, so async command handlers need special treatment.
-`_wrap_handler()` wraps async coroutine functions:
+Click is a synchronous library, so Click's callback of an async command returns
+the command's coroutine instead of running it, and the adapter awaits it **on
+the application's event loop**: the loop the engine, the connection pools, the
+sessions and the Mongo client were created on, where `PyFlyApplication.run()`
+and the `CommandLineRunner` beans run.
 
-- **No running event loop** — Uses `asyncio.run()` to create a new loop.
-- **Running event loop** (e.g. inside `pytest-asyncio`) — Dispatches to a
-  `ThreadPoolExecutor` to avoid blocking the existing loop.
+- `run(args)` (one-shot) and `run_interactive()` (the REPL) await the command
+  through `ainvoke(args)`. A task the command starts (an ASYNC workflow, an
+  `@async_method` call, a `detached()` write) lives on the same loop, so it goes
+  on after the command returns; when the application stops, the context drains
+  the framework's background work (workflow runs, scheduler and `@async_method`
+  tasks) before it destroys the beans.
+- The REPL reads each line in a daemon thread, so scheduled jobs, message
+  consumers and orchestration recovery keep running while the operator thinks,
+  and an interrupted session never keeps the process from exiting.
+- The synchronous `invoke(args)` is for loop-less use (a script, a synchronous
+  test): it runs an async command with `asyncio.run()`, and raises
+  `RuntimeError` for one while a loop is running.
+
+Through 26.09.07, an async command called with a running loop ran on a private
+`asyncio.run()` loop in a worker thread, while the loop that called it was
+blocked. It failed on every backend but SQLite ("attached to a different loop",
+"another operation is in progress", "Cannot use AsyncMongoClient in different
+event loop"), left poisoned connections in the pool, and the REPL stopped every
+scheduled job for the whole session.
 
 Sync handlers are passed through unchanged.
 
@@ -544,9 +563,14 @@ first use and added to the root `click.Group`.
 
 | Method | Return Type | Description |
 |--------|-------------|-------------|
-| `invoke(args)` | `tuple[int, str]` | Synchronous invocation. Returns `(exit_code, output)`. Catches `SystemExit` (from `--help`), `UsageError`, and general exceptions. |
-| `run(args)` | `int` | Async wrapper around `invoke()`. Returns the exit code only. |
-| `run_interactive()` | `None` | REPL loop: `input("> ")` → split → `invoke()` → print output. Exits on `EOF` or `Ctrl+C`. |
+| `invoke(args)` | `tuple[int, str]` | Synchronous invocation without a running loop. Returns `(exit_code, output)`. Catches `SystemExit` (from `--help`), `UsageError`, and general exceptions; an async command runs with `asyncio.run()`, and raises `RuntimeError` while a loop is running. |
+| `ainvoke(args)` | `tuple[int, str]` | Invocation on the running loop: an async command is awaited there. A failing command returns exit code 1 and its message, and its traceback is logged (`shell_command_failed`). A command that ends on purpose (`SystemExit`, Click's `Exit`, a `ClickException` such as `UsageError`) returns the exit code it chose, as a synchronous command does; it ends the command, never the REPL. An async command is awaited once Click has popped its context: `click.get_current_context()` is not available inside it. |
+| `run(args)` | `int` | One command through `ainvoke()`: prints its output (a failure's message to stderr) and returns the exit code. |
+| `run_interactive()` | `None` | REPL loop: reads `input("> ")` off the loop → split → `ainvoke()` → print output. Exits on `EOF` or `Ctrl+C`. |
+
+The `cli` archetype's generated `main()` exits with the exit code `run()`
+returns (`raise SystemExit(asyncio.run(pyfly.run()))`), so a failing command
+fails the process.
 
 ---
 
@@ -786,8 +810,13 @@ pyfly:
   data:
     relational:
       enabled: true
-      url: sqlite+aiosqlite:///devops.db
+      url: sqlite+aiosqlite:///devops.db   # or postgresql+asyncpg://..., mysql+asyncmy://...
 ```
+
+The commands run on the application's event loop, so the same example works
+unchanged on PostgreSQL, MySQL/MariaDB or the MongoDB backend: the integration
+suite runs one-shot commands, a REPL session and `ctx.stop()` against SQLite and
+PostgreSQL (`tests/integration/test_shell_on_the_app_loop_matrix.py`).
 
 ```python
 # services/deployment_service.py

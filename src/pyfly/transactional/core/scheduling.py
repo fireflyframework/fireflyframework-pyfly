@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pyfly.kernel.lifecycle import CONSUMER_PHASE
+
 _croniter: Any = None
 _HAS_CRONITER = False
 try:
@@ -62,6 +64,10 @@ class ScheduledTask:
 
 class OrchestrationScheduler:
     """Manages periodic orchestration triggers."""
+
+    #: A scheduler stops before any ``@pre_destroy``, so no scheduled run reaches a destroyed bean
+    #: (see :mod:`pyfly.kernel.lifecycle`).
+    phase = CONSUMER_PHASE
 
     def __init__(self) -> None:
         self._tasks: dict[str, ScheduledTask] = {}

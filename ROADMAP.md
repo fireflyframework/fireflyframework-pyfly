@@ -44,16 +44,30 @@ Multi-worker scrapes aggregate: `pyfly run` sets `PROMETHEUS_MULTIPROC_DIR` befo
 
 New config keys: `pyfly.server.observability.enabled` (default `true`; enabled by the web and core starters), `pyfly.server.observability.sample-interval-seconds` (default `5.0`), and `pyfly.server.observability.access-log` (default `false`). Requires the observability extra (`prometheus_client`); degrades to a no-op without it. The admin dashboard gains a live **Observability** section under Monitoring — stat cards, rolling charts, and a per-worker breakdown table — backed by `GET /admin/api/observability` and SSE `/admin/api/sse/observability`. gunicorn is not added in this release (the stack stays async-only ASGI: granian > uvicorn > hypercorn), but the `ServerStatsPort` + multiprocess design is gunicorn-ready. The local `docker-compose.yml` gained prometheus + grafana services scraping `/actuator/prometheus`.
 
+### Data layer on a unit of work ✅ **Delivered (v26.09.08)**
+
+The data layer was rebuilt around one backend-neutral unit of work, after an audit of the ORM and transaction layer found that concurrent `@transactional` calls could share a session, repositories used outside a transaction never committed, and the framework's own stores wrote outside the business transaction. What shipped:
+
+- *Unit of work and `@transactional`:* a unit bound to the running task (`pyfly.data.transaction`), the seven Spring propagations with `NESTED` savepoints, additive rollback rules, rollback-only marking (`UnexpectedRollbackError`), isolation, read-only (routed to a read replica), timeouts, synchronizations (`after_commit`), cancellation-safe commits, and `TransactionTemplate`; repository calls outside a transaction commit per call.
+- *Datasources:* one `DataSourceRegistry` builds and disposes every engine (primary, replica, named datasources, framework stores) with the same pool settings, SQLite setup and credential rotation; readiness-only database health and pool metrics.
+- *Repositories and queries:* Spring's persist-or-merge `save()`, ORM deletes with cascades, slices and keyset scrolling, fetch plans, pessimistic locks, derived queries and `@query` checked at startup, `@modifying`, soft-delete criteria on every ORM read, `UtcDateTime`, a constraint naming convention, auditing (`AuditorAware`, `run_as`) and kernel persistence exceptions (409).
+- *MongoDB on the same model:* `MongoTransactionManager`, with repositories that pass the unit's session on every call (replica set).
+- *Framework stores on the application's database:* portable `pyfly_*` framework tables; the event store with global positions and durable projection checkpoints; a table-backed transactional outbox and an `OutboxStore` port that makes any broker transactional; saga persistence, the SQL cache, lease locks, OAuth2 grants and sessions on any SQL backend.
+- *Everything around them:* `ddl-auto` defaults and serialized startup migrations, rollback test slices (`@DataTest`), listener transactions for Kafka and RabbitMQ, `@async_method` tasks and non-overlapping `@scheduled` jobs, compensation of every committed saga step, a fail-closed CQRS query cache, and a phased context stop that disposes the datasources last.
+- *Tested matrix:* SQLite file, PostgreSQL 17, MySQL 8, MariaDB 11 and a MongoDB replica set, on SQLAlchemy 2.1 and the 2.0 line (`>=2.0.50`).
+
+See the [Changelog](CHANGELOG.md) for the full list and the upgrade guide.
+
 ---
 
 ## Phase 1 — Core Distributed Patterns ✅ **Complete (v26.05.01)**
 
 | Module | Description | Java Source | Status |
 |--------|-------------|-------------|--------|
-| **Saga / Transactions** | Distributed Saga orchestration with compensation, DAG topology, retries, idempotency, recovery | [`fireflyframework-transactional-engine`](https://github.com/fireflyframework/fireflyframework-transactional-engine) | Done (rewritten in v26.05.01) |
+| **Saga / Transactions** | Distributed Saga orchestration with compensation, DAG topology, retries, idempotency, recovery | [`fireflyframework-transactional-engine`](https://github.com/fireflyframework/fireflyframework-transactional-engine) | Done (rewritten in v26.05.01; persistence through the configured provider and compensation of committed steps in v26.09.08) |
 | **TCC** | Try / Confirm / Cancel three-phase transactions with `Annotated[T, FromTry()]` propagation | [`fireflyframework-transactional-engine`](https://github.com/fireflyframework/fireflyframework-transactional-engine) | Done in v26.05.01 |
 | **Workflow** | Durable, signal-driven orchestration: `@wait_for_signal`/`@wait_for_timer`/child workflows/queries/cron | [`fireflyframework-workflow`](https://github.com/fireflyframework/fireflyframework-workflow) | Done in v26.05.01 |
-| **Event Sourcing** | `AggregateRoot`, `EventStore`, snapshots, transactional outbox, projections, upcasting | [`fireflyframework-eventsourcing`](https://github.com/fireflyframework/fireflyframework-eventsourcing) | Done in v26.05.01 |
+| **Event Sourcing** | `AggregateRoot`, `EventStore`, snapshots, transactional outbox, projections, upcasting | [`fireflyframework-eventsourcing`](https://github.com/fireflyframework/fireflyframework-eventsourcing) | Done in v26.05.01; stores on the unit of work, global positions, durable checkpoints and a table-backed outbox in v26.09.08 |
 
 ---
 

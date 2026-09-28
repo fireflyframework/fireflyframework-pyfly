@@ -15,6 +15,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+from typing import Any
+
 import jwt as pyjwt
 import pytest
 
@@ -27,6 +31,7 @@ from pyfly.security.oauth2.client import (
     ClientRegistration,
     InMemoryClientRegistrationRepository,
 )
+from tests.integration import _oauth2_grants as grants
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -448,3 +453,122 @@ class TestInMemoryTokenStore:
         """Revoking a nonexistent token does not raise."""
         store = InMemoryTokenStore()
         await store.revoke("missing")  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Grant atomicity (WP10b: C073, C074) on the in-process stores
+# ---------------------------------------------------------------------------
+
+
+class _YieldingTokenStore:
+    """A key-value :class:`TokenStore` (``store``/``find``/``revoke`` only) whose every call yields to the event
+    loop, as a store over a network client does."""
+
+    def __init__(self) -> None:
+        self.tokens: dict[str, dict[str, Any]] = {}
+
+    async def store(self, token_id: str, token_data: dict[str, Any]) -> None:
+        await asyncio.sleep(0)
+        self.tokens[token_id] = dict(token_data)
+
+    async def find(self, token_id: str) -> dict[str, Any] | None:
+        await asyncio.sleep(0)
+        found = self.tokens.get(token_id)
+        return dict(found) if found is not None else None
+
+    async def revoke(self, token_id: str) -> None:
+        await asyncio.sleep(0)
+        self.tokens.pop(token_id, None)
+
+
+def _stores() -> list[Any]:
+    return [InMemoryTokenStore(), _YieldingTokenStore()]
+
+
+class TestGrantAtomicity:
+    """N concurrent redemptions of one refresh token, code or pushed request succeed once, and the losers of a
+    refresh or code race trip the reuse defense. A key-value store's check-then-act used to let every request
+    that read before the first write through."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("store", _stores(), ids=["memory", "key-value"])
+    async def test_one_refresh_token_is_redeemed_once(self, store: Any) -> None:
+        await grants.one_refresh_token_is_redeemed_once(store)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("store", _stores(), ids=["memory", "key-value"])
+    async def test_one_code_is_redeemed_once(self, store: Any) -> None:
+        await grants.one_code_is_redeemed_once(store)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("store", _stores(), ids=["memory", "key-value"])
+    async def test_one_pushed_request_is_consumed_once(self, store: Any) -> None:
+        await grants.one_pushed_request_is_consumed_once(store)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scenario", grants.SEQUENTIAL_SCENARIOS, ids=lambda scenario: scenario.__name__)
+    @pytest.mark.parametrize("kind", ["memory", "key-value"])
+    async def test_grant_semantics(self, kind: str, scenario: Any) -> None:
+        await scenario(InMemoryTokenStore() if kind == "memory" else _YieldingTokenStore())
+
+    @pytest.mark.asyncio
+    async def test_a_key_value_store_keeps_its_record_layout(self) -> None:
+        """A store implementing only store/find/revoke keeps working, with the keys the server always wrote,
+        so the records it holds from an earlier release stay valid."""
+        store = _YieldingTokenStore()
+        server = grants.server(store)
+        token = await grants.issue(server)
+        code = await grants.code_for(server)
+
+        record = store.tokens[token]
+        assert record["client_id"] == "svc" and record["used"] is False and record["family_id"]
+        assert store.tokens[f"family:{record['family_id']}"]["active"] is True
+        assert store.tokens[f"authcode:{code}"]["used"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_code_replayed_from_an_earlier_release_revokes_its_refresh_token(self) -> None:
+        """Records written by an earlier release name the refresh token a code issued (``issued_refresh``)."""
+        store = _YieldingTokenStore()
+        server = grants.server(store)
+        token = await grants.issue(server)
+        store.tokens["authcode:legacy"] = {
+            "client_id": "web",
+            "redirect_uri": grants.REDIRECT_URI,
+            "scope": "read",
+            "code_challenge": grants.s256(grants.VERIFIER),
+            "user_id": "alice",
+            "exp": int(time.time()) + 60,
+            "used": True,
+            "issued_refresh": token,
+        }
+
+        with pytest.raises(SecurityException, match="already used"):
+            await grants.redeem(server, "legacy")
+
+        assert not await grants.is_active(server, token)
+
+    @pytest.mark.asyncio
+    async def test_in_memory_records_are_purged(self) -> None:
+        store = InMemoryTokenStore()
+        server = grants.server(store, refresh_token_ttl=-1, auth_code_ttl=-1)
+        await grants.issue(server)
+        await grants.code_for(server)
+        live = grants.server(store)
+        kept = await grants.issue(live)
+
+        purged = await store.purge_expired(before=int(time.time()) + 1)
+
+        assert purged == 3  # the expired token, its family and the expired code
+        assert await grants.is_active(live, kept)
+
+    @pytest.mark.asyncio
+    async def test_a_family_does_not_grow_with_rotations(self) -> None:
+        """C072 on a key-value store: the family record listed every token ever rotated."""
+        store = InMemoryTokenStore()
+        server = grants.server(store)
+        token = await grants.issue(server)
+        family_id = store._tokens[token]["family_id"]
+        for _ in range(10):
+            token = (await grants.refresh(server, token))["refresh_token"]
+
+        assert store._tokens[f"family:{family_id}"]["members"] == [token]

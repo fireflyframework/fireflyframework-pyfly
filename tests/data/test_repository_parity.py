@@ -28,8 +28,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from pyfly.data.page import Page
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.ports.outbound import (
+    BatchRepository,
     CrudRepository,
     PagingAndSortingRepository,
+    Persistable,
     ReactiveSortingRepository,
 )
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
@@ -175,4 +177,50 @@ class TestDeletes:
         for i in range(4):
             await repo.save(ParityWidget(name=f"n{i}"))
         await repo.delete_all()
+        assert await repo.count() == 0
+
+
+class TestBatchAndSlicePorts:
+    """The batch deletes and slices a relational repository adds (``BatchRepository``); the document backend
+    implements the same port."""
+
+    def test_satisfies_the_batch_port(self, repo):
+        assert isinstance(repo, BatchRepository)
+        assert {"delete_all_in_batch", "delete_all_by_id_in_batch", "find_slice"} <= set(dir(BatchRepository))
+
+    def test_a_plain_paging_repository_is_not_a_batch_repository(self):
+        class _Paging:
+            async def save(self, entity): ...
+            async def save_all(self, entities): ...
+            async def find_by_id(self, id): ...
+            async def find_all(self, criteria=None, **filters): ...
+            async def find_all_by_id(self, ids): ...
+            async def exists_by_id(self, id): ...
+            async def count(self): ...
+            async def delete(self, entity): ...
+            async def delete_by_id(self, id): ...
+            async def delete_all_by_id(self, ids): ...
+            async def delete_all(self, entities=None): ...
+            def stream_all(self, criteria=None, **filters): ...
+
+        assert isinstance(_Paging(), PagingAndSortingRepository)
+        assert not isinstance(_Paging(), BatchRepository)
+
+    def test_an_entity_with_an_is_new_method_is_persistable(self):
+        class _Ticket:
+            def is_new(self) -> bool:
+                return True
+
+        assert isinstance(_Ticket(), Persistable)
+        assert not isinstance(ParityWidget(name="w"), Persistable)
+
+    @pytest.mark.asyncio
+    async def test_batch_deletes_and_slices_in_manual_mode(self, repo):
+        widgets = await repo.save_all([ParityWidget(name=name) for name in ("a", "b", "c", "d")])
+        first = await repo.find_slice(Pageable.of(1, 3, Sort.by("name")))
+        assert ([w.name for w in first.items], first.has_next) == (["a", "b", "c"], True)
+        await repo.delete_all_by_id_in_batch([widgets[0].id])
+        await repo.delete_all_in_batch([widgets[1]])
+        assert sorted(w.name for w in await repo.find_all()) == ["c", "d"]
+        await repo.delete_all_in_batch()
         assert await repo.count() == 0

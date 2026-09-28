@@ -92,7 +92,11 @@ class NoSuchBeanError(BeanCreationException):
 
 
 class NoUniqueBeanError(BeanCreationException):
-    """Multiple beans match the requested type but none is marked ``@primary``."""
+    """Multiple beans match the requested type and not exactly one of them is marked ``@primary``.
+
+    *primary_names* names the candidates marked ``@primary`` when there are several: the message then
+    says so, instead of "none is marked @primary".
+    """
 
     def __init__(
         self,
@@ -101,6 +105,8 @@ class NoUniqueBeanError(BeanCreationException):
         candidates: list[type],
         required_by: str | None = None,
         parameter: str | None = None,
+        candidate_names: list[str] | None = None,
+        primary_names: list[str] | None = None,
     ) -> None:
         self.bean_type = bean_type
         self.candidates = candidates
@@ -108,8 +114,16 @@ class NoUniqueBeanError(BeanCreationException):
         self.parameter = parameter
 
         type_name = getattr(bean_type, "__name__", repr(bean_type))
-        candidate_names = [getattr(c, "__name__", repr(c)) for c in candidates]
-        headline = f"Multiple beans of type '{type_name}' found but none is marked @primary"
+        # Several beans of ONE class are told apart by their bean names.
+        candidate_names = candidate_names or [getattr(c, "__name__", repr(c)) for c in candidates]
+        self.candidate_names = candidate_names
+        self.primary_names = list(primary_names or [])
+        if len(self.primary_names) > 1:
+            headline = f"Multiple beans of type '{type_name}' are marked @primary: {self.primary_names}"
+            fix = "Keep @primary on one of them, or use Qualifier('name') to disambiguate"
+        else:
+            headline = f"Multiple beans of type '{type_name}' found but none is marked @primary"
+            fix = "Mark one implementation with @primary, or use Qualifier('name') to disambiguate"
 
         lines = [f"NoUniqueBeanError: {headline}"]
         lines.append("")
@@ -123,7 +137,7 @@ class NoUniqueBeanError(BeanCreationException):
                 lines.append(f"    Parameter: {parameter}")
 
         lines.append("")
-        lines.append("  Fix: Mark one implementation with @primary, or use Qualifier('name') to disambiguate")
+        lines.append(f"  Fix: {fix}")
 
         message = "\n".join(lines)
 
@@ -171,3 +185,23 @@ class BeanCurrentlyInCreationError(BeanCreationException):
 
     def __str__(self) -> str:
         return str(self.args[0]) if self.args else ""
+
+
+class BeanCreationNotAllowedError(BeanCreationException):
+    """A bean would have to be created while the context is being destroyed, or after it stopped.
+
+    Analogous to Spring's ``BeanCreationNotAllowedException``. Once ``ApplicationContext.stop()``
+    starts destroying beans, the container hands out the instances that still exist but builds none:
+    a singleton the stop released, or one that was never created, would otherwise come back as a new
+    object that nobody destroys (an engine built after the datasource registry closed opens a pool
+    that outlives the process's shutdown). Start the context again to use it.
+    """
+
+    def __init__(self, *, bean: str, reason: str) -> None:
+        self.bean = bean
+        BeanCreationException.__init__(
+            self,
+            subsystem="resolution",
+            provider=bean,
+            reason=f"cannot create bean {bean!r}: {reason}",
+        )

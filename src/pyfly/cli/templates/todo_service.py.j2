@@ -26,43 +26,33 @@ class TodoService:
     def __init__(self, repository: TodoRepository) -> None:
         self._repository = repository
 
-    async def create(self, data: TodoCreate) -> TodoResponse:
-        entity = TodoEntity(title=data.title, description=data.description)
-        saved = await self._repository.save(entity)
+    @staticmethod
+    def _to_response(entity: TodoEntity) -> TodoResponse:
         return TodoResponse(
-            id=saved.id, title=saved.title,
-            description=saved.description, completed=saved.completed,
+            id=entity.id, title=entity.title,
+            description=entity.description or "", completed=entity.completed,
         )
+
+    async def create(self, data: TodoCreate) -> TodoResponse:
+        # An empty description is stored as NULL (Oracle stores '' as NULL anyway).
+        entity = TodoEntity(title=data.title, description=data.description or None)
+        return self._to_response(await self._repository.save(entity))
 
     async def get(self, todo_id: int) -> TodoResponse:
         entity = await self._repository.find_by_id(todo_id)
         if entity is None:
             raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
-        return TodoResponse(
-            id=entity.id, title=entity.title,
-            description=entity.description, completed=entity.completed,
-        )
+        return self._to_response(entity)
 
     async def list_all(self) -> list[TodoResponse]:
-        entities = await self._repository.find_all()
-        return [
-            TodoResponse(
-                id=e.id, title=e.title,
-                description=e.description, completed=e.completed,
-            )
-            for e in entities
-        ]
+        return [self._to_response(e) for e in await self._repository.find_all()]
 
     async def toggle_complete(self, todo_id: int) -> TodoResponse:
         entity = await self._repository.find_by_id(todo_id)
         if entity is None:
             raise ResourceNotFoundException(f"Todo {todo_id} not found", code="TODO_NOT_FOUND")
         entity.completed = not entity.completed
-        saved = await self._repository.save(entity)
-        return TodoResponse(
-            id=saved.id, title=saved.title,
-            description=saved.description, completed=saved.completed,
-        )
+        return self._to_response(await self._repository.save(entity))
 
     async def delete(self, todo_id: int) -> None:
         await self._repository.delete_by_id(todo_id)

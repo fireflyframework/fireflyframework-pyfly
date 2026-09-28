@@ -15,16 +15,20 @@
 
 from pyfly.data.ports.compiler import QueryMethodCompilerPort
 from pyfly.data.ports.outbound import (
+    BatchRepository,
     CrudRepository,
     PagingAndSortingRepository,
+    Persistable,
     ReactiveSortingRepository,
     RepositoryPort,
     SessionPort,
 )
 
 __all__ = [
+    "BatchRepository",
     "CrudRepository",
     "PagingAndSortingRepository",
+    "Persistable",
     "QueryMethodCompilerPort",
     "ReactiveSortingRepository",
     "RepositoryPort",

@@ -11,11 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Real-backend round-trip integration tests for all 4 EventPublisher buses.
+"""Real-backend integration tests for the EventPublisher buses.
 
-Each test subscribes a handler, starts the bus, publishes an event, and asserts
-the handler receives the correct envelope — exercising the full produce→consume
-round-trip against real Docker-backed brokers.
+Each broker bus subscribes a handler, starts, publishes an event, and asserts the handler receives the
+correct envelope, against real Docker-backed brokers.
+
+The PostgreSQL bus is driven through the constructor it always had (``dsn``, ``destinations``, ``group``,
+``poll_interval_s``), on a fresh database per test, and pinned on what went wrong (WP09):
+
+- C009/C010: rows that committed after a higher id was consumed were skipped forever;
+- C064: a failing handler stalled its group and re-ran the healthy handlers on every retry;
+- C145/C147: concurrent first publishes raced the DDL and leaked pools, LISTEN connections and consume loops,
+  and a publish after ``stop()`` started everything again;
+- C148: a lost LISTEN connection was never reopened, while the health indicator said UP.
 
 Gated by ``@requires_docker``; collected only under ``-m integration``.
 """
@@ -23,17 +31,60 @@ Gated by ``@requires_docker``; collected only under ``-m integration``.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from pyfly.eda.health import EventPublisherHealthIndicator
 from pyfly.eda.types import EventEnvelope
 from pyfly.testing import requires_docker
+from tests.support.backend_matrix import PG, RelationalBackend
+
+OUTBOX_TABLE = "pyfly_outbox_events"
 
 
-@requires_docker
-@pytest.mark.asyncio
-async def test_postgres_event_bus_round_trip(pg_url: str) -> None:
+async def _wait_for(condition: Any, *, timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.02)
+
+
+@pytest.fixture
+async def admin(relational_backend: RelationalBackend) -> AsyncIterator[AsyncEngine]:
+    """An autocommit engine on the test's database, for the test's own inspection statements."""
+    engine = create_async_engine(relational_backend.url, poolclass=NullPool, isolation_level="AUTOCOMMIT")
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+async def _listening(admin: AsyncEngine) -> int:
+    """How many backends of the test's database last ran LISTEN."""
+    async with admin.connect() as conn:
+        return int(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND pid <> pg_backend_pid() AND query LIKE 'LISTEN%'"
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+@pytest.mark.backends(PG)
+async def test_postgres_event_bus_round_trip(relational_backend: RelationalBackend) -> None:
     """PostgresEventBus: publish→LISTEN/NOTIFY→handler round-trip."""
     from pyfly.eda.adapters.postgres import PostgresEventBus
 
@@ -44,11 +95,7 @@ async def test_postgres_event_bus_round_trip(pg_url: str) -> None:
         received.append(envelope)
         done.set()
 
-    bus = PostgresEventBus(
-        dsn=pg_url,
-        destinations=["pyfly.events"],
-        group="it",
-    )
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["pyfly.events"], group="it")
     bus.subscribe("order.*", handler)
     try:
         await bus.start()
@@ -60,6 +107,323 @@ async def test_postgres_event_bus_round_trip(pg_url: str) -> None:
     assert len(received) == 1
     assert received[0].event_type == "order.created"
     assert received[0].payload == {"id": 1}
+
+
+@pytest.mark.backends(PG)
+async def test_a_publish_whose_commit_is_delayed_is_still_delivered(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """C010 (b): a trigger holds the first publish's transaction open after its id was taken; the second
+    publish commits and is consumed; the cursor then stood past the first, which was never delivered."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    received: list[str] = []
+
+    async def handler(envelope: EventEnvelope) -> None:
+        received.append(envelope.event_type)
+
+    consumer = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="g1", poll_interval_s=0.2)
+    producer = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="producer")
+    consumer.subscribe("*", handler)
+    try:
+        await consumer.start()  # subscribed first: the group is registered before anything is published
+        async with admin.connect() as conn:
+            await conn.execute(
+                text(
+                    "CREATE FUNCTION wp09_slow() RETURNS trigger AS $$ BEGIN "
+                    "IF NEW.event_type = 'slow' THEN PERFORM pg_sleep(1.5); END IF; RETURN NEW; END $$ "
+                    "LANGUAGE plpgsql"
+                )
+            )
+            await conn.execute(
+                text(
+                    f"CREATE TRIGGER wp09_slow BEFORE INSERT ON {OUTBOX_TABLE} "
+                    "FOR EACH ROW EXECUTE FUNCTION wp09_slow()"
+                )
+            )
+        slow = asyncio.create_task(producer.publish("d", "slow", {}))
+        await asyncio.sleep(0.3)  # the slow row has its id and is still uncommitted
+        await producer.publish("d", "fast", {})
+        await _wait_for(lambda: "fast" in received)
+        await slow
+        await _wait_for(lambda: "slow" in received, timeout=10)
+    finally:
+        await producer.stop()
+        await consumer.stop()
+    assert sorted(received) == ["fast", "slow"]
+
+
+@pytest.mark.backends(PG)
+async def test_concurrent_publishers_lose_no_event(relational_backend: RelationalBackend) -> None:
+    """C009 (c): 32 concurrent publishers on 4 buses; about 0.2 % of the events used to be lost."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    seen: list[int] = []
+
+    async def handler(envelope: EventEnvelope) -> None:
+        seen.append(envelope.payload["n"])
+
+    consumer = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="g1", poll_interval_s=0.2)
+    consumer.subscribe("*", handler)
+    producers = [PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="p") for _ in range(4)]
+    try:
+        await consumer.start()
+
+        async def publish(task: int) -> None:
+            bus = producers[task % len(producers)]
+            for index in range(40):
+                await bus.publish("d", "e", {"n": task * 1000 + index})
+
+        await asyncio.gather(*(publish(task) for task in range(32)))
+        expected = sorted(task * 1000 + index for task in range(32) for index in range(40))
+        await _wait_for(lambda: len(set(seen)) == len(expected), timeout=30)
+    finally:
+        for producer in producers:
+            await producer.stop()
+        await consumer.stop()
+    assert sorted(set(seen)) == expected
+
+
+@pytest.mark.backends(PG)
+async def test_a_failing_handler_neither_stalls_the_group_nor_reruns_the_healthy_one(
+    relational_backend: RelationalBackend,
+) -> None:
+    """C064: one poison event, then three normal ones; the group stalled on the poison event and the healthy
+    handler saw it again on every retry."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    healthy: list[str] = []
+    failing_attempts = 0
+
+    async def healthy_handler(envelope: EventEnvelope) -> None:
+        healthy.append(envelope.event_type)
+
+    async def failing_handler(envelope: EventEnvelope) -> None:
+        nonlocal failing_attempts
+        failing_attempts += 1
+        raise RuntimeError("cannot handle poison")
+
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="g1", poll_interval_s=0.2)
+    bus.subscribe("*", healthy_handler)
+    bus.subscribe("poison", failing_handler)
+    try:
+        await bus.start()
+        await bus.publish("d", "poison", {})
+        for index in range(3):
+            await bus.publish("d", f"after-{index}", {})
+        await _wait_for(lambda: len(healthy) == 4)
+        await asyncio.sleep(1.5)  # the poison event's second attempt is due after its back-off
+    finally:
+        await bus.stop()
+    assert healthy == ["poison", "after-0", "after-1", "after-2"]
+    assert failing_attempts >= 2  # attempted again, alone
+
+
+@pytest.mark.backends(PG)
+async def test_concurrent_first_publishes_start_nothing_and_race_nothing(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """C145/C147: five concurrent first publishes on a bus nobody started, against an empty database."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    creator = PostgresEventBus(dsn=relational_backend.url)
+    await creator.start()  # the tables exist (a first boot created them); the publisher never starts
+    await creator.stop()
+
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["d"])
+    try:
+        outcomes = await asyncio.gather(*(bus.publish("d", "e", {"n": n}) for n in range(5)), return_exceptions=True)
+        assert outcomes == [None] * 5
+        assert await _listening(admin) == 0  # a publish starts no LISTEN connection and no consume loop
+    finally:
+        await bus.stop()
+
+    await bus.publish("d", "after-stop", {})  # still written, nothing restarted
+    assert await _listening(admin) == 0
+    await bus.stop()
+    async with admin.connect() as conn:
+        assert (await conn.execute(text(f"SELECT count(*) FROM {OUTBOX_TABLE}"))).scalar_one() == 6
+
+
+@pytest.mark.backends(PG)
+async def test_concurrent_first_boots_all_succeed_and_a_failed_start_leaves_nothing(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """C147: four concurrent first boots against an empty database: three failed with a duplicate pg_type
+    key. And a start whose LISTEN connection is refused left its pool behind."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    async def handler(envelope: EventEnvelope) -> None:
+        del envelope
+
+    buses = [PostgresEventBus(dsn=relational_backend.url, group=f"g{n}") for n in range(4)]
+    for bus in buses:
+        bus.subscribe("*", handler)  # a bus that consumes opens its LISTEN connection as it starts
+    try:
+        outcomes = await asyncio.gather(*(bus.start() for bus in buses), return_exceptions=True)
+        assert outcomes == [None] * 4
+        assert await _listening(admin) == 4
+    finally:
+        for bus in buses:
+            await bus.stop()
+    assert await _listening(admin) == 0
+
+    wrong = make_url(relational_backend.url).set(username="nobody", password="wrong")
+    refused = PostgresEventBus(
+        dsn=relational_backend.url, listen_dsn=wrong.render_as_string(hide_password=False), group="refused"
+    )
+    refused.subscribe("*", handler)
+    with pytest.raises(Exception, match="(?i)password|auth|role"):
+        await refused.start()
+    assert refused.running is False
+    assert refused.relay.running is False
+    await refused.stop()
+
+
+@pytest.mark.backends(PG)
+async def test_concurrent_starts_open_one_listen_connection(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    async def handler(envelope: EventEnvelope) -> None:
+        del envelope
+
+    bus = PostgresEventBus(dsn=relational_backend.url, group="once")
+    bus.subscribe("*", handler)
+    try:
+        await asyncio.gather(*(bus.start() for _ in range(5)))
+        assert await _listening(admin) == 1
+        await bus.start()
+        assert await _listening(admin) == 1
+    finally:
+        await bus.stop()
+        await bus.stop()  # idempotent
+    assert await _listening(admin) == 0
+
+
+@pytest.mark.backends(PG)
+async def test_a_lost_listen_connection_is_reopened_and_reported_meanwhile(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """C148: after pg_terminate_backend of the LISTEN connection, every event waited for the poll, for the
+    rest of the process, and nothing said so. It is reopened now; meanwhile the health indicator stays UP (the
+    relay still delivers, at every poll: a DOWN would pull or restart a serving process) and says it is degraded."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    arrived: dict[str, float] = {}
+
+    async def handler(envelope: EventEnvelope) -> None:
+        arrived[envelope.event_type] = time.monotonic()
+
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="g1", poll_interval_s=1.0)
+    bus.subscribe("*", handler)
+    health = EventPublisherHealthIndicator(bus)
+    try:
+        await bus.start()
+        sent = time.monotonic()
+        await bus.publish("d", "before", {})
+        await _wait_for(lambda: "before" in arrived)
+        assert arrived["before"] - sent < 0.5  # woken by NOTIFY
+        assert (await health.health()).status == "UP"
+
+        async with admin.connect() as conn:
+            killed = (
+                await conn.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND pid <> pg_backend_pid() AND query LIKE 'LISTEN%'"
+                    )
+                )
+            ).all()
+        assert killed == [(True,)]
+        await _wait_for(lambda: bus.listener_state.value == "reconnecting", timeout=5)
+        status = await health.health()
+        assert status.status == "UP"
+        assert status.details["listener"] == "reconnecting"
+        assert "LISTEN connection is lost" in status.details["degraded"]
+        assert status.details["since"] is not None
+
+        await _wait_for(lambda: bus.listener_state.value == "listening", timeout=10)
+        assert await _listening(admin) == 1
+        status = await health.health()
+        assert (status.status, status.details["listener"], "degraded" in status.details) == ("UP", "listening", False)
+
+        # Wake-ups are back: well under the one-second poll.
+        await asyncio.sleep(1.2)  # let the relay settle into a full poll wait
+        sent = time.monotonic()
+        await bus.publish("d", "after", {})
+        await _wait_for(lambda: "after" in arrived)
+        assert arrived["after"] - sent < 0.5
+    finally:
+        await bus.stop()
+
+
+@pytest.mark.backends(PG)
+async def test_a_bus_that_only_publishes_opens_no_listen_connection_and_stays_up(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """A bus with no handler (a process that only publishes) opened a LISTEN connection it had no use for, and
+    once that connection was lost (a restart, a failover, idle_session_timeout) nothing reopened it: its relay
+    ran no rounds without a subscription, and its health stayed DOWN for good."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="publisher", poll_interval_s=0.5)
+    health = EventPublisherHealthIndicator(bus)
+    arrived: list[str] = []
+    try:
+        await bus.start()
+        assert (bus.listener_state.value, await _listening(admin)) == ("off", 0)
+        await bus.publish("d", "published", {})
+        await asyncio.sleep(1.5)  # three polls
+        status = await health.health()
+        assert (status.status, status.details["listener"]) == ("UP", "off")
+
+        async def handler(envelope: EventEnvelope) -> None:
+            arrived.append(envelope.event_type)
+
+        bus.subscribe("*", handler)  # it consumes from now on: its relay opens the connection
+        await _wait_for(lambda: bus.listener_state.value == "listening", timeout=5)
+        assert await _listening(admin) == 1
+        await bus.publish("d", "consumed", {})
+        await _wait_for(lambda: "consumed" in arrived)
+    finally:
+        await bus.stop()
+    assert await _listening(admin) == 0
+
+
+async def _connections(admin: AsyncEngine) -> int:
+    """How many other backends are connected to the test's database."""
+    async with admin.connect() as conn:
+        return int(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+@pytest.mark.backends(PG)
+async def test_a_publish_after_stop_on_a_bus_given_a_url_leaves_no_pool_behind(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """Outside an application context a bus given a URL builds a registry of its own. A publish after stop()
+    built it again, and only another stop() closed it: its pooled connection stayed open."""
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+
+    bus = PostgresEventBus(dsn=relational_backend.url, destinations=["d"], group="late")
+    await bus.start()
+    await bus.stop()
+    assert await _connections(admin) == 0
+
+    await asyncio.gather(*(bus.publish("d", "late", {"n": n}) for n in range(3)))  # written, nothing kept open
+    assert await _connections(admin) == 0
+    async with admin.connect() as conn:
+        assert (await conn.execute(text(f"SELECT count(*) FROM {OUTBOX_TABLE}"))).scalar_one() == 3
 
 
 @requires_docker
@@ -160,3 +524,50 @@ async def test_rabbitmq_event_bus_round_trip(amqp_url: str) -> None:
     assert len(received) == 1
     assert received[0].event_type == "order.created"
     assert received[0].payload == {"id": 1}
+
+
+@pytest.mark.backends(PG)
+async def test_the_auto_configured_bus_runs_on_the_primary_datasource(
+    relational_backend: RelationalBackend, admin: AsyncEngine
+) -> None:
+    """provider=postgres needs no DSN of its own: the bus is on the registry's primary datasource, and a
+    ``pyfly.eda.postgres.dsn`` equal to the primary URL reuses it (no second connection pool)."""
+    from pyfly.container.stereotypes import service
+    from pyfly.context.application_context import ApplicationContext
+    from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+    from pyfly.eda.adapters.postgres import PostgresEventBus
+    from pyfly.eda.auto_configuration import EdaAutoConfiguration
+    from pyfly.eda.decorators import event_listener
+    from pyfly.eda.ports.outbound import EventPublisher
+
+    @service
+    class OrderEvents:
+        def __init__(self) -> None:
+            self.seen: list[str] = []
+
+        @event_listener(["order.*"])
+        async def on_order(self, envelope: EventEnvelope) -> None:
+            self.seen.append(envelope.event_type)
+
+    from pyfly.eda.outbox import OutboxTables
+
+    await relational_backend.create_tables(*OutboxTables.named().all())  # ddl-auto none: as migrations would
+    for overrides in ({}, {"pyfly.eda.postgres.dsn": relational_backend.url}):
+        config = relational_backend.config({"pyfly.eda.provider": "postgres", "pyfly.eda.group": "orders", **overrides})
+        ctx = ApplicationContext(config)
+        for bean in (RelationalAutoConfiguration, EdaAutoConfiguration, OrderEvents):
+            ctx.register_bean(bean)
+        await ctx.start()
+        try:
+            bus = ctx.get_bean(EventPublisher)
+            assert isinstance(bus, PostgresEventBus)
+            registry = ctx.get_bean(DataSourceRegistry)
+            assert bus.outbox.datasource is registry.primary
+            assert registry.names() == ["primary"]
+            await bus.publish("pyfly.events", "order.created", {"id": 1})
+            seen = ctx.get_bean(OrderEvents).seen
+            await _wait_for(lambda seen=seen: seen == ["order.created"])
+        finally:
+            await ctx.stop()
+        assert await _listening(admin) == 0

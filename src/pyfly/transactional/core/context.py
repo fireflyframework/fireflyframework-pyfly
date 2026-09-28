@@ -47,6 +47,9 @@ class StepRecord:
     compensation_result: Any = None
     compensation_error: str | None = None
     latency_ms: float = 0.0
+    committed: bool = False
+    """Whether work of the step committed although it failed, timed out or was cancelled (a unit of work of it
+    committed, or its commit outcome is unknown): it is compensated like a completed step."""
 
 
 class ExecutionContext:
@@ -168,6 +171,28 @@ class ExecutionContext:
     def get_all_steps(self) -> dict[str, StepRecord]:
         return dict(self._steps)
 
+    def note_step_cancelled(self, step_id: str, *, committed: bool) -> None:
+        """Record that *step_id* was cancelled while it ran (``FAILED``), and whether work of it had committed.
+        Synchronous, so the step's task can record it while it is being cancelled."""
+        rec = self._steps.setdefault(step_id, StepRecord())
+        rec.status = StepStatus.FAILED
+        rec.error = "cancelled"
+        rec.completed_at = datetime.now(UTC)
+        rec.committed = rec.committed or committed
+        self._touch()
+
+    def note_step_committed(self, step_id: str) -> None:
+        """Record that work of *step_id* committed although the step did not complete (see
+        :attr:`StepRecord.committed`). Synchronous, so a step being cancelled can record it."""
+        rec = self._steps.setdefault(step_id, StepRecord())
+        rec.committed = True
+        self._touch()
+
+    def has_step_committed(self, step_id: str) -> bool:
+        """Whether *step_id* completed, or committed work before it failed or was cancelled."""
+        rec = self._steps.get(step_id)
+        return rec is not None and (rec.committed or rec.status is StepStatus.DONE)
+
     def is_step_done(self, step_id: str) -> bool:
         rec = self._steps.get(step_id)
         return rec is not None and rec.status in {
@@ -279,6 +304,7 @@ class ExecutionContext:
                     "compensation_result": rec.compensation_result,
                     "compensation_error": rec.compensation_error,
                     "latency_ms": rec.latency_ms,
+                    "committed": rec.committed,
                 }
                 for sid, rec in self._steps.items()
             },
@@ -314,6 +340,7 @@ class ExecutionContext:
                 compensation_result=raw.get("compensation_result"),
                 compensation_error=raw.get("compensation_error"),
                 latency_ms=raw.get("latency_ms", 0.0),
+                committed=bool(raw.get("committed", False)),
             )
             ctx._steps[sid] = rec
         ctx._idempotency_keys = set(data.get("idempotency_keys", []))

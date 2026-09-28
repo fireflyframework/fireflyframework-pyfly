@@ -26,7 +26,8 @@ from typing import Any
 from pyfly.cache.ports.outbound import CacheAdapter
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
-from pyfly.context.conditions import auto_configuration, conditional_on_property
+from pyfly.container.container import Container
+from pyfly.context.conditions import auto_configuration, conditional_on_missing_bean, conditional_on_property
 from pyfly.core.config import Config
 
 # core/
@@ -48,6 +49,7 @@ from pyfly.transactional.core.step_invoker import StepInvoker as CoreStepInvoker
 from pyfly.transactional.core.tracer import OrchestrationTracer
 from pyfly.transactional.core.validator import OrchestrationValidator
 from pyfly.transactional.health import OrchestrationHealthIndicator
+from pyfly.transactional.persistence.provider_port import ProviderPersistencePort
 from pyfly.transactional.post_processor import OrchestrationBeanPostProcessor
 from pyfly.transactional.rest.controllers import (
     DeadLetterController,
@@ -73,6 +75,7 @@ from pyfly.transactional.saga.registry.saga_registry import SagaRegistry
 # Shared (legacy adapters kept for back-compat).
 from pyfly.transactional.shared.observability.events import LoggerEventsAdapter
 from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
+from pyfly.transactional.shared.ports.outbound import TransactionalPersistencePort
 
 # tcc/
 from pyfly.transactional.tcc.config.properties import TccEngineProperties
@@ -87,7 +90,7 @@ from pyfly.transactional.tcc.registry.tcc_registry import TccRegistry
 # workflow/
 from pyfly.transactional.workflow.child_workflow_service import ChildWorkflowService
 from pyfly.transactional.workflow.continue_as_new_service import ContinueAsNewService
-from pyfly.transactional.workflow.engine import WorkflowEngine
+from pyfly.transactional.workflow.engine import WorkflowEngine, WorkflowRuns
 from pyfly.transactional.workflow.executor import WorkflowExecutor
 from pyfly.transactional.workflow.query_service import WorkflowQueryService
 from pyfly.transactional.workflow.registry import WorkflowRegistry
@@ -150,6 +153,7 @@ class TransactionalEngineAutoConfiguration:
         self,
         config: Config,
         cache_adapter: CacheAdapter | None = None,
+        container: Container | None = None,
     ) -> ExecutionPersistenceProvider:
         """Select an :class:`ExecutionPersistenceProvider` from config.
 
@@ -157,9 +161,16 @@ class TransactionalEngineAutoConfiguration:
 
         * ``memory``     — :class:`InMemoryPersistenceProvider` (default, no deps).
         * ``redis``      — :class:`RedisPersistenceProvider`; requires ``redis.asyncio``.
-        * ``sqlalchemy`` — :class:`SqlAlchemyPersistenceProvider`; requires SQLAlchemy.
+        * ``sqlalchemy`` — :class:`SqlAlchemyPersistenceProvider`; requires SQLAlchemy. It runs on the
+                          datasource named by ``pyfly.transactional.persistence.sqlalchemy.datasource``, or
+                          the one whose URL is ``...sqlalchemy.url``, or the primary; it creates its table
+                          at start when ``pyfly.data.relational.ddl-auto`` allows it
+                          (:func:`~pyfly.data.relational.framework_schema.creates_tables`).
         * ``cache``      — :class:`CachePersistenceProvider`; delegates to the
                           app-configured :class:`CacheAdapter` bean.
+
+        The saga and TCC engines persist through the same provider
+        (:meth:`transactional_persistence_port`).
         """
         provider = str(config.get("pyfly.transactional.persistence.provider", "memory")).lower()
 
@@ -186,22 +197,22 @@ class TransactionalEngineAutoConfiguration:
                     "Install with: pip install sqlalchemy[asyncio] aiosqlite"
                 )
                 raise ValueError(msg)
-            from sqlalchemy.ext.asyncio import create_async_engine  # type: ignore[import-not-found, unused-ignore]
-
+            from pyfly.data.relational.framework_schema import (
+                context_datasource_registry,
+                creates_tables,
+                module_datasource,
+            )
             from pyfly.transactional.persistence.sqlalchemy_adapter import SqlAlchemyPersistenceProvider
 
-            sqlalchemy_url = config.get("pyfly.transactional.persistence.sqlalchemy.url")
-            if sqlalchemy_url is None:
-                sqlalchemy_url = config.get("pyfly.data.relational.url")
-            if sqlalchemy_url is None:
-                msg = (
-                    "pyfly.transactional.persistence.provider=sqlalchemy requires either "
-                    "'pyfly.transactional.persistence.sqlalchemy.url' or "
-                    "'pyfly.data.relational.url' to be configured."
-                )
-                raise ValueError(msg)
-            engine: Any = create_async_engine(str(sqlalchemy_url))
-            return SqlAlchemyPersistenceProvider(engine)
+            # The datasource is named (...sqlalchemy.datasource) or given by URL, an alias resolved through
+            # the context's datasource registry: no URL is the primary datasource (a
+            # DataSourceConfigurationError, a ValueError, naming both keys when there is none), and an
+            # identical URL reuses that datasource's engine.
+            registry = context_datasource_registry(config, container)
+            datasource = module_datasource(
+                registry, config, "pyfly.transactional.persistence.sqlalchemy", name="transactional-persistence"
+            )
+            return SqlAlchemyPersistenceProvider(datasource, create_table=creates_tables(registry.properties.ddl_auto))
 
         if provider == "cache":
             if cache_adapter is None:
@@ -250,10 +261,23 @@ class TransactionalEngineAutoConfiguration:
     def core_step_invoker(self, resolver: CoreArgumentResolver) -> CoreStepInvoker:
         return CoreStepInvoker(argument_resolver=resolver)
 
+    # -- Saga and TCC persistence --------------------------------------------
+
+    @bean
+    @conditional_on_missing_bean(TransactionalPersistencePort)
+    def transactional_persistence_port(self, persistence: ExecutionPersistenceProvider) -> TransactionalPersistencePort:
+        """The persistence port of the saga engine, the TCC engine and ``SagaRecoveryService``: the configured
+        :class:`ExecutionPersistenceProvider`, so ``pyfly.transactional.persistence.provider`` makes saga and
+        TCC state as durable as workflow state (audit C079: they always used the in-memory adapter). An
+        application's own ``TransactionalPersistencePort`` bean replaces it."""
+        return ProviderPersistencePort(persistence)
+
     # -- Legacy infrastructure adapters (kept for back-compat) --------------
 
     @bean
     def in_memory_persistence_adapter(self) -> InMemoryPersistenceAdapter:
+        """A standalone in-memory port, kept for applications that inject it; the engines use
+        :meth:`transactional_persistence_port`."""
         return InMemoryPersistenceAdapter()
 
     @bean
@@ -297,7 +321,7 @@ class TransactionalEngineAutoConfiguration:
         step_invoker: StepInvoker,
         execution_orchestrator: SagaExecutionOrchestrator,
         compensator: SagaCompensator,
-        persistence_adapter: InMemoryPersistenceAdapter,
+        persistence_adapter: TransactionalPersistencePort,
         events_adapter: LoggerEventsAdapter,
         saga_properties: SagaEngineProperties,
     ) -> SagaEngine:
@@ -328,7 +352,7 @@ class TransactionalEngineAutoConfiguration:
     def tcc_engine(
         self,
         tcc_registry: TccRegistry,
-        persistence_adapter: InMemoryPersistenceAdapter,
+        persistence_adapter: TransactionalPersistencePort,
         events_adapter: LoggerEventsAdapter,
     ) -> TccEngine:
         tcc_argument_resolver = TccArgumentResolver()
@@ -433,12 +457,17 @@ class TransactionalEngineAutoConfiguration:
             dead_letter_service=dlq,
         )
 
+    @bean
+    def workflow_runs(self, engine: WorkflowEngine) -> WorkflowRuns:
+        """Drains the ASYNC workflow runs in flight when the context stops, before any ``@pre_destroy``."""
+        return WorkflowRuns(engine)
+
     # -- Recovery and REST --------------------------------------------------
 
     @bean
     def saga_recovery_service(
         self,
-        persistence_adapter: InMemoryPersistenceAdapter,
+        persistence_adapter: TransactionalPersistencePort,
         saga_engine: SagaEngine,
         events_adapter: LoggerEventsAdapter,
     ) -> SagaRecoveryService:

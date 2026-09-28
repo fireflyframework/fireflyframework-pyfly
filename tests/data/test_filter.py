@@ -16,15 +16,19 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy import String, select
+from sqlalchemy import Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, composite, mapped_column
 
+from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.filter import FilterOperator, FilterUtils
 from pyfly.data.relational.sqlalchemy.specification import Specification
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
 # Test entity
@@ -40,6 +44,27 @@ class User(BaseEntity):
     active: Mapped[bool] = mapped_column(default=True)
     bio: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
 
+    @property
+    def greeting(self) -> str:
+        return f"Hi {self.name}"
+
+
+@dataclasses.dataclass
+class Spot:
+    """A composite value: two columns of a row."""
+
+    x: int | None
+    y: int | None
+
+
+class Place(Base):
+    __tablename__ = "filter_places"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    x: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    y: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    at: Mapped[Spot] = composite("x", "y")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -47,8 +72,10 @@ class User(BaseEntity):
 
 
 @pytest.fixture
-async def engine():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def engine(tmp_path: Path):
+    """A SQLite file database with foreign keys on, holding every table of ``Base.metadata``."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+    enable_sqlite_foreign_keys(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -328,3 +355,90 @@ class TestFilterUtilsEmpty:
         spec = FilterUtils.from_example(UserFilter())
         names = await _names(seeded_session, spec)
         assert names == ["Alice", "Bob", "Charlie", "Diana"]
+
+
+# ---------------------------------------------------------------------------
+# Names are validated, and entities are probes (C111)
+# ---------------------------------------------------------------------------
+
+
+class TestFilterNames:
+    """Every name is validated against the entity when the specification is applied (a 400 for a request's
+    filter), instead of reaching getattr."""
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            FilterOperator.eq("nmae", "x"),
+            FilterOperator.contains("_sa_instance_state", "x"),
+            FilterUtils.from_dict({"__class__": "x"}),
+            FilterUtils.by(**{"role$ne": "x"}),
+        ],
+        ids=["typo", "private", "dunder", "operator"],
+    )
+    async def test_an_unknown_name_raises_invalid_property(self, seeded_session: AsyncSession, spec: Any):
+        with pytest.raises(InvalidPropertyError) as raised:
+            await _names(seeded_session, spec)
+        assert raised.value.usage == "filter"
+
+    async def test_a_python_property_is_not_a_filter(self, seeded_session: AsyncSession):
+        with pytest.raises(InvalidPropertyError, match="no filter property 'greeting'"):
+            await _names(seeded_session, FilterOperator.eq("greeting", "Hi Alice"))
+
+
+class TestFromExampleEntities:
+    async def test_a_transient_entity_probe(self, seeded_session: AsyncSession):
+        assert await _names(seeded_session, FilterUtils.from_example(User(role="admin", age=40))) == ["Charlie"]
+
+    async def test_a_loaded_entity_probe_matches_its_own_row(self, seeded_session: AsyncSession):
+        diana = (await seeded_session.execute(select(User).where(User.name == "Diana"))).scalar_one()
+        assert await _names(seeded_session, FilterUtils.from_example(diana)) == ["Diana"]
+
+    async def test_attributes_that_are_not_loaded_are_left_out(self, seeded_session: AsyncSession):
+        bob = (await seeded_session.execute(select(User).where(User.name == "Bob"))).scalar_one()
+        seeded_session.expire(bob, ["name", "age", "id", "created_at", "updated_at"])
+        # role, active and bio stay loaded: role 'user' and active True match only Bob.
+        assert await _names(seeded_session, FilterUtils.from_example(bob)) == ["Bob"]
+
+    async def test_private_attributes_of_a_plain_probe_are_left_out(self, seeded_session: AsyncSession):
+        class Probe:
+            def __init__(self) -> None:
+                self.role = "user"
+                self._cache = {"anything": 1}
+
+        assert await _names(seeded_session, FilterUtils.from_example(Probe())) == ["Bob", "Diana"]
+
+
+class TestCompositeFilters:
+    """A composite compares with a value of its class, or ``None`` (every column null), as a derived query compares
+    it: ``neq`` is the negation of ``eq`` (SQLAlchemy's ``!=`` on a composite compares column by column, so
+    ``(1, 4)`` was not ``!= (1, 2)``), and ``is_null`` failed with ``NotImplementedError``."""
+
+    @pytest.fixture
+    async def places(self, session: AsyncSession) -> AsyncSession:
+        session.add_all(
+            [Place(id=1, x=1, y=2), Place(id=2, x=3, y=4), Place(id=3, x=1, y=4), Place(id=4, x=None, y=None)]
+        )
+        await session.flush()
+        return session
+
+    @staticmethod
+    async def _ids(session: AsyncSession, spec: Specification[Place]) -> list[int]:
+        result = await session.execute(spec.to_predicate(Place, select(Place)))
+        return sorted(place.id for place in result.scalars().all())
+
+    async def test_eq_and_neq_compare_with_a_value(self, places: AsyncSession):
+        assert await self._ids(places, FilterOperator.eq("at", Spot(1, 2))) == [1]
+        assert await self._ids(places, FilterOperator.neq("at", Spot(1, 2))) == [2, 3]
+        assert await self._ids(places, FilterUtils.from_dict({"at": Spot(3, 4)})) == [2]
+        assert await self._ids(places, FilterOperator.eq("at", None)) == [4]
+
+    async def test_is_null_and_is_not_null_read_every_column(self, places: AsyncSession):
+        assert await self._ids(places, FilterOperator.is_null("at")) == [4]
+        assert await self._ids(places, FilterOperator.is_not_null("at")) == [1, 2, 3]
+        assert await self._ids(places, ~FilterOperator.is_null("at") & FilterOperator.neq("at", Spot(3, 4))) == [1, 3]
+
+    async def test_a_composite_takes_no_other_operator(self, places: AsyncSession):
+        with pytest.raises(InvalidPropertyError, match="composite") as raised:
+            await self._ids(places, FilterOperator.gt("at", Spot(1, 1)))
+        assert (raised.value.property, raised.value.usage) == ("at", "filter")

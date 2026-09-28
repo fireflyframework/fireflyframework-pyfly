@@ -20,6 +20,20 @@ Durability guarantee: all enumeration (find_all / find_stale / cleanup) is
 driven by the cache backend's own key-space via the optional ``get_keys``
 helper that all PyFly cache adapters expose.  This avoids the anti-pattern of
 maintaining a separate in-process index that would be lost on restart.
+
+The provider follows the transaction-aware cache contract
+(:class:`~pyfly.cache.transaction.TransactionAwareCache`), as the SQL provider joins the caller's unit of work:
+a state saved or deleted inside a unit of work is written once the unit commits, and dropped when it rolls
+back; outside one it is written at once. Reads always run at once (a state saved in the current unit is not
+seen before the commit). The cache holds the state's JSON text, never a live object: a live ORM entity a
+step returned is stored as its text, not referenced.
+
+Concurrent writes are ordered differently than by the SQL provider, whose write outside the unit waits for the
+row lock of a unit that wrote the same execution: here it lands at once, and the unit's deferred write lands
+after it, at the commit. The engines never write one execution's state from two tasks at once (a background
+workflow run started inside a unit starts after that unit commits,
+:class:`~pyfly.transactional.workflow.engine.WorkflowEngine`), so this shows only when an application writes
+an execution's state itself, inside a unit and outside it at the same time.
 """
 
 from __future__ import annotations
@@ -28,12 +42,17 @@ import inspect
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pyfly.cache.namespaces import dedicated_cache
 from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.cache.transaction import TransactionAwareCache
 from pyfly.transactional.core.model import ExecutionPattern, ExecutionStatus
 from pyfly.transactional.core.persistence import (
     ExecutionState,
     StateSerializer,
 )
+
+ORCHESTRATION_CACHE = "orchestration"
+"""The name of the cache dedicated to orchestration state."""
 
 
 class CachePersistenceProvider:
@@ -41,6 +60,10 @@ class CachePersistenceProvider:
 
     Durability notes
     ----------------
+    * The state lives in the cache dedicated to ``orchestration``
+      (:func:`~pyfly.cache.namespaces.dedicated_cache`), not among the
+      adapter's own entries, so clearing the application cache never drops
+      in-flight executions.
     * Keys are stored under ``<prefix><correlation_id>`` using
       :meth:`~pyfly.cache.ports.outbound.CacheAdapter.put` /
       :meth:`~pyfly.cache.ports.outbound.CacheAdapter.get` /
@@ -63,7 +86,11 @@ class CachePersistenceProvider:
     """
 
     def __init__(self, cache_adapter: CacheAdapter, *, key_prefix: str = "orchestration:") -> None:
-        self._cache = cache_adapter
+        # Orchestration state is durable: it lives in the cache dedicated to it, which clearing the
+        # application cache (an admin "evict all", a query-cache reset) never touches. Its writes wait for the
+        # commit of the unit of work they are made in (see the module documentation).
+        self._store = dedicated_cache(cache_adapter, ORCHESTRATION_CACHE)
+        self._cache = TransactionAwareCache(self._store)
         self._prefix = key_prefix
 
     def _key(self, correlation_id: str) -> str:
@@ -75,7 +102,7 @@ class CachePersistenceProvider:
 
     async def _get_all_keys(self) -> list[str]:
         """Return all cache keys that belong to this provider's prefix."""
-        get_keys: Any = getattr(self._cache, "get_keys", None)
+        get_keys: Any = getattr(self._store, "get_keys", None)
         if get_keys is None:
             # Fallback: evict_by_prefix knows the prefix; we can't enumerate.
             # This should not happen with any standard PyFly adapter.
@@ -137,6 +164,8 @@ class CachePersistenceProvider:
         return [s for s in all_states if not s.status.is_terminal and s.updated_at < before]
 
     async def delete(self, correlation_id: str) -> bool:
+        """Delete the state; inside a unit of work it is deleted when the unit commits, and ``False`` is
+        returned then."""
         return await self._cache.evict(self._key(correlation_id))
 
     async def cleanup(self, older_than: timedelta) -> int:

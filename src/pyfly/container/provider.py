@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 if TYPE_CHECKING:
     from pyfly.container.container import Container
@@ -49,8 +49,17 @@ class Provider(Generic[T]):
         self._cls = cls
 
     def get(self) -> T:
-        """Resolve and return the bean (a fresh instance for TRANSIENT scope)."""
-        return self._container.resolve(self._cls)
+        """Resolve and return the bean (a fresh instance for TRANSIENT scope).
+
+        ``T`` may be what a constructor parameter may be: a parametrized generic
+        (``Provider[async_sessionmaker[AsyncSession]]`` resolves the ``async_sessionmaker`` bean, as
+        the parameter ``async_sessionmaker[AsyncSession]`` does), ``X | None``, ``list[X]`` or an
+        ``Annotated`` qualifier. A parametrized ``T`` used to be looked up as a registration key,
+        which it never is, so ``get()`` raised ``NoSuchBeanError`` for a bean that existed.
+        """
+        if isinstance(self._cls, type):
+            return self._container.resolve(self._cls)
+        return cast(T, self._container._resolve_param(self._cls))
 
     def __call__(self) -> T:
         return self.get()

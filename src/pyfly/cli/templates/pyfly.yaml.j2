@@ -67,21 +67,22 @@ pyfly:
   logging:
     level:
       root: INFO
-{% if has_data %}
+{% if has_data or has_mongodb %}
 
   data:
+{% if has_data %}
     relational:
       enabled: true
       url: sqlite+aiosqlite:///{{ package_name }}.db
-      ddl-auto: create  # create | create-drop | none
+      # ddl-auto: create on an embedded database (SQLite), none on a database server; also validate or
+      # create-drop. With migrations (pyfly db init, then migrations.enabled: true) the schema is theirs.
 {% endif %}
 {% if has_mongodb %}
-
-  data:
     document:
       enabled: true
       uri: mongodb://localhost:27017
       database: {{ package_name }}
+{% endif %}
 {% endif %}
 {% if has_cache %}
 

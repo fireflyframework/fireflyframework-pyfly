@@ -23,6 +23,7 @@ from typing import Any
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE
 from pyfly.context.request_context import RequestContext
+from pyfly.security.context_holder import REQUEST_STATE_ATTRIBUTE
 from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
 
@@ -32,13 +33,21 @@ class RequestContextFilter(OncePerRequestFilter):
 
     Honors the ``X-Request-Id`` header if present; otherwise generates a UUID.
     Clears the context after the response is sent (even on error).
+
+    It also keeps the request's ``state`` in the context, so
+    :class:`~pyfly.security.context_holder.SecurityContextHolder` (and the auditing it feeds) sees the
+    security context whichever security filter establishes it later in the chain, a session-restoring
+    filter that sets only ``request.state.security_context`` included.
     """
 
     __pyfly_order__ = HIGHEST_PRECEDENCE
 
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         request_id = getattr(request, "headers", {}).get("x-request-id")
-        RequestContext.init(request_id=request_id)
+        context = RequestContext.init(request_id=request_id)
+        state = getattr(request, "state", None)
+        if state is not None:
+            context.set(REQUEST_STATE_ATTRIBUTE, state)
         try:
             response = await call_next(request)
             return response

@@ -15,7 +15,6 @@
 
 - EventHandlerException is exported from the package (API symmetry w/ ConcurrencyError).
 - Upcasters are applied on read (load + stream_all) — previously dead code.
-- TransactionalOutbox exposes dead-lettered (exhausted) records.
 - SqlAlchemyEventStore append translates a concurrent UNIQUE collision into
   ConcurrencyError instead of leaking a raw IntegrityError (TOCTOU fix).
 """
@@ -29,7 +28,6 @@ from pathlib import Path
 import pytest
 
 from pyfly.eventsourcing.event import StoredEventEnvelope
-from pyfly.eventsourcing.outbox import TransactionalOutbox
 from pyfly.eventsourcing.store import ConcurrencyError, InMemoryEventStore, SqlAlchemyEventStore
 
 
@@ -78,27 +76,6 @@ class TestUpcastersAppliedOnRead:
         assert (await store.load("acc-1"))[0].event_type == "legacy.opened"
 
 
-class TestOutboxDeadLetters:
-    @pytest.mark.asyncio
-    async def test_exhausted_records_are_surfaced(self) -> None:
-        async def always_fail(_env: StoredEventEnvelope) -> None:
-            raise RuntimeError("upstream down")
-
-        outbox = TransactionalOutbox(publish=always_fail, max_attempts=2, poll_interval_s=0.02)
-        record = await outbox.enqueue(_env("acc-1", "account.opened"))
-        await outbox.start()
-        for _ in range(100):
-            await asyncio.sleep(0.02)
-            if record.attempts >= 2:
-                break
-        await outbox.stop()
-
-        assert record.attempts >= 2
-        assert record.delivered is False
-        assert await outbox.pending() == []  # excluded from the publish loop
-        assert record in await outbox.dead_letters()  # but surfaced for inspection
-
-
 class TestSqlAlchemyConcurrency:
     @pytest.mark.asyncio
     async def test_concurrent_append_raises_concurrency_error_not_raw_db_error(self, tmp_path: Path) -> None:
@@ -125,3 +102,16 @@ class TestSqlAlchemyConcurrency:
             assert await store.latest_version("acc-1") == 2
         finally:
             await engine.dispose()
+
+
+def test_a_concurrency_error_is_the_kernel_s_optimistic_locking_failure() -> None:
+    """ConcurrencyError is an OptimisticLockingFailureException (26.09.08): the web layer answers 409 and a
+    message listener retries it as a transient failure, as for an entity's optimistic lock."""
+    from pyfly.kernel.exceptions import ConflictException, OptimisticLockingFailureException
+    from pyfly.messaging.listener_container import is_transient_failure
+
+    error = ConcurrencyError("expected version 1, found 2", context={"aggregate_id": "acc-1"})
+    assert isinstance(error, OptimisticLockingFailureException)
+    assert isinstance(error, ConflictException)
+    assert error.context == {"aggregate_id": "acc-1"}
+    assert is_transient_failure(error)

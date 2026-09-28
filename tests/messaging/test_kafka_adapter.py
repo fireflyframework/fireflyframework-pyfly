@@ -58,5 +58,94 @@ class TestKafkaAdapter:
             pass
 
         await adapter.subscribe("orders", handler, group="g1")
-        assert len(adapter._handlers) == 1
-        assert adapter._handlers[0] == ("orders", handler, "g1")
+        assert adapter._dispatch == {("orders", "g1"): [handler]}
+
+    def test_is_a_consumer_phase_bean_whose_container_handles_errors(self) -> None:
+        from pyfly.kernel.lifecycle import CONSUMER_PHASE, lifecycle_phase
+
+        adapter = KafkaAdapter(bootstrap_servers="localhost:9092")
+        assert lifecycle_phase(adapter) == CONSUMER_PHASE
+        assert adapter.manages_listener_errors is True
+
+    @pytest.mark.asyncio
+    async def test_consumers_run_with_auto_commit_off(self) -> None:
+        from tests.messaging.brokers import FakeKafkaCluster
+
+        cluster = FakeKafkaCluster()
+        adapter = KafkaAdapter(
+            bootstrap_servers="fake:9092", consumer_factory=cluster.consumer, producer_factory=cluster.producer
+        )
+
+        async def handler(msg):
+            pass
+
+        await adapter.subscribe("orders", handler, group="g1")
+        await adapter.start()
+        try:
+            [consumer] = cluster.consumers
+            assert consumer.enable_auto_commit is False
+            assert consumer.group_id == "g1"
+            assert consumer.topics == ["orders"]
+        finally:
+            await adapter.stop()
+        assert consumer.closed
+
+    @pytest.mark.asyncio
+    async def test_a_late_subscription_joins_the_running_consumer_of_its_topic_and_group(self) -> None:
+        from tests.messaging.brokers import FakeKafkaCluster
+        from tests.messaging.listener_app import eventually
+
+        cluster = FakeKafkaCluster()
+        adapter = KafkaAdapter(
+            bootstrap_servers="fake:9092",
+            consumer_factory=cluster.consumer,
+            producer_factory=cluster.producer,
+            auto_offset_reset="earliest",
+        )
+        seen: list[str] = []
+
+        async def first(msg):
+            seen.append("first")
+
+        async def second(msg):
+            seen.append("second")
+
+        await adapter.subscribe("orders", first, group="g1")
+        await adapter.start()
+        await adapter.subscribe("orders", second, group="g1")
+        try:
+            await adapter.publish("orders", b"x")
+            await eventually(lambda: seen == ["first", "second"], what="both handlers")
+        finally:
+            await adapter.stop()
+        assert len(cluster.consumers) == 1  # one consumer: two would split the partitions between them
+
+    @pytest.mark.asyncio
+    async def test_a_late_listener_with_other_retry_options_is_warned_about(self, caplog) -> None:
+        import logging
+
+        from pyfly.messaging.listener_container import ListenerEndpoint, ListenerOptions
+        from tests.messaging.brokers import FakeKafkaCluster
+
+        cluster = FakeKafkaCluster()
+        adapter = KafkaAdapter(
+            bootstrap_servers="fake:9092", consumer_factory=cluster.consumer, producer_factory=cluster.producer
+        )
+
+        async def handler(msg):
+            pass
+
+        await adapter.subscribe("orders", ListenerEndpoint(handler, ListenerOptions(max_attempts=2)), group="g1")
+        await adapter.start()
+        try:
+            with caplog.at_level(logging.WARNING, logger="pyfly.messaging.adapters.kafka"):
+                await adapter.subscribe(
+                    "orders", ListenerEndpoint(handler, ListenerOptions(max_attempts=2)), group="g1"
+                )
+                assert not caplog.records
+                await adapter.subscribe(
+                    "orders", ListenerEndpoint(handler, ListenerOptions(max_attempts=9)), group="g1"
+                )
+        finally:
+            await adapter.stop()
+        assert any("kafka_listener_options_differ" in record.getMessage() for record in caplog.records)

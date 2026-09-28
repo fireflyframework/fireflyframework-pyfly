@@ -74,7 +74,7 @@ Under the hood, PyFly delegates to the best async libraries in the Python ecosys
 |---------|-------------|-------------------|
 | Web framework | `pyfly.web` | Starlette |
 | SQL databases | `pyfly.data.relational` | SQLAlchemy (async) |
-| Document databases | `pyfly.data.document` | Beanie / Motor |
+| Document databases | `pyfly.data.document` | Beanie (PyMongo async) |
 | Message broker | `pyfly.messaging` | aiokafka, aio-pika |
 | Caching | `pyfly.cache` | Redis (async) |
 | HTTP client | `pyfly.client` | httpx |
@@ -225,7 +225,7 @@ class OrderService:
 
 ### Auto-Configuration
 
-PyFly detects installed libraries at startup and wires the right adapters automatically. Install `sqlalchemy` and it binds the relational adapter. Install `redis` and it binds the Redis cache. No broker library installed? Messaging falls back to in-memory. You can always override with explicit configuration in `pyfly.yaml` — but you rarely need to.
+PyFly detects installed libraries at startup and wires the right adapters automatically. Install `sqlalchemy`, set `pyfly.data.relational.enabled` and `pyfly.data.relational.url`, and it binds the relational adapter. Install `redis` and it binds the Redis cache. No broker library installed? Messaging falls back to in-memory. You can always override with explicit configuration in `pyfly.yaml` — but you rarely need to.
 
 ---
 
@@ -358,11 +358,12 @@ PyFly is organized into four layers:
 - [Admin Dashboard](modules/admin.md) — Embedded management dashboard, real-time monitoring, server mode
 - [Data Commons](modules/data.md) — Repository ports, derived queries, pagination, sorting, entity mapping
 - [Data Relational](modules/data-relational.md) — SQLAlchemy adapter: specifications, transactions, custom queries
+- [Data Document](modules/data-document.md) — MongoDB adapter: Beanie documents, repositories, transactions on a replica set
 - [Messaging](modules/messaging.md) — Kafka, RabbitMQ, in-memory message broker
 - [Events](modules/events.md) — Event-driven architecture, domain events, application events
 - [CQRS](modules/cqrs.md) — Command/Query separation, CommandBus/QueryBus pipeline
 - [Security](modules/security.md) — JWT authentication, password encoding, authorization
-- [Session](modules/session.md) — Server-side sessions, pluggable stores (in-memory, Redis), OAuth2 integration
+- [Session](modules/session.md) — Server-side sessions, pluggable stores (in-memory, Redis, SQL: `pyfly.session.store=postgres`), OAuth2 integration
 - [Resilience](modules/resilience.md) — Rate limiting, bulkhead, timeout, fallback
 - [HTTP Client](modules/client.md) — Service client, circuit breaker, retry
 - [Caching](modules/caching.md) — Cache decorators, Redis adapter

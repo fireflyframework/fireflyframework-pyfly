@@ -15,13 +15,24 @@
 
 from __future__ import annotations
 
-import pytest
+import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
+import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from pyfly.session.adapters.memory import InMemorySessionStore
+from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
 from pyfly.session.concurrency import (
     ConcurrencyControlPolicy,
+    ExpiringSessionRegistry,
     InMemorySessionRegistry,
     SessionConcurrencyController,
 )
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 
 @pytest.mark.asyncio
@@ -86,3 +97,260 @@ async def test_on_logout_deregisters() -> None:
     await ctl.on_login("alice", "s1", 1.0)
     await ctl.on_logout("alice", "s1")
     assert await reg.count("alice") == 0
+
+
+# ---------------------------------------------------------------------------
+# Dead sessions and concurrent logins (WP10b: C076, C155)
+# ---------------------------------------------------------------------------
+
+
+class _YieldingRegistry:
+    """A :class:`SessionRegistry` with only the four protocol methods, each yielding to the event loop as a
+    registry over a network client does."""
+
+    def __init__(self) -> None:
+        self.sessions: dict[str, dict[str, float]] = {}
+
+    async def register(self, principal: str, session_id: str, created_at: float) -> None:
+        await asyncio.sleep(0)
+        self.sessions.setdefault(principal, {})[session_id] = created_at
+
+    async def deregister(self, principal: str, session_id: str) -> None:
+        await asyncio.sleep(0)
+        self.sessions.get(principal, {}).pop(session_id, None)
+
+    async def list_sessions(self, principal: str) -> list[tuple[str, float]]:
+        await asyncio.sleep(0)
+        return sorted(self.sessions.get(principal, {}).items(), key=lambda kv: kv[1])
+
+    async def count(self, principal: str) -> int:
+        await asyncio.sleep(0)
+        return len(self.sessions.get(principal, {}))
+
+
+async def _live(store: InMemorySessionStore, *session_ids: str) -> None:
+    for session_id in session_ids:
+        await store.save(session_id, {"user": "alice"}, ttl=60)
+
+
+@pytest.mark.asyncio
+async def test_expired_sessions_do_not_count_toward_the_cap() -> None:
+    """C076: with reject-new, a user whose max-sessions sessions expired (no logout) was locked out for good."""
+    store = InMemorySessionStore()
+    reg = InMemorySessionRegistry()
+    ctl = SessionConcurrencyController(
+        reg, ConcurrencyControlPolicy(max_sessions=2, strategy="reject-new"), session_store=store
+    )
+    await _live(store, "s1", "s2")
+    assert await ctl.on_login("alice", "s1", 1.0) is True
+    assert await ctl.on_login("alice", "s2", 2.0) is True
+    await store.save("s1", {"user": "alice"}, ttl=-1)  # expired
+    await store.delete("s2")  # invalidated by the application: the registry was not told
+
+    assert await ctl.on_login("alice", "s3", 3.0) is True
+
+    assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s3"]  # the dead entries were dropped
+
+
+@pytest.mark.asyncio
+async def test_the_in_memory_registry_is_purged_under_the_default_unlimited_cap() -> None:
+    """C076: with concurrency enabled and max-sessions=-1 (the default), each login added an in-memory
+    registration that only a logout removed, so sessions that simply ended stayed registered until a restart.
+    In-memory registrations come due for a liveness check as the SQL registry's do, and the purge drops them."""
+    now = [datetime.now(UTC)]
+    store = InMemorySessionStore()
+    reg = InMemorySessionRegistry(ttl=timedelta(seconds=60), clock=lambda: now[0])
+    ctl = SessionConcurrencyController(
+        reg, ConcurrencyControlPolicy(), session_store=store, purge_interval=timedelta(0)
+    )
+    await _live(store, "live", "gone-1", "gone-2", "next")
+    for index, sid in enumerate(("live", "gone-1", "gone-2")):
+        assert await ctl.on_login("alice", sid, float(index))
+    await store.delete("gone-1")
+    await store.delete("gone-2")
+    assert await ctl.purge_expired() == 0  # no registration is due yet
+
+    now[0] = now[0] + timedelta(seconds=61)
+    assert await ctl.on_login("bob", "next", 5.0)  # a login purges the due registrations too
+
+    assert [sid for sid, _ in await reg.list_sessions("alice")] == ["live"]
+    assert await reg.expired_sessions(limit=10) == []  # the live registration was renewed, not dropped
+
+
+@pytest.mark.asyncio
+async def test_the_in_memory_registry_reports_due_registrations_most_overdue_first() -> None:
+    now = [datetime.now(UTC)]
+    reg = InMemorySessionRegistry(ttl=60, clock=lambda: now[0])
+    assert isinstance(reg, ExpiringSessionRegistry)
+    await reg.register("alice", "a1", 1.0)
+    now[0] = now[0] + timedelta(seconds=10)
+    await reg.register("bob", "b1", 2.0)
+    await reg.register_limited("alice", "a2", 3.0, max_sessions=5, evict_oldest=True)
+    await reg.register("carol", "c1", 4.0)
+    await reg.deregister("carol", "c1")
+
+    now[0] = now[0] + timedelta(seconds=70)
+    assert await reg.expired_sessions(limit=10) == [("alice", "a1"), ("alice", "a2"), ("bob", "b1")]
+    assert await reg.expired_sessions(limit=1) == [("alice", "a1")]
+
+    await reg.renew(["a2", "unknown"])
+    assert await reg.expired_sessions(limit=10) == [("alice", "a1"), ("bob", "b1")]
+    with pytest.raises(ValueError, match="ttl must be positive"):
+        InMemorySessionRegistry(ttl=0)
+
+
+@pytest.mark.asyncio
+async def test_live_sessions_still_count() -> None:
+    store = InMemorySessionStore()
+    reg = InMemorySessionRegistry()
+    ctl = SessionConcurrencyController(
+        reg, ConcurrencyControlPolicy(max_sessions=1, strategy="reject-new"), session_store=store
+    )
+    await _live(store, "s1")
+    assert await ctl.on_login("alice", "s1", 1.0) is True
+    assert await ctl.on_login("alice", "s2", 2.0) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("registry", ["memory", "custom"])
+async def test_concurrent_logins_with_eviction_keep_the_cap(registry: str) -> None:
+    """C155: evict-oldest evicted from a stale snapshot and registered without re-checking, so concurrent logins
+    whose session deletion yields all got in."""
+    reg: Any = InMemorySessionRegistry() if registry == "memory" else _YieldingRegistry()
+    deleted: list[str] = []
+
+    async def _delete(session_id: str) -> None:
+        await asyncio.sleep(0)
+        deleted.append(session_id)
+
+    ctl = SessionConcurrencyController(
+        reg, ConcurrencyControlPolicy(max_sessions=1, strategy="evict-oldest"), session_deleter=_delete
+    )
+    assert await ctl.on_login("alice", "s0", 0.0) is True
+
+    results = await asyncio.gather(*(ctl.on_login("alice", f"s{i}", float(i)) for i in range(1, 9)))
+
+    assert all(results)
+    assert await reg.count("alice") == 1
+    survivors = dict(await reg.list_sessions("alice"))
+    assert sorted(deleted) == sorted(f"s{i}" for i in range(9) if f"s{i}" not in survivors)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_logins_with_rejection_admit_one() -> None:
+    reg = _YieldingRegistry()
+    ctl = SessionConcurrencyController(reg, ConcurrencyControlPolicy(max_sessions=1, strategy="reject-new"))
+
+    results = await asyncio.gather(*(ctl.on_login("alice", f"s{i}", float(i)) for i in range(8)))
+
+    assert results.count(True) == 1
+    assert await reg.count("alice") == 1
+
+
+@pytest.mark.asyncio
+async def test_register_limited_is_atomic_in_memory() -> None:
+    reg = InMemorySessionRegistry()
+    first = await reg.register_limited("alice", "s1", 1.0, max_sessions=1, evict_oldest=False)
+    second = await reg.register_limited("alice", "s2", 2.0, max_sessions=1, evict_oldest=False)
+    third = await reg.register_limited("alice", "s3", 3.0, max_sessions=1, evict_oldest=True)
+    again = await reg.register_limited("alice", "s3", 3.0, max_sessions=1, evict_oldest=False)
+
+    assert (first.accepted, second.accepted, third.accepted, again.accepted) == (True, False, True, True)
+    assert third.evicted == ("s1",) and again.evicted == ()
+    assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s3"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_login_still_deletes_the_session_it_evicted() -> None:
+    """The registry commits the eviction before the session is deleted from the store: a login cancelled in
+    between (the client went away) left the evicted session usable and no longer counted."""
+    store = InMemorySessionStore()
+    reg = InMemorySessionRegistry()
+    deleting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _delete(session_id: str) -> None:
+        deleting.set()
+        await release.wait()
+        await store.delete(session_id)
+
+    ctl = SessionConcurrencyController(
+        reg,
+        ConcurrencyControlPolicy(max_sessions=1, strategy="evict-oldest"),
+        session_deleter=_delete,
+        session_store=store,
+    )
+    await _live(store, "s1", "s2")
+    assert await ctl.on_login("alice", "s1", 1.0) is True
+    login = asyncio.create_task(ctl.on_login("alice", "s2", 2.0))
+    await deleting.wait()
+
+    login.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await login
+    release.set()
+    await ctl.stop()  # waits for the evictions in flight
+
+    assert await store.get("s1") is None
+    assert [sid for sid, _ in await reg.list_sessions("alice")] == ["s2"]
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_a_bounded_time_for_the_evictions_in_flight(caplog: pytest.LogCaptureFixture) -> None:
+    """stop() waited for the deletion of evicted sessions with no bound: a session store that stopped
+    answering held the shutdown forever. It waits EVICTION_STOP_TIMEOUT seconds, then reports what is left."""
+    reg = InMemorySessionRegistry()
+    stuck = asyncio.Event()
+
+    async def _delete(session_id: str) -> None:
+        stuck.set()
+        await asyncio.Event().wait()  # a store that never answers
+
+    ctl = SessionConcurrencyController(
+        reg, ConcurrencyControlPolicy(max_sessions=1, strategy="evict-oldest"), session_deleter=_delete
+    )
+    ctl.EVICTION_STOP_TIMEOUT = 0.05
+    assert await ctl.on_login("alice", "s1", 1.0) is True
+    login = asyncio.create_task(ctl.on_login("alice", "s2", 2.0))
+    await stuck.wait()
+    login.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await login
+
+    with caplog.at_level(logging.WARNING, logger="pyfly.session.concurrency"):
+        await asyncio.wait_for(ctl.stop(), 5)
+
+    assert [record.getMessage() for record in caplog.records] == ["session_eviction_unfinished"]
+    assert caplog.records[0].pending == 1
+    unfinished = list(ctl._evictions)
+    for task in unfinished:
+        task.cancel()
+    await asyncio.gather(*unfinished, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_login_checks_a_bounded_batch_of_registrations(tmp_path: Path) -> None:
+    """A login ran a whole purge batch inline (500 liveness checks and a unit per dead session): it now checks
+    a small batch, and the next logins take the rest of a backlog."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'registry.db'}")
+    enable_sqlite_foreign_keys(engine)
+    now = [datetime.now(UTC)]
+    registry = PostgresSessionRegistry(engine, ttl=timedelta(seconds=60), clock=lambda: now[0])
+    store = InMemorySessionStore()
+    ctl = SessionConcurrencyController(
+        registry, ConcurrencyControlPolicy(), session_store=store, purge_interval=timedelta(0)
+    )
+    try:
+        for index in range(120):
+            await registry.register("alice", f"dead-{index}", float(index))
+        now[0] = now[0] + timedelta(seconds=61)
+
+        remaining = []
+        for login in range(3):
+            await _live(store, f"live-{login}")
+            assert await ctl.on_login("alice", f"live-{login}", 1000.0 + login)
+            remaining.append(sum(sid.startswith("dead-") for sid, _ in await registry.list_sessions("alice")))
+
+        assert remaining == [70, 20, 0]
+    finally:
+        await engine.dispose()

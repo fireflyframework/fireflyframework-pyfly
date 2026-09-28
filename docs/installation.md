@@ -306,9 +306,10 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | `fastapi` | fastapi, uvicorn, python-multipart | HTTP server (FastAPI + Uvicorn), REST controllers, native OpenAPI |
 | `granian` | granian | Granian ASGI server (Rust/tokio, ~3x faster than Uvicorn) |
 | `hypercorn` | hypercorn | Hypercorn ASGI server (HTTP/2 and HTTP/3 support) |
-| `data-relational` | sqlalchemy[asyncio], alembic, aiosqlite | Async SQL database access, repositories, migrations (SQLite default) |
-| `data-document` | motor, beanie | MongoDB document access via Beanie ODM |
+| `data-relational` | sqlalchemy[asyncio] (2.0.50 or later; tested on 2.0 and 2.1), alembic, aiosqlite | Async SQL database access, repositories, migrations (aiosqlite for SQLite; set `pyfly.data.relational.url`, only the `dev` profile falls back to `./app.db`) |
+| `data-document` | beanie (brings PyMongo's async client) | MongoDB document access via Beanie ODM |
 | `postgresql` | asyncpg | PostgreSQL async driver (add for production databases) |
+| `mysql` | asyncmy | MySQL and MariaDB async driver (`mysql+asyncmy://`, `mariadb+asyncmy://`) |
 | `eda` | aiokafka, aio-pika | Both Kafka and RabbitMQ message brokers |
 | `kafka` | aiokafka | Apache Kafka messaging only |
 | `rabbitmq` | aio-pika | RabbitMQ messaging only |
@@ -455,7 +456,7 @@ pip install pytest pytest-asyncio pytest-cov mypy ruff
 | pytest-cov | Coverage reporting |
 | mypy | Static type checking (strict mode) |
 | ruff | Fast linter and formatter |
-| aiosqlite | In-memory SQLite for tests |
+| aiosqlite | SQLite for tests (`@DataTest` uses a SQLite file per test) |
 
 ### Running Tests
 
@@ -512,7 +513,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.09.07
+    ✓ pyfly v26.09.08
 
   All checks passed!
 ```

@@ -1,0 +1,597 @@
+# Copyright 2026 Firefly Software Foundation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The unit of work: one transaction (or one auto unit) on one datasource, bound to the running task.
+
+A :class:`UnitOfWork` carries the backend resource (an ``AsyncSession``, a Mongo ``ClientSession``), the
+datasource it belongs to, the task that opened it, its status, the rollback-only flag, its read-only flag
+and isolation, its deadline, its synchronizations and its savepoint depth.
+
+Every ``asyncio`` task created inside a transaction inherits the binding (``ContextVar`` semantics), so a
+child task may use its parent's unit. That is made safe here:
+
+- Every operation on the resource runs under the unit's **operation guard**, a lock that is reentrant per
+  task: ``gather()`` fan-out inside ``@transactional`` is serialized instead of corrupting the session. The
+  guard is held for one operation (one execute, flush, commit or stream fetch), never across user code, so
+  it cannot deadlock.
+- Savepoints are a stack on the unit's one connection, and the guard does not span the code inside one.
+  While a savepoint is open (a ``Propagation.NESTED`` scope, ``session.begin_nested()``), the unit belongs
+  to the task that opened it and to the tasks that task starts inside it: an operation from any other task
+  (a sibling in ``gather()``) would run inside that savepoint and be released or rolled back with it, so
+  it raises :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` instead
+  (:meth:`UnitOfWork.check_savepoint_owner`): a write, a read, a stream fetch or a savepoint alike. The
+  check sees operations, not attribute changes: a sibling's change to a loaded entity (the unit's session
+  shares it) is written by the next flush, and when that is an autoflush inside the savepoint it is rolled
+  back with it. A savepoint whose task has finished no longer holds the unit.
+  Nor does the unit commit while another live task holds a savepoint on it
+  (:meth:`UnitOfWork.savepoint_holder`): it rolls back and its boundary raises instead.
+- On a backend whose connection has one active result at a time (MySQL, MariaDB:
+  ``TransactionCapabilities.multiple_active_results`` is false), a streamed result that is open holds the
+  unit (:meth:`UnitOfWork.stream_opened`): any other operation, from the stream's own task or another one,
+  raises :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` naming the stream before
+  anything reaches the server, instead of corrupting the connection. The stream's own fetches go on, and
+  the stream stops holding the unit once it is exhausted or closed.
+- A task that uses a unit that already completed gets
+  :class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` naming the unit, instead of writing
+  into a transaction nobody will commit. Work that must outlive its transaction runs through
+  :func:`~pyfly.data.transaction.context.detached`.
+- A statement that fails marks the unit rollback-only when its backend says the failure leaves the
+  transaction unusable (every driver error on a relational backend), so a caught failure cannot commit
+  partial work; the outermost boundary then rolls back and raises
+  :class:`~pyfly.data.transaction.errors.UnexpectedRollbackError`.
+- A cancellation that lands while an operation is in flight marks the unit *poisoned*: its connection is
+  in an unknown state, so the backend discards it instead of returning it to the pool. A driver error that
+  takes the place of the cancellation (aiosqlite's ``ValueError('Connection closed')`` once an anyio scope
+  re-cancelled SQLAlchemy's own cleanup, asyncmy's ``InterfaceError('Cancelled during execution')``) is
+  turned back into the cancellation (:func:`cancellation_replaced_by`), so a cancel scope still catches it.
+  Only a cancel request that arrived while the operation ran counts: cleanup code that runs while its task
+  is still being cancelled (``except CancelledError:``, ``finally:``, anyio's shielded cleanup) sees its
+  own failures as themselves, and a boundary around it never overrules that judgment
+  (:func:`judged_by_its_operation`).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import enum
+import itertools
+from contextvars import ContextVar
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, NoReturn
+
+from pyfly.data.transaction.definition import Isolation, TransactionDefinition
+from pyfly.data.transaction.errors import IllegalTransactionStateError, TransactionError
+
+if TYPE_CHECKING:
+    from pyfly.data.transaction.manager import TransactionManager
+    from pyfly.data.transaction.synchronization import TransactionSynchronization
+
+_IDS = itertools.count(1)
+
+
+class _Savepoint:
+    """An open savepoint of a unit: the backend's handle and the task that opened it."""
+
+    __slots__ = ("handle", "open", "owner")
+
+    def __init__(self, handle: object, owner: asyncio.Task[Any] | None) -> None:
+        self.handle: object | None = handle
+        self.owner = owner
+        self.open = True
+
+
+_HELD_SAVEPOINTS: ContextVar[tuple[_Savepoint, ...]] = ContextVar("pyfly_held_savepoints", default=())
+"""The savepoints the running task opened, and those that were open in the task that started it: a child
+task copies its parent's context, so the tasks a savepoint's owner starts inside it may use the unit too."""
+
+
+def _foreign(entry: _Savepoint, task: asyncio.Task[Any] | None, held: tuple[_Savepoint, ...]) -> bool:
+    """Whether *entry* belongs to a live task other than *task* that did not start *task* inside it."""
+    owner = entry.owner
+    return owner is not None and owner is not task and not owner.done() and entry not in held
+
+
+def _task_name(task: asyncio.Task[Any] | None) -> str:
+    return repr(task.get_name()) if task is not None else "(none)"
+
+
+def cancel_requests() -> int:
+    """The cancel requests pending on the running task (``Task.cancelling()``; ``0`` outside a task).
+
+    Recorded when an operation, a boundary or an auto unit starts, it is the baseline
+    :func:`cancellation_replaced_by` compares against.
+    """
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
+
+
+def cancellation_replaced_by(error: BaseException | None, *, since: int) -> bool:
+    """Whether *error* stands in for a cancellation of the running task requested after *since*.
+
+    When a task is cancelled (a cancel scope expired, ``wait_for`` timed out, a client disconnected) while a
+    statement is in flight, a driver can raise its own error instead of the ``CancelledError``: anyio
+    re-cancels SQLAlchemy's cleanup of the interrupted statement, aiosqlite then refuses the rollback with
+    ``ValueError('Connection closed')``, and asyncmy reports ``InterfaceError('Cancelled during
+    execution')``. Such an error must end the task as cancelled, or the cancel scope cannot catch it.
+
+    *since* is :func:`cancel_requests` when the operation (or the unit) started: only a cancel request that
+    arrived after it counts. Cleanup code runs while its task is still being cancelled (``Task.cancelling()``
+    stays above zero in ``except CancelledError:``, in ``finally:`` and in anyio's
+    ``with CancelScope(shield=True):`` until the cancel scope exits), and an ordinary failure of the data
+    access done there, or a business exception it raises, is its own outcome. The unit of work's own errors,
+    and the end of a streamed result, never stand in for a cancellation, and neither does an error that the
+    guarded operation which raised it judged its own already (:func:`judged_by_its_operation`), nor one
+    raised from such an error (``raise ... from``): a boundary that started before the cancel request
+    arrived must not overrule the statement that ran in cleanup after it.
+    """
+    if (
+        error is None
+        or not isinstance(error, Exception)
+        or isinstance(error, (TransactionError, StopAsyncIteration, StopIteration))
+    ):
+        return False
+    return cancel_requests() > since and not judged_by_its_operation(error)
+
+
+_JUDGED = "__pyfly_judged_by_its_operation__"
+"""The attribute a guarded operation sets on an error it raised as itself (not as a cancellation)."""
+
+
+def judged_by_its_operation(error: BaseException) -> bool:
+    """Whether *error*, or an error it was raised from (its ``__cause__`` chain), left a guarded operation
+    on a unit as itself: the operation found no cancel request that arrived while it ran, so the error is
+    the statement's own outcome (a duplicate saved in cleanup code), never a driver's stand-in for one."""
+    current: BaseException | None = error
+    for _ in range(32):  # a chain is short; this only bounds a pathological cycle
+        if current is None:
+            return False
+        if getattr(current, _JUDGED, False):
+            return True
+        current = current.__cause__
+    return False
+
+
+def _judged(error: BaseException) -> None:
+    with contextlib.suppress(AttributeError, TypeError):  # an exception type that refuses attributes
+        setattr(error, _JUDGED, True)
+
+
+def _cancellation_behind(error: BaseException) -> asyncio.CancelledError | None:
+    """The ``CancelledError`` *error* was raised while handling (its ``__context__``/``__cause__`` chain)."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, asyncio.CancelledError):
+            return current
+        pending.extend(linked for linked in (current.__cause__, current.__context__) if linked is not None)
+    return None
+
+
+def cancelled_from(error: BaseException) -> asyncio.CancelledError:
+    """The ``CancelledError`` to raise in place of *error* (see :func:`cancellation_replaced_by`).
+
+    It carries the arguments of the cancellation *error* replaced, when its chain holds one: anyio
+    recognizes its own cancellation by that message, so the cancel scope that fired catches it. It is
+    chained from *error*, so the driver's error stays in the traceback.
+    """
+    original = _cancellation_behind(error)
+    cancelled = asyncio.CancelledError(*original.args) if original is not None else asyncio.CancelledError()
+    cancelled.__cause__ = error
+    return cancelled
+
+
+async def raise_cancellation(error: BaseException) -> NoReturn:
+    """Raise the cancellation *error* stood in for (:func:`cancelled_from`).
+
+    When *error* carries no trace of it, the running task's cancel scope is given one more chance to
+    deliver its own (anyio re-delivers a scope's cancellation at every await; native ``asyncio`` delivered
+    it already), so the scope that fired still recognizes and catches it.
+    """
+    if _cancellation_behind(error) is None:
+        await asyncio.sleep(0)
+    raise cancelled_from(error)
+
+
+class UnitStatus(enum.Enum):
+    """Where a unit of work is in its life."""
+
+    ACTIVE = "ACTIVE"
+    COMPLETING = "COMPLETING"
+    COMMITTED = "COMMITTED"
+    ROLLED_BACK = "ROLLED_BACK"
+    UNKNOWN = "UNKNOWN"
+
+
+class OperationGuard:
+    """A lock that the task holding it may take again (reentrant per task), and other tasks wait for."""
+
+    __slots__ = ("_depth", "_lock", "_owner")
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+        self._depth = 0
+
+    @property
+    def owner(self) -> asyncio.Task[Any] | None:
+        """The task holding the guard, if any."""
+        return self._owner
+
+    async def acquire(self) -> None:
+        """Take the guard, waiting while another task holds it."""
+        task = asyncio.current_task()
+        if task is not None and self._owner is task:
+            self._depth += 1
+            return
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+
+    def release(self) -> None:
+        """Give back one level of the guard."""
+        self._depth -= 1
+        if self._depth <= 0:
+            self._depth = 0
+            self._owner = None
+            self._lock.release()
+
+    async def __aenter__(self) -> OperationGuard:
+        await self.acquire()
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
+        self.release()
+
+
+class _Operation:
+    """One guarded operation on a unit's resource (see :meth:`UnitOfWork.operation`)."""
+
+    __slots__ = ("_since", "_stream", "_unit")
+
+    def __init__(self, unit: UnitOfWork, stream: object | None) -> None:
+        self._unit = unit
+        self._stream = stream
+        self._since = 0
+
+    async def __aenter__(self) -> UnitOfWork:
+        unit = self._unit
+        self._since = cancel_requests()
+        unit.check_usable()
+        await unit.guard.acquire()
+        try:
+            unit.check_usable()  # it may have completed while this task waited for the guard
+            if unit._savepoints:
+                unit.check_savepoint_owner()  # another task may have opened a savepoint meanwhile
+            if unit._open_stream is not None:
+                unit.check_open_stream(self._stream)  # a stream may have been opened meanwhile
+        except BaseException:
+            unit.guard.release()
+            raise
+        unit.operations += 1
+        return unit
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
+        unit = self._unit
+        unit.guard.release()
+        if exc is None:
+            return
+        if cancellation_replaced_by(exc, since=self._since):
+            # The driver raised its own error in place of a cancellation that arrived while the operation ran:
+            # the connection is in an unknown state, and the caller must see the cancellation.
+            unit.poisoned = True
+            await raise_cancellation(exc)
+        if isinstance(exc, Exception):
+            _judged(exc)  # the statement's own failure: a boundary around it must not take it for a stand-in
+        unit.operation_failed(exc)
+
+
+class UnitOfWork:
+    """One transaction, or one auto unit, on one datasource. Created by a
+    :class:`~pyfly.data.transaction.manager.TransactionManager`; bound by the template."""
+
+    def __init__(
+        self,
+        manager: TransactionManager,
+        datasource: str,
+        resource: Any,
+        *,
+        definition: TransactionDefinition | None = None,
+        auto: bool = False,
+        read_only: bool | None = None,
+        deadline: float | None = None,
+    ) -> None:
+        self.id = next(_IDS)
+        self.manager = manager
+        self.datasource = datasource
+        self.resource = resource
+        self.definition = definition if definition is not None else TransactionDefinition(read_only=bool(read_only))
+        self.auto = auto
+        self.read_only = self.definition.read_only if read_only is None else read_only
+        self.isolation: Isolation = self.definition.isolation
+        self.deadline = deadline
+        self.owner_task: asyncio.Task[Any] | None = asyncio.current_task()
+        self.status = UnitStatus.ACTIVE
+        self.synchronizations: list[TransactionSynchronization] = []
+        self.savepoint_depth = 0
+        self.guard = OperationGuard()
+        self.poisoned = False
+        #: Whether each statement commits as it runs (an auto unit on an autocommit connection, a MongoDB write
+        #: auto unit without a transaction): a rollback undoes nothing, so such a write unit that ran an
+        #: operation and then failed may have committed.
+        self.autocommit = False
+        #: How many guarded operations (statements, flushes, fetches) began on the resource, and how many times
+        #: the backend handed the resource to code that sends commands of its own; an auto unit counts from when
+        #: its work begins, not the checkout or ``BEGIN`` that opened it.
+        self.operations = 0
+        #: The unit this one suspended (``REQUIRES_NEW``), for diagnostics and lock-cycle detection.
+        self.suspended: UnitOfWork | None = None
+        #: Backend-private state (the relational manager keeps the connection's options here).
+        self.attributes: dict[str, Any] = {}
+        self._rollback_only_depth: int | None = None
+        self._rollback_only_reason: BaseException | str | None = None
+        self._savepoints: list[_Savepoint] = []  # open savepoints, outermost first
+        self._open_stream: object | None = None  # the streamed result that holds the unit (stream_opened)
+        # The synchronizations whose before-commit part ran (or is running), by identity: the objects are kept, so
+        # no id is reused while the unit lives (claim_before_commit).
+        self._before_commit_claimed: dict[int, TransactionSynchronization] = {}
+
+    # -- state ------------------------------------------------------------------------------------------
+
+    @property
+    def new_transaction(self) -> bool:
+        """Whether this unit began a transaction of its own (always true: participants share the unit)."""
+        return True
+
+    @property
+    def completed(self) -> bool:
+        """Whether the unit has left ``ACTIVE``: it is committing, committed, rolled back or unknown."""
+        return self.status is not UnitStatus.ACTIVE
+
+    @property
+    def rollback_only(self) -> bool:
+        """Whether the unit can only roll back (a participant failed, or a statement failed)."""
+        return self._rollback_only_depth is not None
+
+    @property
+    def rollback_only_reason(self) -> BaseException | str | None:
+        """What marked the unit rollback-only: the failure, or a message."""
+        return self._rollback_only_reason
+
+    def set_rollback_only(self, reason: BaseException | str | None = None, *, depth: int | None = None) -> None:
+        """Mark the unit rollback-only; the outermost boundary will roll it back.
+
+        A mark set inside a savepoint (``NESTED``) is cleared when the savepoint rolls back, as Spring
+        resets its connection holder's flag there. *depth* places the mark in the savepoint at that depth
+        (``0``: the unit itself) instead of the current one.
+        """
+        level = self.savepoint_depth if depth is None else depth
+        if self._rollback_only_depth is None or level < self._rollback_only_depth:
+            self._rollback_only_depth = level
+            self._rollback_only_reason = reason
+
+    def marked_within(self, depth: int) -> bool:
+        """Whether the rollback-only mark was set inside the savepoint at *depth* (or a deeper one)."""
+        return self._rollback_only_depth is not None and self._rollback_only_depth >= depth
+
+    def savepoint_rolled_back(self, depth: int) -> None:
+        """A savepoint at *depth* rolled back: forget a rollback-only mark set at or below it."""
+        if self.marked_within(depth):
+            self._rollback_only_depth = None
+            self._rollback_only_reason = None
+
+    # -- savepoints -------------------------------------------------------------------------------------------
+
+    def savepoint_opened(self, handle: object) -> None:
+        """Record that the running task opened the savepoint *handle*, now the unit's innermost one.
+
+        A transaction manager calls it under the operation guard that ran the ``SAVEPOINT``, so no other
+        task's statement runs in between; the template calls it again for a ``NESTED`` scope (a handle
+        recorded already is left as it is). Until the savepoint ends (:meth:`savepoint_closed`), only this
+        task, and the tasks it starts meanwhile, may use the unit (:meth:`check_savepoint_owner`).
+        """
+        if any(entry.handle is handle for entry in self._savepoints):
+            return
+        entry = _Savepoint(handle, asyncio.current_task())
+        self._savepoints.append(entry)
+        _HELD_SAVEPOINTS.set((*(held for held in _HELD_SAVEPOINTS.get() if held.open), entry))
+
+    def savepoint_closed(self, handle: object) -> None:
+        """Forget the savepoint *handle*: it was released or rolled back, by its own scope or along with an
+        enclosing one (a backend reports each savepoint that ends; a handle already forgotten is ignored)."""
+        for index, entry in enumerate(self._savepoints):
+            if entry.handle is handle:
+                entry.open = False
+                entry.handle = None  # a task's context may keep the entry until its next savepoint
+                entry.owner = None
+                del self._savepoints[index]
+                return
+
+    def savepoint_open(self, handle: object) -> bool:
+        """Whether the savepoint *handle* is still open."""
+        return any(entry.handle is handle for entry in self._savepoints)
+
+    def savepoint_holder_above(self, handle: object) -> asyncio.Task[Any] | None:
+        """A live task, other than the running one, that holds an open savepoint above the savepoint *handle*
+        (typically a child task that outlived the ``NESTED`` scope that started it), if any. A savepoint the
+        running task was started inside does not count.
+
+        Releasing or rolling back *handle*'s savepoint would end that task's savepoint too, under it.
+        """
+        held = _HELD_SAVEPOINTS.get()
+        task = asyncio.current_task()
+        above = False
+        for entry in self._savepoints:
+            if above and _foreign(entry, task, held):
+                return entry.owner
+            above = above or entry.handle is handle
+        return None
+
+    def savepoint_holder(self) -> asyncio.Task[Any] | None:
+        """A live task, other than the running one, that holds an open savepoint on the unit (typically a child
+        task that outlived the boundary that started it), if any. A savepoint the running task was started
+        inside does not count.
+
+        Committing the unit would release that task's savepoint under it and commit its work, whatever the
+        task does next.
+        """
+        held = _HELD_SAVEPOINTS.get()
+        task = asyncio.current_task()
+        for entry in self._savepoints:
+            if _foreign(entry, task, held):
+                return entry.owner
+        return None
+
+    def check_savepoint_owner(self) -> None:
+        """Raise :class:`IllegalTransactionStateError` when another task holds the unit's innermost savepoint.
+
+        Savepoints are a stack on the unit's one connection: a statement, or a savepoint, from a task other
+        than the savepoint's own (or one that task started inside it) would run inside that savepoint, and a
+        ``ROLLBACK TO SAVEPOINT`` there would undo it after it reported success. A savepoint whose task has
+        finished no longer holds the unit.
+        """
+        if not self._savepoints:
+            return
+        innermost = self._savepoints[-1]
+        task = asyncio.current_task()
+        if not _foreign(innermost, task, _HELD_SAVEPOINTS.get()):
+            return
+        owner = innermost.owner
+        raise IllegalTransactionStateError(
+            f"Task {_task_name(task)} cannot use {self.describe()}: task {_task_name(owner)} holds a savepoint on "
+            "it (Propagation.NESTED or session.begin_nested()) and has not ended it. Savepoints are a stack on "
+            "the unit's one connection, so a statement or a savepoint from another task would run inside that "
+            "savepoint and be released or rolled back with it. Run NESTED steps and savepoint blocks one after "
+            "another, not from concurrent tasks (asyncio.gather), or give each concurrent step a unit of its "
+            "own: Propagation.REQUIRES_NEW (it commits on its own; on SQLite, a write unit a child task opens "
+            "while its parent's write unit is open waits busy_timeout for the one write lock and fails with "
+            "'database is locked'), or pyfly.data.transaction.detached().",
+            datasource=self.datasource,
+        )
+
+    # -- streams ------------------------------------------------------------------------------------------
+
+    @property
+    def open_stream(self) -> object | None:
+        """The streamed result that holds the unit (:meth:`stream_opened`), if one is open."""
+        return self._open_stream
+
+    def stream_opened(self, stream: object) -> None:
+        """Record that *stream*, a streamed result just opened on the unit's resource, holds the unit until
+        :meth:`stream_closed`.
+
+        A backend whose connection has one active result at a time
+        (``TransactionCapabilities.multiple_active_results`` false: MySQL, MariaDB) calls it for each streamed
+        result it opens. Until the stream is exhausted or closed, every operation other than the stream's own
+        (``operation(stream=stream)``) raises :class:`IllegalTransactionStateError` (:meth:`check_open_stream`):
+        a statement sent on the connection meanwhile would corrupt it. ``str(stream)`` names it in that error.
+        """
+        self._open_stream = stream
+
+    def stream_closed(self, stream: object) -> None:
+        """Forget *stream*: it was exhausted or closed, and the connection can run other statements again."""
+        if self._open_stream is stream:
+            self._open_stream = None
+
+    def check_open_stream(self, stream: object | None = None) -> None:
+        """Raise :class:`IllegalTransactionStateError` when a streamed result other than *stream* holds the unit
+        (:meth:`stream_opened`)."""
+        open_stream = self._open_stream
+        if open_stream is None or open_stream is stream:
+            return
+        raise IllegalTransactionStateError(
+            f"Task {_task_name(asyncio.current_task())} cannot use {self.describe()}: {open_stream} is still open "
+            f"on its connection, and a {self.manager.capabilities.backend} connection has one active result at a "
+            "time, so no other statement can run on it until that result is exhausted or closed. Finish the "
+            "stream first, close it early (async with contextlib.aclosing(repository.stream_all()) as rows: ...), "
+            "collect the rows you need before the other work, or run that work in a unit of its own "
+            "(Propagation.REQUIRES_NEW, pyfly.data.transaction.detached()).",
+            datasource=self.datasource,
+        )
+
+    # -- operations ---------------------------------------------------------------------------------------
+
+    def check_usable(self) -> None:
+        """Raise :class:`IllegalTransactionStateError` when the unit is no longer active."""
+        if self.status is not UnitStatus.ACTIVE:
+            raise IllegalTransactionStateError(
+                f"{self.describe()} is already {self.status.value.lower()}; the calling task outlived its "
+                "transaction. Await the work inside the transaction, or run it with "
+                "pyfly.data.transaction.detached() so it gets transactions of its own.",
+                datasource=self.datasource,
+            )
+
+    def operation(self, *, stream: object | None = None) -> _Operation:
+        """An async context manager around one operation on the resource: it takes the operation guard,
+        refuses a completed unit, and records a failure (rollback-only, or poisoned on cancellation).
+
+        *stream* is the streamed result the operation fetches from (or closes): while a stream holds the unit
+        (:meth:`stream_opened`), only its own operations run."""
+        return _Operation(self, stream)
+
+    def operation_failed(self, error: BaseException) -> None:
+        """Record that an operation on the resource raised *error*."""
+        if isinstance(error, (StopAsyncIteration, StopIteration)):
+            return  # the end of a streamed result, not a failure
+        if not isinstance(error, Exception):
+            # Cancelled (or interrupted) while the operation was in flight: the connection is in an
+            # unknown state and must not go back to the pool.
+            self.poisoned = True
+            return
+        if self.manager.marks_rollback_only(self, error):
+            self.set_rollback_only(error)
+
+    # -- synchronizations ----------------------------------------------------------------------------------
+
+    def register_synchronization(self, synchronization: TransactionSynchronization) -> None:
+        """Add *synchronization* to this unit (see :func:`~pyfly.data.transaction.register_synchronization`)."""
+        self.check_usable()
+        self.synchronizations.append(synchronization)
+
+    def claim_before_commit(self, synchronization: TransactionSynchronization) -> bool:
+        """Whether *synchronization*'s ``before_commit`` is still to run as this unit commits, claiming it: the first
+        caller runs it, and every later one skips it, wherever it sits in :attr:`synchronizations` (by identity).
+        See :func:`~pyfly.data.transaction.template.run_before_commit`."""
+        key = id(synchronization)
+        if key in self._before_commit_claimed:
+            return False
+        self._before_commit_claimed[key] = synchronization
+        return True
+
+    # -- diagnostics ----------------------------------------------------------------------------------------
+
+    def describe(self) -> str:
+        """A one-line description for errors and logs."""
+        kind = "auto unit" if self.auto else f"unit of work #{self.id}"
+        owner = self.owner_task.get_name() if self.owner_task is not None else "no task"
+        label = f" '{self.definition.name}'" if self.definition.name else ""
+        return f"{kind}{label} on datasource '{self.datasource}' (opened by task {owner})"
+
+    def __repr__(self) -> str:
+        flags = []
+        if self.read_only:
+            flags.append("read-only")
+        if self.rollback_only:
+            flags.append("rollback-only")
+        if self.poisoned:
+            flags.append("poisoned")
+        extra = f", {', '.join(flags)}" if flags else ""
+        return f"UnitOfWork(#{self.id}, datasource={self.datasource!r}, {self.status.value}{extra})"

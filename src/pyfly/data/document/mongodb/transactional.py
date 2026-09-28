@@ -11,19 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MongoDB execution for the unified ``@transactional`` decorator.
+"""MongoDB and the unified ``@transactional`` decorator.
 
-Use the backend-neutral ``@transactional`` from :mod:`pyfly.data` on document services too — it
-dispatches here when the service exposes a ``_motor_client``. ``mongo_transactional`` is kept as a
-**deprecated** alias of ``@transactional`` for backward compatibility.
+Use the backend-neutral ``@transactional`` from :mod:`pyfly.data` on document services: it runs the call
+in a unit of work of the :class:`~pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager`
+named by ``datasource=``, the manager of the service's ``self._motor_client``, or the application's
+default datasource. ``mongo_transactional`` is kept as a **deprecated** alias of ``@transactional``, and
+:func:`run_mongo_transaction` as a deprecated entry point that runs through the same unit of work.
 """
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from typing import Any
 
-from pyfly.data.transactional import transactional
+from pyfly.data.transaction.decorator import transactional
+from pyfly.data.transaction.definition import TransactionDefinition
+from pyfly.data.transaction.errors import IllegalTransactionStateError
+from pyfly.data.transaction.template import TransactionBoundary
 
 
 async def run_mongo_transaction(
@@ -34,50 +40,32 @@ async def run_mongo_transaction(
     rollback_for: tuple[type[BaseException], ...] = (Exception,),
     no_rollback_for: tuple[type[BaseException], ...] = (),
 ) -> Any:
-    """Execute *func* inside a MongoDB transaction (the document arm of ``@transactional``).
+    """Deprecated: run *func* in a MongoDB unit of work (use ``@transactional``).
 
-    Resolves the Mongo client (pymongo ``AsyncMongoClient``) from ``self._motor_client``, opens a
-    session + transaction, injects the session as the ``session`` keyword argument, and commits on
-    success. On error it aborts —
-    except for exception types in ``no_rollback_for`` (or any ``Exception`` not in ``rollback_for``),
-    which commit and then re-raise, mirroring the relational ``@transactional`` semantics. A
-    ``BaseException`` that is not an ``Exception`` (cancellation/shutdown) always aborts.
+    The client is ``self._motor_client`` (``args[0]``); the call joins a unit already bound for that client's
+    datasource (``Propagation.REQUIRED``) and gets the unit's session as its ``session`` keyword argument.
+    *rollback_for* and *no_rollback_for* are additive rules, as on ``@transactional``.
     """
-    self_arg = args[0] if args else None
-    mongo_client = getattr(self_arg, "_motor_client", None)
-    if mongo_client is None:
-        raise RuntimeError(
-            f"{func.__qualname__}: cannot resolve the Mongo client (pymongo AsyncMongoClient). "
+    warnings.warn(
+        "run_mongo_transaction is deprecated: decorate the method with @transactional", DeprecationWarning, stacklevel=2
+    )
+    from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
+
+    holder = args[0] if args else None
+    client = getattr(holder, "_motor_client", None)
+    if client is None:
+        raise IllegalTransactionStateError(
+            f"{getattr(func, '__qualname__', func)}: cannot resolve the Mongo client (pymongo AsyncMongoClient). "
             "Ensure the service has a '_motor_client' attribute."
         )
-
-    # pymongo's AsyncMongoClient.start_session() is synchronous (returns an AsyncClientSession that
-    # is itself an async context manager) — unlike Motor's coroutine variant, so no `await` here.
-    async with mongo_client.start_session() as session:
-        kwargs["session"] = session
-        # session.start_transaction() commits on a clean context exit and aborts when an exception
-        # escapes it. To honour no_rollback_for we let such exceptions exit cleanly (commit) and
-        # re-raise them afterwards, rather than driving abort/commit manually (which would depend
-        # on the driver's lazy-vs-eager start_transaction semantics).
-        deferred: BaseException | None = None
-        result: Any = None
-        async with session.start_transaction():
-            try:
-                result = await func(*args, **kwargs)
-            except BaseException as exc:
-                if not isinstance(exc, Exception):
-                    raise  # cancellation/shutdown -> abort
-                if isinstance(exc, tuple(no_rollback_for)):
-                    deferred = exc  # commit, then surface
-                elif isinstance(exc, tuple(rollback_for)):
-                    raise  # -> abort
-                else:
-                    deferred = exc  # not in rollback_for -> commit, then surface
-        if deferred is not None:
-            raise deferred
-        return result
+    manager = MongoTransactionManager.for_client(client)
+    definition = TransactionDefinition(rollback_for=tuple(rollback_for), no_rollback_for=tuple(no_rollback_for))
+    async with TransactionBoundary(manager, definition) as unit:
+        if unit is not None:
+            kwargs = {**kwargs, "session": unit.resource}
+        return await func(*args, **kwargs)
 
 
 # Backward-compatibility alias. Prefer the unified `@transactional` from `pyfly.data`.
 mongo_transactional = transactional
-"""Deprecated alias of :func:`pyfly.data.transactional.transactional`. Use ``@transactional``."""
+"""Deprecated alias of :func:`pyfly.data.transaction.decorator.transactional`. Use ``@transactional``."""

@@ -20,6 +20,7 @@ import dataclasses
 import functools
 import inspect
 import logging
+import sys
 import types
 import typing
 from collections import deque
@@ -34,7 +35,7 @@ from pyfly.container.exceptions import (
 )
 from pyfly.container.ordering import get_order
 from pyfly.container.registry import Registration
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeSpec
 from pyfly.context.condition_evaluator import ConditionEvaluator
 from pyfly.context.environment import Environment
 from pyfly.context.events import (
@@ -45,12 +46,18 @@ from pyfly.context.events import (
     ContextClosedEvent,
     ContextRefreshedEvent,
 )
+from pyfly.context.lifecycle import marked_method_names
 from pyfly.context.post_processor import BeanPostProcessor
 from pyfly.core.config import Config
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+#: Why the container builds no singleton while :meth:`ApplicationContext.stop` destroys the beans.
+_STOPPING = "the application context is stopping"
+#: Why it builds no bean at all once the stop released them.
+_STOPPED = "the application context is stopped; start it again to use its beans"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -64,10 +71,90 @@ class _DeferredBeanMethod:
     #: The one factory closure shared by the provisional and the completed registration.
     factory: Callable[[], Any]
     #: The most recent reason it could not be called; raised if it never can be.
-    cause: NoSuchBeanError
+    cause: NoSuchBeanError | NoUniqueBeanError
 
-    def with_cause(self, cause: NoSuchBeanError) -> _DeferredBeanMethod:
+    def with_cause(self, cause: NoSuchBeanError | NoUniqueBeanError) -> _DeferredBeanMethod:
         return dataclasses.replace(self, cause=cause)
+
+
+#: The methods a scoped ``@bean`` product that declares no other destruction is destroyed with, in the
+#: order they are looked for (Spring infers ``close``/``shutdown``; ``dispose()`` is how an
+#: ``AsyncEngine`` releases its pool, ``aclose()`` how an async client closes).
+_INFERRED_DESTROY_METHODS: tuple[str, ...] = ("dispose", "aclose", "close")
+
+#: The builtin containers a parametrized ``@bean`` hint never registers under (``list[X]``, ``type[X]``).
+_BUILTIN_CONTAINERS: tuple[type, ...] = (list, dict, set, frozenset, tuple, type)
+
+#: The modules whose generic classes a deferred ``@bean`` never claims: a builtin container or an abstract
+#: collection (``Callable[[str], str]``) names what the product is, not which bean it replaces, and a claim
+#: under it would make ``@conditional_on_missing_bean`` and every injection of that type see the product.
+_NOT_CLAIMED_MODULES = frozenset({"builtins", "collections.abc", "typing"})
+
+
+def _takes_no_arguments(member: Any) -> bool:
+    """Whether *member* can be called without arguments (a callable without a signature is assumed to)."""
+    try:
+        inspect.signature(member).bind()
+    except TypeError:
+        return False
+    except ValueError:
+        return True
+    return True
+
+
+def _async_engine(instance: Any) -> bool:
+    """Whether *instance* is a SQLAlchemy ``AsyncEngine``, without importing SQLAlchemy.
+
+    An ``AsyncEngine`` exists only once SQLAlchemy's asyncio extension is loaded; the context package
+    stays free of SQLAlchemy imports.
+    """
+    asyncio_extension = sys.modules.get("sqlalchemy.ext.asyncio")
+    return asyncio_extension is not None and isinstance(instance, asyncio_extension.AsyncEngine)
+
+
+def _registry_engine(instance: Any) -> bool:
+    """Whether *instance* is an engine a datasource registry owns (and disposes)."""
+    if not _async_engine(instance):
+        return False
+    from pyfly.data.relational.datasource_registry import datasource_of
+
+    return datasource_of(instance) is not None
+
+
+def _close_connections_on_return(instance: Any) -> None:
+    """Hook an ``AsyncEngine`` a ``@bean`` method returned: a connection returned to a pool it no longer
+    uses is closed.
+
+    ``dispose()`` closes the idle connections only, and one in use at that moment (a request, a health
+    probe) went back into the disposed pool and stayed open until the garbage collector found it. The
+    context installs the hook when the product is created, before any connection: installed at the
+    dispose, it added pool listeners while a connect could be suspended in one, which broke that
+    connect. See :func:`~pyfly.data.relational.datasource_registry.close_connections_on_return`.
+    Anything that is not a SQLAlchemy ``AsyncEngine`` is left alone, and the data layer is imported
+    only for one.
+    """
+    if not _async_engine(instance):
+        return
+    from pyfly.data.relational.datasource_registry import close_connections_on_return
+
+    close_connections_on_return(instance)
+
+
+def _marked_members(instance: Any, marker: str) -> list[tuple[str, Any]]:
+    """``(name, bound member)`` for the methods of *instance* marked with *marker*.
+
+    The member is read from the instance, so a method a BeanPostProcessor replaced on it (an
+    AOP-woven wrapper) is the one called.
+    """
+    members: list[tuple[str, Any]] = []
+    for attr_name in marked_method_names(type(instance), marker):
+        try:
+            member = getattr(instance, attr_name)
+        except Exception:  # noqa: BLE001 — a failing attribute is not a lifecycle method
+            continue
+        if getattr(member, marker, False):
+            members.append((attr_name, member))
+    return members
 
 
 class ApplicationContext:
@@ -95,13 +182,34 @@ class ApplicationContext:
         #: Registration keys the last start() pipeline added; dropped at the next start so a restart
         #: rebuilds from the same registry a cold start sees.
         self._pipeline_registrations: frozenset[Any] = frozenset()
-        self._infrastructure_adapters: list[Any] = []
+        #: The same for the (type, name) and name indexes of the container.
+        self._pipeline_all: frozenset[tuple[type, str]] = frozenset()
+        self._pipeline_named: frozenset[str] = frozenset()
+        #: Post-processors handed to register_post_processor(). The ones discovered from beans belong
+        #: to one run and are dropped by stop(), so a restart uses the new run's instances.
+        self._registered_post_processors: list[BeanPostProcessor] = []
+        #: The lifecycle beans this run started, in start order.
+        self._lifecycle_beans: list[Any] = []
+        #: Whether this run has started its lifecycle beans (step 5b): one created later is not managed.
+        self._lifecycle_started = False
+        #: Creation sequence of each singleton this run built, by instance identity, with the instance
+        #: itself: holding it keeps its id from passing to another object during the run (an original a
+        #: post-processor replaced is referenced by nothing else). A bean is always created after the
+        #: beans it depends on, so reverse creation order is reverse dependency order.
+        self._creation_order: dict[int, tuple[int, Any]] = {}
+        #: The beans whose @app_event_listener methods this run subscribed.
+        self._wired_listener_owners: list[Any] = []
         self._task_scheduler: Any | None = None
         #: User @bean methods whose parameters were not registered when their configuration was
         #: processed; completed once the auto-configurations have registered theirs.
         self._deferred_bean_methods: list[_DeferredBeanMethod] = []
         self._background_tasks: list[asyncio.Task[Any]] = []
         self._wiring_counts: dict[str, int] = {}
+        #: Non-singleton instances the container created during start() before the batched
+        #: post-processing passes (step 5), which process them; ``None`` outside that window.
+        self._startup_created: list[tuple[Any, Registration]] | None = None
+        #: The (class, method) of each async @post_construct a synchronous creation skipped and reported.
+        self._skipped_async_post_construct: set[tuple[type, str]] = set()
 
         # Register config and container as singleton beans (injectable like Spring's ApplicationContext)
         self._container.register_instance(Config, config)
@@ -116,7 +224,10 @@ class ApplicationContext:
         refresh_scope = RefreshScope()
         self._container.register_scope(REFRESH_SCOPE_NAME, refresh_scope)
         self._container.register_instance(
-            ContextRefresher, ContextRefresher(self._container, refresh_scope, self._event_bus, self._config)
+            ContextRefresher,
+            ContextRefresher(
+                self._container, refresh_scope, self._event_bus, self._config, destroy=self._destroy_scoped_instance
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -130,7 +241,8 @@ class ApplicationContext:
         self._container.register(cls, scope=scope, name=name)
 
     def register_post_processor(self, processor: BeanPostProcessor) -> None:
-        """Register a BeanPostProcessor."""
+        """Register a BeanPostProcessor (kept across restarts, unlike the ones discovered from beans)."""
+        self._registered_post_processors.append(processor)
         self._post_processors.append(processor)
 
     # ------------------------------------------------------------------
@@ -200,11 +312,23 @@ class ApplicationContext:
 
         A double start is easy to reach — an ASGI server that runs the lifespan twice, a reload, a test
         harness sharing one module-level application across files — and it fails silently, which is the
-        worst property a lifecycle bug can have. Every adapter in this codebase already guards itself
-        the same way (``KafkaEventBus.start()`` opens with ``if self._started: return``); the context
-        now follows its own convention.
+        worst property a lifecycle bug can have. The context therefore guards itself, as the event
+        buses do (``KafkaEventBus.start()`` opens with ``if self._started: return``); within one start
+        each lifecycle bean is started once, however many types it is registered under.
+
+        Lifecycle beans (any singleton whose class defines ``start()`` and ``stop()``) start in
+        ascending :func:`~pyfly.kernel.lifecycle.lifecycle_phase` and, within a phase, in creation
+        order, so a bean starts after the beans it depends on (a user bean that writes on start runs
+        after ``ddl-auto`` and the migrations). The ``@bean`` products start before the eager
+        singletons are created, to fail fast on connectivity; the lifecycle beans created after that
+        (a scanned ``@component``) start once every singleton is initialized.
 
         :meth:`stop` clears the flag, so a stopped context can be started again and rebuilds normally.
+
+        A start that fails stops the lifecycle beans it had started, highest phase first and in reverse start
+        order within a phase (as :meth:`stop` does, and as Spring does when a refresh fails), then raises its
+        failure: a bean that fails to stop is logged, and does not replace it. Through 26.09.07 they kept running
+        until the caller called :meth:`stop`, which still releases the rest of the failed run.
         """
         if self._started:
             logger.debug("context_start_ignored", extra={"reason": "already started"})
@@ -213,13 +337,26 @@ class ApplicationContext:
         try:
             await self._do_start()
         except BeanCreationException:
+            self._startup_created = None
+            await self._stop_lifecycle_beans_of_failed_start()
             raise
         except Exception as exc:
+            self._startup_created = None
+            await self._stop_lifecycle_beans_of_failed_start()
             raise BeanCreationException(
                 subsystem="startup",
                 provider=type(exc).__qualname__,
                 reason=str(exc),
             ) from exc
+
+    async def _stop_lifecycle_beans_of_failed_start(self) -> None:
+        """Stop the lifecycle beans a failed start had started (see :meth:`start`), each within
+        ``pyfly.context.shutdown-timeout``; a later :meth:`stop` does not stop them again."""
+        shutdown_timeout = float(self._config.get("pyfly.context.shutdown-timeout", 30))
+        stop_order = self._lifecycle_stop_order()
+        self._lifecycle_beans = []
+        for bean in stop_order:
+            await self._stop_lifecycle_bean(bean, shutdown_timeout)
 
     async def _do_start(self) -> None:
         """Internal startup logic."""
@@ -236,8 +373,23 @@ class ApplicationContext:
         # start begins from.
         for key in getattr(self, "_pipeline_registrations", frozenset()):
             self._container._registrations.pop(key, None)
+        for all_key in self._pipeline_all:
+            if self._container._all.pop(all_key, None) is not None:
+                self._container._unindex_name(*all_key)
+        for name in self._pipeline_named:
+            self._container._named.pop(name, None)
+        self._container.allow_creation()
 
         registrations_before = set(self._container._registrations.keys())
+        all_before = set(self._container._all.keys())
+        named_before = set(self._container._named.keys())
+
+        # Every instance the container creates from now on goes through the init pipeline. Until
+        # the batched passes of step 5 run, the hook only collects the non-singleton ones (the
+        # singletons are on their registrations) so that step 5 processes each once.
+        self._startup_created = []
+        self._lifecycle_started = False
+        self._container._post_create_hook = self._on_bean_created
 
         # Whatever already carries an instance was HANDED to the container, not built by it — the
         # container's self-registration, the context's own, anything an embedder registered as a
@@ -269,8 +421,8 @@ class ApplicationContext:
         # 2d. Complete the user @bean methods that were waiting on an auto-configured bean.
         self._process_deferred_bean_methods()
 
-        # 2e. Start infrastructure adapters (fail-fast: validates connectivity)
-        await self._start_infrastructure()
+        # 2e. Start the lifecycle beans the @bean methods produced (fail-fast: validates connectivity)
+        await self._start_lifecycle_beans()
 
         # 3. Auto-discover BeanPostProcessors from registered beans
         self._discover_post_processors()
@@ -302,44 +454,60 @@ class ApplicationContext:
         # lazily creates another bean.
         sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
 
+        # The non-singleton instances created so far (a TRANSIENT repository injected into a
+        # singleton, the transient session a @bean received) join the batch. From here on the
+        # post-create hook runs the pipeline itself, so a bean first created from now on (a @lazy
+        # singleton resolved by a @post_construct, an event listener or a runner, or any scoped
+        # bean) is post-processed when it is created.
+        scoped_instances = self._startup_created or []
+        self._startup_created = None
+
         # An interface-typed @bean is registered under both its concrete and
         # return type, so the same instance appears in two Registration entries.
         # Group registrations by instance identity and process each unique
         # instance exactly once, propagating the (possibly AOP-wrapped) result
         # back to every alias — otherwise @post_construct/BeanPostProcessors run
-        # twice and one alias keeps the un-woven object (audit #113).
-        instance_groups: list[list[Registration]] = []
+        # twice and one alias keeps the un-woven object (audit #113). A scoped
+        # instance has no alias: nothing caches it on a registration.
+        units: list[tuple[str, Any, list[Registration], ScopeSpec]] = []
         groups_by_id: dict[int, list[Registration]] = {}
-        for reg in self._container._registrations.values():
+        for reg in self._all_registrations():
             if reg.instance is None:
                 continue
             grp = groups_by_id.get(id(reg.instance))
             if grp is None:
                 grp = []
                 groups_by_id[id(reg.instance)] = grp
-                instance_groups.append(grp)
+                units.append((reg.display_name, reg.instance, grp, Scope.SINGLETON))
             grp.append(reg)
+        for instance, reg in scoped_instances:
+            if id(instance) not in groups_by_id:
+                groups_by_id[id(instance)] = []
+                units.append((reg.display_name, instance, [], reg.scope))
 
         # Pass 1: before_init for every bean (collects all @aspect beans, etc.)
-        for group in instance_groups:
-            rep = group[0]
-            bean_name = rep.display_name
-            inst = rep.instance
-            for pp in sorted_pps:
+        for index, (bean_name, inst, aliases, scope) in enumerate(units):
+            for pp in self._post_processors_for(sorted_pps, scope):
                 inst = pp.before_init(inst, bean_name)
-            for member in group:
+            for member in aliases:
                 member.instance = inst
+            units[index] = (bean_name, inst, aliases, scope)
 
         # Pass 2: @post_construct then after_init (weaving now sees every aspect)
-        for group in instance_groups:
-            rep = group[0]
-            bean_name = rep.display_name
-            await self._call_post_construct(rep.instance)
-            inst = rep.instance
-            for pp in sorted_pps:
+        for bean_name, inst, aliases, scope in units:
+            await self._call_post_construct(inst)
+            for pp in self._post_processors_for(sorted_pps, scope):
                 inst = pp.after_init(inst, bean_name)
-            for member in group:
+            for member in aliases:
+                if member.instance is not inst:
+                    self._carry_creation_order(member.instance, inst)
                 member.instance = inst
+            self._report_skipped_post_processors(sorted_pps, inst, bean_name, scope)
+
+        # 5b. Start the lifecycle beans that did not exist at step 2e (scanned stereotypes, beans a
+        # @bean did not pull in). They used to be neither started nor stopped.
+        await self._start_lifecycle_beans()
+        self._lifecycle_started = True
 
         # 6. Wire decorator-based beans to their targets
         self._wire_app_event_listeners()
@@ -357,24 +525,90 @@ class ApplicationContext:
         # Everything this pipeline added, so the next start can drop it and begin from the same
         # registry a cold start begins from.
         self._pipeline_registrations = frozenset(self._container._registrations.keys()) - registrations_before
+        self._pipeline_all = frozenset(self._container._all.keys()) - all_before
+        self._pipeline_named = frozenset(self._container._named.keys()) - named_before
 
         self._started = True
-        # Lazily-created singletons (built post-startup on first resolve) must still
-        # run the full init pipeline. Installed now so the batched startup passes
-        # above handled the eager beans without double-initialization.
-        self._container._post_create_hook = self._post_init_lazy_bean
 
     async def stop(self) -> None:
-        """Stop the context: call @pre_destroy, publish ContextClosedEvent.
+        """Stop the context: drain, destroy, release — the database last.
 
-        Each cleanup step is wrapped in a per-bean timeout (default 30s,
-        configurable via ``pyfly.context.shutdown-timeout``).  Beans that
-        exceed the timeout are logged and skipped so one hanging bean
-        cannot block the entire shutdown sequence.
+        The steps, each bounded per bean by ``pyfly.context.shutdown-timeout`` (30 s by default; a bean
+        that exceeds it is logged and skipped so it cannot block the rest):
+
+        1. ``ContextClosedEvent`` is published while every bean still works (Spring publishes it
+           first too);
+        2. the drain: background tasks are cancelled, the ``TaskScheduler`` stops (it waits for the
+           jobs in flight), and the consumer-phase lifecycle beans stop (event buses, message
+           brokers: :data:`~pyfly.kernel.lifecycle.CONSUMER_PHASE`), so no new work arrives;
+        3. from here on the container builds no singleton (:class:`BeanCreationNotAllowedError`), but
+           still builds transient and scoped beans; every singleton gets its ``@pre_destroy``, each
+           bean before the beans it depends on, so a ``@pre_destroy`` can still write through a
+           ``Provider[AsyncSession]`` or a proxied refresh-scoped datasource; then the instances the
+           custom scopes hold (refresh-scoped beans) are destroyed;
+        4. the other lifecycle beans stop, highest phase first and in reverse start order within a
+           phase: they own what the destroyed beans used (clients, ``create-drop`` schema). A scoped
+           instance one of them built while stopping is destroyed after them, and from then on no
+           scoped instance is built either. Then the singleton ``@bean`` products get their declared
+           ``destroy_method`` (an engine's ``dispose()``), in the order of step 3: a lifecycle bean
+           may still have used them in its ``stop()``;
+        5. every :class:`~pyfly.kernel.lifecycle.ResourceRegistry` bean is disposed: the datasource
+           registry closes every engine, last;
+        6. the singletons this run built are released, and everything the run added (lifecycle
+           beans, discovered post-processors, event listeners, the post-create hook) is reset, so a
+           restart is a cold start. From here on the container builds no bean of any scope.
+
+        Until 26.09.07 the adapters stopped first, in reverse registration order: the primary engine
+        was disposed before the consumers, the user lifecycle beans and every ``@pre_destroy``, and
+        the writes that followed reconnected through a pool nobody disposed.
         """
-        shutdown_timeout = float(self._config.get("pyfly.context.shutdown-timeout", 30))
+        from pyfly.kernel.lifecycle import deferring_disposal, is_resource_registry
 
-        # Cancel tracked background tasks
+        shutdown_timeout = float(self._config.get("pyfly.context.shutdown-timeout", 30))
+        # The resource registries are disposed in step 5 and nowhere earlier: a lifecycle bean that
+        # closes one on stop (the datasource registry's) would otherwise close it at its own place in
+        # the order, before the beans that still use it, whatever the registration order was.
+        registries = [
+            reg.instance
+            for reg in self._all_registrations()
+            if reg.instance is not None and is_resource_registry(reg.instance)
+        ]
+        with deferring_disposal(registries):
+            live = await self._drain_destroy_and_stop(shutdown_timeout)
+
+        # 5. The resource registries (the datasource registry), last.
+        disposed: set[int] = set()
+        for instance in live:
+            if not is_resource_registry(instance) or id(instance) in disposed:
+                continue
+            disposed.add(id(instance))
+            try:
+                await asyncio.wait_for(instance.dispose_all(), timeout=shutdown_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "resource_registry_dispose_timeout",
+                    extra={"bean": type(instance).__qualname__, "timeout_s": shutdown_timeout},
+                )
+            except Exception:
+                logger.warning(
+                    "resource_registry_dispose_failed", extra={"bean": type(instance).__qualname__}, exc_info=True
+                )
+
+        self._release_run(live)
+
+    async def _drain_destroy_and_stop(self, shutdown_timeout: float) -> list[Any]:
+        """Steps 1 to 4 of :meth:`stop`; returns every singleton, in the order they were destroyed."""
+        from pyfly.kernel.lifecycle import CONSUMER_PHASE, lifecycle_phase
+
+        # 1. Tell the application first, while it still works.
+        try:
+            await asyncio.wait_for(self._event_bus.publish(ContextClosedEvent()), timeout=shutdown_timeout)
+        except TimeoutError:
+            logger.warning("context_closed_event_timeout", extra={"timeout_s": shutdown_timeout})
+        except Exception:
+            logger.warning("context_closed_event_failed", exc_info=True)
+
+        # 2. Drain: nothing dispatches new work into the beans about to be destroyed.
         for task in self._background_tasks:
             if not task.done():
                 task.cancel()
@@ -382,8 +616,9 @@ class ApplicationContext:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
 
-        # Stop task scheduler
+        stopped: set[int] = set()
         if self._task_scheduler is not None:
+            stopped.add(id(self._task_scheduler))
             try:
                 await asyncio.wait_for(self._task_scheduler.stop(), timeout=shutdown_timeout)
             except TimeoutError:
@@ -391,52 +626,77 @@ class ApplicationContext:
             except Exception:
                 logger.debug("task_scheduler_stop_failed", exc_info=True)
 
-        # Stop infrastructure adapters (reverse order)
-        for adapter in reversed(self._infrastructure_adapters):
-            if hasattr(adapter, "stop"):
-                adapter_name = type(adapter).__qualname__
-                try:
-                    await asyncio.wait_for(adapter.stop(), timeout=shutdown_timeout)
-                except TimeoutError:
-                    logger.warning(
-                        "adapter_stop_timeout",
-                        extra={"adapter": adapter_name, "timeout_s": shutdown_timeout},
-                    )
-                except Exception:
-                    logger.debug("adapter_stop_failed", extra={"adapter": adapter_name}, exc_info=True)
+        stop_order = self._lifecycle_stop_order()
+        for bean in stop_order:
+            if lifecycle_phase(bean) >= CONSUMER_PHASE and id(bean) not in stopped:
+                stopped.add(id(bean))
+                await self._stop_lifecycle_bean(bean, shutdown_timeout)
 
-        # Call @pre_destroy on all resolved beans (reverse order), de-duplicated
-        # by instance identity so an interface-typed @bean alias is not
-        # destroyed twice (audit #113).
-        seen_destroy: set[int] = set()
-        destroyed: list[Any] = []
-        for reg in reversed(list(self._container._registrations.values())):
-            if reg.instance is not None and id(reg.instance) not in seen_destroy:
-                seen_destroy.add(id(reg.instance))
-                destroyed.append(reg.instance)
-                try:
-                    await asyncio.wait_for(
-                        self._call_pre_destroy(reg.instance),
-                        timeout=shutdown_timeout,
-                    )
-                except TimeoutError:
-                    logger.warning(
-                        "pre_destroy_timeout",
-                        extra={"bean": type(reg.instance).__qualname__, "timeout_s": shutdown_timeout},
-                    )
+        # 3. Destroy the singletons, each before the beans it depends on. From here on no SINGLETON is
+        # created: one resolved now would outlive the stop. A transient or scoped bean still is (Spring
+        # refuses only singletons while they are destroyed), so a @pre_destroy can still write through
+        # a Provider[AsyncSession] or a proxied refresh-scoped datasource.
+        self._container.refuse_creation(_STOPPING, scopes=(Scope.SINGLETON,))
+        live = self._live_instances_in_destroy_order()
+        for instance in live:
+            await self._pre_destroy_instance(instance, shutdown_timeout)
 
-        # RELEASE what was just destroyed. @pre_destroy has closed these pools, stopped these
+        # 3b. The instances the custom scopes hold (refresh-scoped datasources), now that the singletons
+        # that used them through a proxy or a Provider are done with them.
+        await self._destroy_scoped_instances(shutdown_timeout)
+
+        # 4. The lifecycle beans that own what the destroyed beans used.
+        for bean in stop_order:
+            if id(bean) not in stopped:
+                stopped.add(id(bean))
+                await self._stop_lifecycle_bean(bean, shutdown_timeout)
+
+        # 4b. A scoped instance a lifecycle bean built while it stopped is destroyed as well. After this
+        # no scoped instance is created either: nothing would destroy it.
+        await self._destroy_scoped_instances(shutdown_timeout)
+        self._container.refuse_creation(_STOPPING, scopes=(Scope.SINGLETON, *self._container._custom_scopes))
+
+        # 4c. The destroy methods of the singleton @bean products (an engine's dispose(), a client's
+        # close()), in the destroy order: they release what the lifecycle beans may still have used in
+        # their stop(), which would otherwise reopen a pool nobody disposes again.
+        declared = {
+            id(reg.instance): reg.destroy_method
+            for reg in self._all_registrations()
+            if reg.instance is not None and reg.destroy_method is not None
+        }
+        for instance in live:
+            if id(instance) in declared:
+                await self._call_destroy_method(instance, declared[id(instance)], shutdown_timeout, infer=False)
+        return live
+
+    async def _destroy_scoped_instances(self, timeout: float) -> None:
+        """Evict every instance the custom scopes hold and destroy each, the most recently created first.
+
+        A scoped bean is cached after the scoped beans it depends on, so the reverse cache order destroys
+        each before its dependencies. Only a scope whose handler offers ``evict_all()`` can be emptied.
+        """
+        for handler in list(self._container._custom_scopes.values()):
+            evict_all = getattr(handler, "evict_all", None)
+            if not callable(evict_all):
+                continue
+            for key, scoped in reversed(list(evict_all().items())):
+                await self._destroy_scoped_instance(key, scoped, timeout=timeout)
+
+    def _release_run(self, live: list[Any]) -> None:
+        """Step 6 of :meth:`stop`: release the destroyed singletons and forget what the run added."""
+        # 6. RELEASE what was just destroyed. @pre_destroy has closed these pools, stopped these
         # consumers and flushed these files, so keeping them on their registrations leaves the
         # container handing out objects that no longer work: get_bean() after a stop returned a
         # destroyed singleton instead of failing or rebuilding. It also made a restart accumulate —
         # start() creates a fresh set BESIDE the stale one, so anything walking the registrations
         # (health reporting, metrics, a bean inventory) sees every singleton twice, one live and one
         # dead. Clearing here is what makes stop() the inverse of start() rather than half of it.
+        destroyed = {id(instance) for instance in live}
         released = 0
-        for reg in self._container._registrations.values():
+        for reg in self._all_registrations():
             if (
                 reg.instance is not None
-                and id(reg.instance) in seen_destroy
+                and id(reg.instance) in destroyed
                 and id(reg.instance) not in self._preexisting_instances
             ):
                 reg.instance = None
@@ -445,11 +705,185 @@ class ApplicationContext:
         if released:
             logger.debug(
                 "context_singletons_released",
-                extra={"registrations": released, "instances": len(seen_destroy)},
+                extra={"registrations": released, "instances": len(destroyed)},
             )
 
-        await self._event_bus.publish(ContextClosedEvent())
+        # A RESTART MUST REPRODUCE A COLD START: forget everything this run added besides the
+        # singletons, or the next start restarts the stopped adapters, post-processes with the
+        # previous run's post-processors and delivers each event to the previous run's listeners too.
+        self._event_bus.unsubscribe_owners(self._wired_listener_owners)
+        self._wired_listener_owners = []
+        self._lifecycle_beans = []
+        self._lifecycle_started = False
+        self._post_processors = list(self._registered_post_processors)
+        self._container._post_create_hook = None
+        # The proxies handed to the released singletons; the next run's registrations get their own.
+        self._container._scoped_proxies.clear()
+        self._task_scheduler = None
+        self._creation_order.clear()
+        self._wiring_counts = {}
+        self._container.refuse_creation(_STOPPED)
         self._started = False
+
+    async def _destroy_scoped_instance(self, key: str, instance: Any, *, timeout: float | None = None) -> None:
+        """Destroy *instance*, which its scope evicted (a refresh) or still held at stop under *key*.
+
+        It gets the whole destruction contract, each step bounded by the shutdown timeout: its
+        ``@pre_destroy`` methods; then the destroy method of the ``@bean`` that produced it (its
+        ``destroy_method``, or when it declares no other destruction the inferred ``dispose()``,
+        ``aclose()`` or ``close()``: a refresh-scoped ``AsyncEngine`` bean disposes its pool this way,
+        and a connection still in use then is closed when it is returned); then ``stop()`` when it is
+        a lifecycle bean. The context does not start a scoped lifecycle bean (the scope builds it on
+        demand, in a synchronous resolution), but its ``stop()`` is how it releases what it holds.
+        """
+        limit = float(self._config.get("pyfly.context.shutdown-timeout", 30)) if timeout is None else timeout
+        registration = self._scoped_registration(key)
+        declared = registration.destroy_method if registration is not None else None
+        await self._destroy_instance(instance, declared, limit, infer=True)
+        if self._has_lifecycle_methods(instance):
+            await self._stop_lifecycle_bean(instance, limit)
+
+    def _scoped_registration(self, key: str) -> Registration | None:
+        """The scoped registration whose instances a scope caches under *key*."""
+        from pyfly.container.container import scope_key
+
+        for reg in self._all_registrations():
+            if reg.scope != Scope.SINGLETON and scope_key(reg) == key:
+                return reg
+        return None
+
+    async def _destroy_instance(self, instance: Any, declared: str | None, timeout: float, *, infer: bool) -> None:
+        """Run the ``@pre_destroy`` methods of *instance*, then its destroy method (see :func:`~pyfly.container.bean`).
+
+        *declared* is the ``destroy_method`` of the ``@bean`` that produced it (``None`` for any other
+        bean). The inferred one is looked for only when *infer* is true: for a scoped instance, never
+        for a singleton (whose two halves ``stop()`` runs at different steps). Each call is bounded by
+        *timeout*; a failure is logged and does not stop the destruction of the others.
+        """
+        await self._pre_destroy_instance(instance, timeout)
+        await self._call_destroy_method(instance, declared, timeout, infer=infer)
+
+    async def _pre_destroy_instance(self, instance: Any, timeout: float) -> None:
+        """Run the ``@pre_destroy`` methods of *instance* within *timeout*."""
+        try:
+            await asyncio.wait_for(self._call_pre_destroy(instance), timeout=timeout)
+        except TimeoutError:
+            logger.warning("pre_destroy_timeout", extra={"bean": type(instance).__qualname__, "timeout_s": timeout})
+
+    async def _call_destroy_method(self, instance: Any, declared: str | None, timeout: float, *, infer: bool) -> None:
+        """Call the destroy method of *instance* (see :meth:`_destroy_instance`) within *timeout*.
+
+        A connection of an ``AsyncEngine`` still in use at its ``dispose()`` is closed when it is returned
+        (``dispose()`` closes the idle connections only): the hook was installed when the product was
+        created.
+        """
+        name = type(instance).__qualname__
+        method_name = self._destroy_method_name(instance, declared, infer=infer)
+        if method_name is None:
+            return
+        try:
+            if method_name == "dispose":
+                _close_connections_on_return(instance)  # installed at creation already: a safety net
+            result = getattr(instance, method_name)()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=timeout)
+        except TimeoutError:
+            logger.warning("destroy_method_timeout", extra={"bean": name, "method": method_name, "timeout_s": timeout})
+        except Exception:
+            logger.warning("destroy_method_failed", extra={"bean": name, "method": method_name}, exc_info=True)
+
+    def _destroy_method_name(self, instance: Any, declared: str | None, *, infer: bool) -> str | None:
+        """The name of the method that destroys *instance*, or ``None`` when it has none."""
+        from pyfly.container.bean import INFER_DESTROY_METHOD
+
+        if not declared:
+            return None
+        if declared != INFER_DESTROY_METHOD:
+            if not callable(getattr(instance, declared, None)):
+                logger.warning(
+                    "destroy_method_missing", extra={"bean": type(instance).__qualname__, "method": declared}
+                )
+                return None
+            return declared
+        if not infer or marked_method_names(type(instance), "__pyfly_pre_destroy__"):
+            return None
+        if self._has_lifecycle_methods(instance) or _registry_engine(instance):
+            # A lifecycle bean releases what it holds in stop(). An engine of the datasource registry (a
+            # scoped @bean handing out registry.engine("name")) is the registry's to dispose, last.
+            return None
+        for candidate in _INFERRED_DESTROY_METHODS:
+            member = getattr(instance, candidate, None)
+            if callable(member) and _takes_no_arguments(member):
+                return candidate
+        return None
+
+    async def _stop_lifecycle_bean(self, bean: Any, timeout: float) -> None:
+        """Stop one lifecycle bean within *timeout*; a failure is logged and does not stop the others."""
+        name = type(bean).__qualname__
+        try:
+            await asyncio.wait_for(bean.stop(), timeout=timeout)
+        except TimeoutError:
+            logger.warning("adapter_stop_timeout", extra={"adapter": name, "timeout_s": timeout})
+        except Exception:
+            logger.warning("adapter_stop_failed", extra={"adapter": name}, exc_info=True)
+
+    def _lifecycle_stop_order(self) -> list[Any]:
+        """The started lifecycle beans, highest phase first and in reverse start order within a phase."""
+        from pyfly.kernel.lifecycle import lifecycle_phase
+
+        indexed = list(enumerate(self._lifecycle_beans))
+        indexed.sort(key=lambda item: (-lifecycle_phase(item[1]), -item[0]))
+        return [bean for _, bean in indexed]
+
+    def _live_instances_in_destroy_order(self) -> list[Any]:
+        """Every singleton instance, once, the most recently created first.
+
+        A bean is created after the beans it depends on (they are its constructor or factory
+        arguments), so this destroys each bean before its dependencies. Instances the context did not
+        build (the container itself, ``Config``, embedder-registered objects) come last.
+        """
+        instances: list[Any] = []
+        seen: set[int] = set()
+        for reg in self._all_registrations():
+            if reg.instance is not None and id(reg.instance) not in seen:
+                seen.add(id(reg.instance))
+                instances.append(reg.instance)
+        position = {id(instance): index for index, instance in enumerate(instances)}
+        instances.sort(
+            key=lambda instance: (self._creation_index(instance), position[id(instance)]),
+            reverse=True,
+        )
+        return instances
+
+    def _all_registrations(self) -> list[Registration]:
+        """Every registration the container holds, once: the by-type slots, the named and the typed indexes.
+
+        Two beans of one concrete type share a by-type slot, so the slots alone miss one of them.
+        """
+        out: list[Registration] = []
+        seen: set[int] = set()
+        container = self._container
+        for reg in (*container._registrations.values(), *container._all.values(), *container._named.values()):
+            if id(reg) not in seen:
+                seen.add(id(reg))
+                out.append(reg)
+        return out
+
+    def _note_created(self, instance: Any) -> None:
+        """Record that singleton *instance* now exists (its place in the destroy order)."""
+        if id(instance) not in self._creation_order:
+            self._creation_order[id(instance)] = (len(self._creation_order), instance)
+
+    def _carry_creation_order(self, previous: Any, replacement: Any) -> None:
+        """A post-processor replaced *previous* with *replacement*: it keeps the original's place."""
+        entry = self._creation_order.get(id(previous))
+        if entry is not None:
+            self._creation_order.setdefault(id(replacement), (entry[0], replacement))
+
+    def _creation_index(self, instance: Any) -> int:
+        """The place of *instance* in this run's creation order, or ``-1`` when the run did not build it."""
+        entry = self._creation_order.get(id(instance))
+        return -1 if entry is None else entry[0]
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -463,15 +897,26 @@ class ApplicationContext:
             if cls not in self._container._registrations:
                 self.register_bean(cls)
 
-    async def _start_infrastructure(self) -> None:
-        """Start adapter beans that implement start()/stop() lifecycle."""
-        for reg in self._container._registrations.values():
-            if reg.instance is None:
-                continue
-            if self._has_lifecycle_methods(reg.instance):
-                self._infrastructure_adapters.append(reg.instance)
+    async def _start_lifecycle_beans(self) -> None:
+        """Start the lifecycle beans not started yet, by phase and then creation order.
 
-        for adapter in self._infrastructure_adapters:
+        A bean registered under several types (a ``@bean`` declared as a port) is one instance and is
+        started once; so is a bean whose instance appears under several registrations.
+        """
+        from pyfly.kernel.lifecycle import lifecycle_phase
+
+        started = {id(bean) for bean in self._lifecycle_beans}
+        candidates: list[Any] = []
+        for reg in self._all_registrations():
+            instance = reg.instance
+            if instance is None or id(instance) in started:
+                continue
+            started.add(id(instance))
+            if self._has_lifecycle_methods(instance):
+                candidates.append(instance)
+        candidates.sort(key=lambda bean: (lifecycle_phase(bean), self._creation_index(bean)))
+
+        for adapter in candidates:
             try:
                 await adapter.start()
             except Exception as exc:
@@ -480,6 +925,7 @@ class ApplicationContext:
                     provider=type(adapter).__name__,
                     reason=str(exc),
                 ) from exc
+            self._lifecycle_beans.append(adapter)
 
     @staticmethod
     def _has_lifecycle_methods(instance: object) -> bool:
@@ -532,10 +978,13 @@ class ApplicationContext:
             self._remove_registration(cls)
 
     def _remove_registration(self, cls: type) -> None:
-        """Remove a bean registration and its named entry."""
+        """Remove a bean registration from every index: by type, by name, and by ``(type, name)``."""
         reg = self._container._registrations.pop(cls)
         if reg.name and reg.name in self._container._named:
             del self._container._named[reg.name]
+        if self._container._all.get((cls, reg.name)) is reg:
+            del self._container._all[(cls, reg.name)]
+            self._container._unindex_name(cls, reg.name)
 
     @staticmethod
     def _declared_bean_type(return_type: Any) -> type | None:
@@ -558,6 +1007,39 @@ class ApplicationContext:
             if len(members) == 1 and isinstance(members[0], type):
                 return members[0]
         return None
+
+    @classmethod
+    def _declared_registration_type(cls, return_type: Any, *, claim: bool = False) -> type | None:
+        """The class a ``@bean`` method is registered under before its product exists.
+
+        That is the registration of a non-singleton ``@bean`` (built only when its scope asks) and, with
+        *claim*, the provisional claim of a deferred singleton one (completed once its dependencies
+        exist). As :meth:`_declared_bean_type`, and a parametrized generic declares its origin class:
+        ``-> async_sessionmaker[AsyncSession]`` (the idiomatic hint), and ``... | None``, declare
+        ``async_sessionmaker``. That is what an injection of the parametrized type resolves (the
+        container falls back to the origin), and what ``@conditional_on_missing_bean`` asks about. A
+        builtin container (``list[X]``, ``dict[K, V]``) or ``type[X]`` declares nothing: those are not
+        bean keys. A claim also ignores an abstract collection (``Callable[[str], str]``), which names
+        what the product is rather than which bean it replaces; a scoped ``@bean`` with such a hint is
+        still registered under it, so its factory is not called at startup (a REQUEST-scoped one has no
+        request then). A singleton whose factory runs at once keeps :meth:`_declared_bean_type`: it is
+        registered under the concrete class it returns.
+        """
+        declared = cls._declared_bean_type(return_type)
+        if declared is not None:
+            return declared
+        hint = return_type
+        if typing.get_origin(hint) in (typing.Union, types.UnionType):
+            members = [arg for arg in typing.get_args(hint) if arg is not type(None)]
+            if len(members) != 1:
+                return None
+            hint = members[0]
+        origin = typing.get_origin(hint)
+        if not isinstance(origin, type) or origin in _BUILTIN_CONTAINERS:
+            return None
+        if claim and origin.__module__ in _NOT_CLAIMED_MODULES:
+            return None
+        return origin
 
     def _process_configurations(self, *, auto: bool = False) -> None:
         """Find @configuration beans, call their @bean methods, register results.
@@ -602,6 +1084,24 @@ class ApplicationContext:
                 if return_type is None:
                     continue
 
+                # @scoped_proxy written above @bean refuses a singleton or transient method itself; written
+                # below, it runs before the scope is set, and the marker used to be silently ignored.
+                bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
+                proxied = getattr(method, "__pyfly_scoped_proxy__", False)
+                if proxied and bean_scope in (Scope.SINGLETON, Scope.TRANSIENT):
+                    raise TypeError(
+                        f"a scoped proxy needs a REQUEST, SESSION or custom scope; "
+                        f"{type(config_instance).__qualname__}.{attr_name}() is {bean_scope.name}"
+                    )
+
+                # A non-singleton bean is built when its scope asks for an instance, never here: a
+                # REQUEST-scoped factory has no request at startup (one that reads the request or
+                # takes another request-scoped bean failed start()), and the product of a
+                # refresh-scoped or transient factory was thrown away (an extra engine per scoped
+                # datasource). The declared return class is the registration key, as in Spring.
+                if self._register_scoped_bean_method(config_instance, attr_name, method, return_type):
+                    continue
+
                 # Resolve the factory's parameters from the container. USER configurations are
                 # processed before AUTO-configurations so that @conditional_on_missing_bean can
                 # see what the user declared — but that means a user factory taking an
@@ -620,7 +1120,9 @@ class ApplicationContext:
                 # bean that declared it.
                 try:
                     kwargs = self._bean_method_kwargs(config_instance, method)
-                except NoSuchBeanError as exc:
+                except (NoSuchBeanError, NoUniqueBeanError) as exc:
+                    # An ambiguous parameter is deferred too: an auto-configuration may register the
+                    # @primary candidate that settles it.
                     if auto:
                         raise
                     self._defer_bean_method(config_instance, attr_name, method, return_type, cause=exc)
@@ -628,6 +1130,30 @@ class ApplicationContext:
 
                 result = method(**kwargs)
                 self._register_bean_result(config_instance, attr_name, method, return_type, result)
+
+    def _register_scoped_bean_method(self, config_instance: Any, attr_name: str, method: Any, return_type: Any) -> bool:
+        """Register a non-singleton ``@bean`` method under its declared class without calling it.
+
+        Returns ``False`` for a singleton, and for a non-singleton whose return hint declares no single
+        class (``A | B``, ``list[X]``): that one is still called once at startup to learn its concrete
+        type. A parametrized hint (``-> async_sessionmaker[AsyncSession]``) declares its origin class.
+        """
+        bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
+        if bean_scope == Scope.SINGLETON:
+            return False
+        declared = self._declared_registration_type(return_type)
+        if declared is None:
+            return False
+        bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
+        self._container.register(declared, scope=bean_scope, name=bean_name)
+        registration = self._container._registrations[declared]
+        registration.scope = bean_scope  # the method's scope, even when the class carries a stereotype's
+        registration.factory = self._bean_factory(config_instance, method)
+        registration.scoped_proxy = bool(getattr(method, "__pyfly_scoped_proxy__", False))
+        registration.destroy_method = self._declared_destroy_method(method)
+        if getattr(method, "__pyfly_bean_primary__", False):
+            registration.primary = True
+        return True
 
     def _register_bean_result(
         self,
@@ -653,27 +1179,32 @@ class ApplicationContext:
             # registered — least of all ``NoneType``, which is what ``type(result)`` would have
             # keyed — and a provisional claim a deferred factory made must go with it, or a
             # later resolve of ``Port`` would run the factory again and hand out ``None``.
-            declared = self._declared_bean_type(return_type)
-            if declared is not None:
-                reg = self._container._registrations.get(declared)
-                if reg is not None and reg.factory is factory and reg.instance is None:
-                    self._remove_registration(declared)
+            claim = self._deferred_claim(method, attr_name, return_type, factory)
+            if claim is not None and claim.instance is None:
+                self._remove_claim(claim)
             return
 
         # Register bean: use the concrete type so multiple beans
         # returning the same interface type don't overwrite each other.
         # A factory closure is stored so TRANSIENT beans rebuild through
         # the @bean method (not __init__) on each resolution.
+        # An engine gets its connection hook now, before any connection (see _close_connections_on_return).
+        _close_connections_on_return(result)
         impl_type = type(result)
+        # The provisional registration of a deferred call (found by class and name before the product's
+        # own registration, of the same class and name, replaces it).
+        claim = self._deferred_claim(method, attr_name, return_type, factory)
         if factory is None:
             factory = self._bean_factory(config_instance, method)
         self._container.register(impl_type, scope=bean_scope, name=bean_name)
         impl_reg = self._container._registrations[impl_type]
         impl_reg.factory = factory
+        impl_reg.destroy_method = self._declared_destroy_method(method)
         if getattr(method, "__pyfly_bean_primary__", False):
             impl_reg.primary = True
         if bean_scope == Scope.SINGLETON:
             impl_reg.instance = result
+            self._note_created(result)
 
         # The type the hint DECLARES. A PEP 604 union / TypeVar / generic-alias
         # return hint is *not* a real class: ``get_type_hints`` preserves
@@ -695,15 +1226,29 @@ class ApplicationContext:
         if declared is not None and declared is not impl_type:
             self._container.bind(declared, impl_type)
 
+        if claim is not None and claim.impl_type is not impl_type:
+            # A deferred call claimed the declared (or, for a parametrized hint, the origin) class, and
+            # the product is of a subclass: the claim is completed, so resolving the class hands out this
+            # product instead of running the factory a second time.
+            self._container.bind(claim.impl_type, impl_type)
+            claim.destroy_method = self._declared_destroy_method(method)
+            if getattr(method, "__pyfly_bean_primary__", False):
+                claim.primary = True
+            if bean_scope == Scope.SINGLETON:
+                claim.instance = result
+            return
+
         # Also keep a direct registration for the declared type
         # (for single-bean resolution) unless it already exists. It
-        # shares the same instance/factory; the startup lifecycle and
-        # wiring passes de-duplicate by instance identity so the bean is
-        # never post-processed or subscribed twice (audit #113).
+        # shares the same instance/factory; the startup lifecycle, wiring
+        # and destroy passes de-duplicate by instance identity so the bean is
+        # never post-processed, subscribed, started, stopped or destroyed twice
+        # (audit #113, C102).
         if declared is not None and declared not in self._container._registrations:
             self._container.register(declared, scope=bean_scope)
             return_reg = self._container._registrations[declared]
             return_reg.factory = factory
+            return_reg.destroy_method = self._declared_destroy_method(method)
             if bean_scope == Scope.SINGLETON:
                 return_reg.instance = result
         elif declared is not None and (
@@ -713,11 +1258,9 @@ class ApplicationContext:
             # A later @bean(primary=True) for the same return type must win the
             # single-bean direct resolution (the @Bean @Primary semantics) —
             # otherwise resolve() returns whichever @bean was processed first.
-            # The same completion applies to a deferred bean's own provisional
-            # registration (recognised by its factory), which is now given the
-            # instance it was standing in for.
             return_reg = self._container._registrations[declared]
             return_reg.factory = factory
+            return_reg.destroy_method = self._declared_destroy_method(method)
             if getattr(method, "__pyfly_bean_primary__", False):
                 return_reg.primary = True
             if bean_scope == Scope.SINGLETON:
@@ -730,7 +1273,7 @@ class ApplicationContext:
         method: Any,
         return_type: Any,
         *,
-        cause: NoSuchBeanError,
+        cause: NoSuchBeanError | NoUniqueBeanError,
     ) -> None:
         """Park a user @bean method until the auto-configurations have registered their beans.
 
@@ -745,11 +1288,18 @@ class ApplicationContext:
         bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
         bean_scope = getattr(method, "__pyfly_bean_scope__", Scope.SINGLETON)
         factory = self._bean_factory(config_instance, method)
-        declared = self._declared_bean_type(return_type)
-        if declared is not None and declared not in self._container._registrations:
+        # A parametrized hint (``-> async_sessionmaker[AsyncSession]``) claims its origin class: it
+        # used to claim nothing, so the auto-configured bean it replaces was registered beside it. The
+        # claim is made unless a SINGLETON of the class is registered (that one already makes the
+        # auto-configured bean back off): a request- or refresh-scoped bean of the class is another bean,
+        # and whichever came first, the override must still be seen. The claim is found by its class and
+        # bean name, never by the by-type slot, which a later scoped registration takes over.
+        declared = self._declared_registration_type(return_type, claim=True)
+        if declared is not None and not self._singleton_registered(declared):
             self._container.register(declared, scope=bean_scope, name=bean_name)
-            provisional = self._container._registrations[declared]
+            provisional = self._container._all[(declared, bean_name)]
             provisional.factory = factory
+            provisional.destroy_method = self._declared_destroy_method(method)
             if getattr(method, "__pyfly_bean_primary__", False):
                 provisional.primary = True
         self._deferred_bean_methods.append(
@@ -764,6 +1314,48 @@ class ApplicationContext:
             },
         )
 
+    def _singleton_registered(self, cls: type) -> bool:
+        """Whether a SINGLETON bean is registered under exactly *cls* (under any name)."""
+        container = self._container
+        slot = container._registrations.get(cls)
+        if slot is not None and slot.scope == Scope.SINGLETON:
+            return True
+        return any(
+            reg.scope == Scope.SINGLETON for (registered, _name), reg in container._all.items() if registered is cls
+        )
+
+    def _deferred_claim(
+        self, method: Any, attr_name: str, return_type: Any, factory: Callable[[], Any] | None
+    ) -> Registration | None:
+        """The provisional registration a deferred ``@bean`` method made, or ``None`` when it made none.
+
+        It is found by its class and bean name (see :meth:`_defer_bean_method`) and recognized by the
+        factory closure the deferral created; a call that was not deferred passes no factory.
+        """
+        claimed = self._declared_registration_type(return_type, claim=True)
+        if claimed is None or factory is None:
+            return None
+        bean_name = getattr(method, "__pyfly_bean_name__", "") or attr_name
+        claim = self._container._all.get((claimed, bean_name))
+        return claim if claim is not None and claim.factory is factory else None
+
+    def _remove_claim(self, claim: Registration) -> None:
+        """Drop a provisional registration from every index; the by-type slot falls back to another bean
+        of the class (a scoped one the claim had taken the slot from), if there is one."""
+        container = self._container
+        cls, name = claim.impl_type, claim.name
+        if container._all.get((cls, name)) is claim:
+            del container._all[(cls, name)]
+            container._unindex_name(cls, name)
+        if name and container._named.get(name) is claim:
+            del container._named[name]
+        if container._registrations.get(cls) is claim:
+            remaining = [reg for (registered, _name), reg in container._all.items() if registered is cls]
+            if remaining:
+                container._registrations[cls] = remaining[-1]
+            else:
+                del container._registrations[cls]
+
     def _process_deferred_bean_methods(self) -> None:
         """Step 2d: complete the user @bean methods deferred in step 2.
 
@@ -777,8 +1369,7 @@ class ApplicationContext:
         while pending:
             still_pending: list[_DeferredBeanMethod] = []
             for entry in pending:
-                declared = self._declared_bean_type(entry.return_type)
-                provisional = self._container._registrations.get(declared) if declared is not None else None
+                provisional = self._deferred_claim(entry.method, entry.attr_name, entry.return_type, entry.factory)
                 if (
                     provisional is not None
                     and provisional.factory is entry.factory
@@ -791,7 +1382,7 @@ class ApplicationContext:
                 else:
                     try:
                         kwargs = self._bean_method_kwargs(entry.config_instance, entry.method)
-                    except NoSuchBeanError as exc:
+                    except (NoSuchBeanError, NoUniqueBeanError) as exc:
                         still_pending.append(entry.with_cause(exc))
                         continue
                     result = entry.method(**kwargs)
@@ -805,15 +1396,20 @@ class ApplicationContext:
                 )
             if len(still_pending) == len(pending):
                 first = still_pending[0]
-                first_declared = self._declared_bean_type(first.return_type)
-                if first_declared is not None:
-                    reg = self._container._registrations.get(first_declared)
-                    if reg is not None and reg.factory is first.factory and reg.instance is None:
-                        # Leave no provisional registration behind that would answer a resolve
-                        # with the same failure later.
-                        self._remove_registration(first_declared)
+                claim = self._deferred_claim(first.method, first.attr_name, first.return_type, first.factory)
+                if claim is not None and claim.instance is None:
+                    # Leave no provisional registration behind that would answer a resolve with the
+                    # same failure later.
+                    self._remove_claim(claim)
                 raise first.cause
             pending = still_pending
+
+    @staticmethod
+    def _declared_destroy_method(method: Any) -> str:
+        """The ``destroy_method`` a ``@bean`` method declares (inferred when it declares none)."""
+        from pyfly.container.bean import INFER_DESTROY_METHOD
+
+        return str(getattr(method, "__pyfly_bean_destroy_method__", INFER_DESTROY_METHOD))
 
     def _bean_factory(self, config_instance: Any, method: Any) -> Callable[[], Any]:
         """Return a zero-arg closure that invokes a @bean method with injection."""
@@ -821,13 +1417,18 @@ class ApplicationContext:
 
     def _call_bean_method(self, config_instance: Any, method: Any) -> Any:
         """Call a @bean method, injecting its parameters from the container."""
-        return method(**self._bean_method_kwargs(config_instance, method))
+        result = method(**self._bean_method_kwargs(config_instance, method))
+        _close_connections_on_return(result)
+        return result
 
     def _bean_method_kwargs(self, config_instance: Any, method: Any) -> dict[str, Any]:
         """Resolve a @bean method's parameters from the container without calling it.
 
         Kept apart from the call so a factory whose dependencies are not registered yet can be
         deferred (see :meth:`_process_configurations`) without its body ever having started.
+
+        A parameter that several beans match, none of them ``@primary``, raises
+        :class:`NoUniqueBeanError` naming the candidates; it used to be reported as a missing bean.
         """
         hints = typing.get_type_hints(method)
         hints.pop("return", None)
@@ -839,7 +1440,18 @@ class ApplicationContext:
             has_default = param is not None and param.default is not inspect.Parameter.empty
             try:
                 kwargs[param_name] = self._container._resolve_param(param_type)
-            except (NoSuchBeanError, NoUniqueBeanError):
+            except NoUniqueBeanError as exc:
+                if has_default:
+                    continue
+                raise NoUniqueBeanError(
+                    bean_type=exc.bean_type,
+                    candidates=exc.candidates,
+                    candidate_names=exc.candidate_names,
+                    primary_names=exc.primary_names,
+                    required_by=f"{type(config_instance).__qualname__}.{method.__name__}()",
+                    parameter=f"{param_name}: {getattr(param_type, '__name__', repr(param_type))}",
+                ) from None
+            except NoSuchBeanError:
                 if has_default:
                     continue
                 raise NoSuchBeanError(
@@ -982,11 +1594,12 @@ class ApplicationContext:
         """Registrations with a resolved instance, de-duplicated by identity.
 
         An interface-typed @bean is registered under two keys sharing one
-        instance; wiring passes must visit each instance once (audit #113).
+        instance; wiring passes must visit each instance once (audit #113). Two beans of one
+        class share a by-type slot, so every registration is visited, not only the slots.
         """
         seen: set[int] = set()
         out: list[Registration] = []
-        for reg in self._container._registrations.values():
+        for reg in self._all_registrations():
             if reg.instance is None or id(reg.instance) in seen:
                 continue
             seen.add(id(reg.instance))
@@ -1013,7 +1626,8 @@ class ApplicationContext:
                     if isinstance(param_type, type) and param_type is not typing.Any:
                         event_type = param_type
                         break
-                self._event_bus.subscribe(event_type, method, owner_cls=type(reg.instance))
+                self._event_bus.subscribe(event_type, method, owner_cls=type(reg.instance), owner=reg.instance)
+                self._wired_listener_owners.append(reg.instance)
                 count += 1
         self._wiring_counts["event_listeners"] = count
         if count:
@@ -1122,7 +1736,9 @@ class ApplicationContext:
             from pyfly.scheduling.task_scheduler import TaskScheduler
         except ImportError:
             return
-        beans = [reg.instance for reg in self._container._registrations.values() if reg.instance is not None]
+        # Each bean once: a @bean declared as a port is registered under two keys, and scanning both
+        # scheduled its methods twice.
+        beans = [reg.instance for reg in self._unique_live_instances()]
 
         # Prefer a container-managed TaskScheduler bean (from auto-config)
         scheduler = None
@@ -1142,30 +1758,59 @@ class ApplicationContext:
             logger.debug("Discovered %d @scheduled method(s)", count)
 
     def _wire_async_methods(self) -> None:
-        """Scan beans for @async_method and wrap them to execute in a thread pool."""
+        """Scan beans for @async_method and dispatch their calls through the scheduler's executor.
+
+        A call returns at once with the task running the method, started with the transaction state cleared
+        (:mod:`pyfly.scheduling.async_methods`). The executor is the ``TaskScheduler``'s, so the drain step of
+        :meth:`stop` waits for the calls in flight; an ``AsyncUncaughtExceptionHandler`` bean, when declared,
+        receives their uncaught exceptions.
+        """
+        from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler, dispatching, is_dispatching
+
         count = 0
-        for reg in self._container._registrations.values():
-            if reg.instance is None:
-                continue
+        dispatch: tuple[Any, Any] | None = None
+        # Each bean once: an interface-typed @bean is registered under two keys sharing one instance, and a
+        # second pass wrapped the dispatching wrapper, whose task then gave another task, not the result.
+        for reg in self._unique_live_instances():
             for attr_name, method in self._safe_members(reg.instance):
-                if not getattr(method, "__pyfly_async__", False):
+                if not getattr(method, "__pyfly_async__", False) or is_dispatching(method):
                     continue
-
-                # Wrap the method to offload execution
-                original = method
-
-                @functools.wraps(original)
-                async def async_wrapper(*args: Any, _orig: Any = original, **kwargs: Any) -> Any:
-                    loop = asyncio.get_running_loop()
-                    if inspect.iscoroutinefunction(_orig):
-                        return await _orig(*args, **kwargs)
-                    return await loop.run_in_executor(None, functools.partial(_orig, *args, **kwargs))
-
-                setattr(reg.instance, attr_name, async_wrapper)
+                if dispatch is None:
+                    handler: Any = None
+                    try:
+                        handler = self._container.resolve(AsyncUncaughtExceptionHandler)  # type: ignore[type-abstract]
+                    except NoSuchBeanError as missing:
+                        if missing.bean_type is not AsyncUncaughtExceptionHandler:
+                            raise  # a declared handler that cannot be created fails the start
+                        # Not bound to the protocol type: a bean that implements it (a @component subclass).
+                        handler = next(
+                            (
+                                live.instance
+                                for live in self._unique_live_instances()
+                                if isinstance(live.instance, AsyncUncaughtExceptionHandler)
+                            ),
+                            None,
+                        )
+                    dispatch = (self._async_method_scheduler().executor, handler)
+                setattr(reg.instance, attr_name, dispatching(method, dispatch[0], dispatch[1]))
                 count += 1
         self._wiring_counts["async_methods"] = count
         if count:
             logger.debug("Wired %d @async_method(s)", count)
+
+    def _async_method_scheduler(self) -> Any:
+        """The ``TaskScheduler`` whose executor runs the @async_method calls: the auto-configured bean, else one
+        of the context's own. Either way it is the one the drain step of :meth:`stop` stops."""
+        from pyfly.scheduling.task_scheduler import TaskScheduler
+
+        if self._task_scheduler is None:
+            for reg in self._container._registrations.values():
+                if isinstance(reg.instance, TaskScheduler):
+                    self._task_scheduler = reg.instance
+                    break
+            else:
+                self._task_scheduler = TaskScheduler()
+        return self._task_scheduler
 
     def _wire_shell_commands(self) -> None:
         """Scan @shell_component beans for @shell_method methods and register with ShellRunnerPort."""
@@ -1276,6 +1921,33 @@ class ApplicationContext:
             counts[stereotype] = counts.get(stereotype, 0) + 1
         return counts
 
+    def _on_bean_created(self, instance: Any, reg: Registration) -> Any:
+        """The container's post-create hook: every instance it creates, of every scope, lands here.
+
+        Before the batched passes of step 5 a non-singleton instance is only recorded (they process
+        it with the eager singletons); from step 5 on each instance runs the whole pipeline at once.
+        """
+        if self._startup_created is not None:
+            if reg.scope != Scope.SINGLETON:
+                self._startup_created.append((instance, reg))
+            else:
+                self._note_created(instance)
+            return instance
+        instance = self._post_init_lazy_bean(instance, reg)
+        if reg.scope == Scope.SINGLETON:
+            self._note_created(instance)
+            if self._lifecycle_started and self._has_lifecycle_methods(instance):
+                # A @lazy singleton first resolved after start(): the context cannot await its start()
+                # in a synchronous resolution, so it neither starts nor stops it. Say so.
+                logger.warning(
+                    "lifecycle_bean_created_after_start",
+                    extra={
+                        "bean": reg.display_name,
+                        "hint": "the context neither starts nor stops it; make it eager (drop @lazy)",
+                    },
+                )
+        return instance
+
     def _post_init_lazy_bean(self, instance: Any, reg: Registration) -> Any:
         """Run the full init pipeline on a lazily-created singleton (post-startup):
         BeanPostProcessors (incl. AOP weaving) then @post_construct, mirroring the
@@ -1284,33 +1956,59 @@ class ApplicationContext:
         """
         bean_name = reg.display_name
         sorted_pps = sorted(self._post_processors, key=lambda pp: get_order(type(pp)))
-        for pp in sorted_pps:
+        applied = self._post_processors_for(sorted_pps, reg.scope)
+        for pp in applied:
             instance = pp.before_init(instance, bean_name)
         self._call_post_construct_sync(instance)
-        for pp in sorted_pps:
+        for pp in applied:
             instance = pp.after_init(instance, bean_name)
+        self._report_skipped_post_processors(sorted_pps, instance, bean_name, reg.scope)
         return instance
+
+    @staticmethod
+    def _singletons_only(post_processor: BeanPostProcessor) -> bool:
+        """Whether *post_processor* declares ``singletons_only = True`` (see :class:`BeanPostProcessor`)."""
+        return getattr(post_processor, "singletons_only", False) is True
+
+    @classmethod
+    def _post_processors_for(cls, sorted_pps: list[BeanPostProcessor], scope: ScopeSpec) -> list[BeanPostProcessor]:
+        """The post-processors that process an instance of *scope*: every one for a singleton; for any
+        other scope, the ones that do not take singletons only.
+
+        A post-processor that hands the beans it processes to something that outlives them (the
+        datasource registry's SPI registrar) would otherwise register a TRANSIENT bean at each
+        resolution and keep a REQUEST or refresh-scoped one after its scope ended (Spring's
+        ``ApplicationListenerDetector`` registers singletons only for the same reason).
+        """
+        if scope == Scope.SINGLETON:
+            return sorted_pps
+        return [pp for pp in sorted_pps if not cls._singletons_only(pp)]
+
+    @classmethod
+    def _report_skipped_post_processors(
+        cls, sorted_pps: list[BeanPostProcessor], instance: Any, bean_name: str, scope: ScopeSpec
+    ) -> None:
+        """Tell each singletons-only post-processor that skipped *instance* (its optional
+        ``non_singleton_skipped(bean, bean_name, scope)``), so it can say why it ignores the bean."""
+        if scope == Scope.SINGLETON:
+            return
+        for pp in sorted_pps:
+            notify = getattr(pp, "non_singleton_skipped", None)
+            if cls._singletons_only(pp) and callable(notify):
+                notify(instance, bean_name, scope)
 
     def _call_post_construct_sync(self, instance: Any) -> None:
         """Synchronous @post_construct for lazily-created beans. Async @post_construct
-        cannot be awaited in the sync resolution path, so it is skipped with a warning
-        (use an eager bean if you need an async @post_construct)."""
-        for attr_name, method in self._safe_members(instance, skip_private=False):
-            if not getattr(method, "__pyfly_post_construct__", False):
-                continue
+        cannot be awaited in the sync resolution path, so it is skipped with a warning, once per
+        class and method (use an eager bean if you need an async @post_construct)."""
+        for attr_name, method in _marked_members(instance, "__pyfly_post_construct__"):
             if inspect.iscoroutinefunction(method):
-                logger.warning(
-                    "async_post_construct_skipped_on_lazy_bean",
-                    extra={"bean": type(instance).__qualname__, "method": attr_name},
-                )
+                self._warn_async_post_construct_skipped(instance, attr_name)
                 continue
             try:
                 result = method()
                 if inspect.isawaitable(result):
-                    logger.warning(
-                        "async_post_construct_skipped_on_lazy_bean",
-                        extra={"bean": type(instance).__qualname__, "method": attr_name},
-                    )
+                    self._warn_async_post_construct_skipped(instance, attr_name)
             except Exception as exc:
                 raise BeanCreationException(
                     subsystem="lifecycle",
@@ -1318,35 +2016,45 @@ class ApplicationContext:
                     reason=f"@post_construct method '{attr_name}' failed: {exc}",
                 ) from exc
 
+    def _warn_async_post_construct_skipped(self, instance: Any, attr_name: str) -> None:
+        """Warn that an async ``@post_construct`` was skipped: once per class and method, since a
+        transient or request-scoped bean is created again and again."""
+        key = (type(instance), attr_name)
+        if key in self._skipped_async_post_construct:
+            return
+        self._skipped_async_post_construct.add(key)
+        logger.warning(
+            "async_post_construct_skipped_on_lazy_bean",
+            extra={"bean": type(instance).__qualname__, "method": attr_name},
+        )
+
     async def _call_post_construct(self, instance: Any) -> None:
         """Call all @post_construct methods on an instance."""
-        for attr_name, method in self._safe_members(instance, skip_private=False):
-            if getattr(method, "__pyfly_post_construct__", False):
-                try:
-                    result = method()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:
-                    raise BeanCreationException(
-                        subsystem="lifecycle",
-                        provider=type(instance).__qualname__,
-                        reason=f"@post_construct method '{attr_name}' failed: {exc}",
-                    ) from exc
+        for attr_name, method in _marked_members(instance, "__pyfly_post_construct__"):
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                raise BeanCreationException(
+                    subsystem="lifecycle",
+                    provider=type(instance).__qualname__,
+                    reason=f"@post_construct method '{attr_name}' failed: {exc}",
+                ) from exc
 
     async def _call_pre_destroy(self, instance: Any) -> None:
         """Call all @pre_destroy methods on an instance."""
-        for attr_name, method in self._safe_members(instance, skip_private=False):
-            if getattr(method, "__pyfly_pre_destroy__", False):
-                try:
-                    result = method()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:
-                    logger.warning(
-                        "pre_destroy_failed",
-                        extra={
-                            "bean": type(instance).__qualname__,
-                            "method": attr_name,
-                            "error": str(exc),
-                        },
-                    )
+        for attr_name, method in _marked_members(instance, "__pyfly_pre_destroy__"):
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.warning(
+                    "pre_destroy_failed",
+                    extra={
+                        "bean": type(instance).__qualname__,
+                        "method": attr_name,
+                        "error": str(exc),
+                    },
+                )

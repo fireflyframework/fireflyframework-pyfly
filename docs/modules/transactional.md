@@ -17,6 +17,7 @@ consistency across service boundaries without two-phase commit.
    - [The `@saga_step` Decorator](#the-saga_step-decorator)
    - [Compensation Methods](#compensation-methods)
    - [Step Dependencies (DAG)](#step-dependencies-dag)
+   - [Step Transactions, Failures and Cancellation](#step-transactions-failures-and-cancellation)
    - [Parameter Injection](#parameter-injection)
    - [SagaContext](#sagacontext)
    - [SagaResult and StepOutcome](#sagaresult-and-stepoutcome)
@@ -93,7 +94,7 @@ pyfly.transactional
 |  Shared Infrastructure                                               |
 |  +-------------------------------+  +----------------------------+   |
 |  | Ports (Protocols)             |  | Adapters                   |   |
-|  |  TransactionalPersistencePort |  |  InMemoryPersistenceAdapter|   |
+|  |  TransactionalPersistencePort |  |  ProviderPersistencePort   |   |
 |  |  TransactionalEventsPort      |  |  LoggerEventsAdapter       |   |
 |  |  BackpressureStrategyPort     |  |  CompositeEventsAdapter    |   |
 |  |  CompensationErrorHandlerPort |  |  Adaptive / Batched / CB   |   |
@@ -182,7 +183,7 @@ async def reserve_inventory(
 | `jitter` | `bool` | `False` | Whether to add jitter to backoff. |
 | `jitter_factor` | `float` | `0.0` | Fraction of backoff used as jitter range. |
 | `cpu_bound` | `bool` | `False` | Offload to a thread/process pool. |
-| `idempotency_key` | `str \| None` | `None` | Template string for deduplication. |
+| `idempotency_key` | `str \| None` | `None` | Template string for deduplication. Recorded on the step definition (and shown by the admin); the engine does not deduplicate on it. A step attempt that committed is never retried instead (see [Step Transactions](#step-transactions-failures-and-cancellation)). |
 | `compensation_retry` | `int \| None` | `None` | Override retry count for the compensation action. |
 | `compensation_backoff_ms` | `int \| None` | `None` | Override backoff for the compensation action. |
 | `compensation_timeout_ms` | `int \| None` | `None` | Override timeout for the compensation action. |
@@ -264,8 +265,9 @@ class NotifyWarehouseStep:
 
 Steps declare dependencies through `depends_on`, forming a directed acyclic
 graph. The engine computes topology layers -- groups of steps whose
-dependencies are all satisfied -- and executes each layer in parallel via
-`asyncio.gather`.
+dependencies are all satisfied -- and executes the steps of each layer
+concurrently, each in a task of its own (see
+[Step Transactions, Failures and Cancellation](#step-transactions-failures-and-cancellation)).
 
 ```
 Layer 0:  [validate-order]
@@ -284,6 +286,106 @@ registry validates the DAG at startup using Kahn's algorithm and raises
 
 * A `depends_on` entry references a nonexistent step.
 * The dependency graph contains a cycle.
+
+### Step Transactions, Failures and Cancellation
+
+The engines own the tasks and the units of work their steps run in, so that
+every step whose work committed is compensated exactly once, and no step
+commits behind the engine's back:
+
+- **Each step is a unit of work of its own.** A saga or workflow step runs in a
+  task started with the transaction state cleared
+  (`pyfly.data.transaction.detached`): its `@transactional` work (and its
+  repository calls) never join the caller's unit, even when the saga is started
+  inside `@transactional`, and a step commits on its own. So does each
+  compensation. A step therefore does not see the caller's uncommitted writes,
+  and it waits for the locks the caller holds while the caller waits for the
+  saga. On a SQLite file, whose database has one writer, a saga started inside
+  a write `@transactional` fails after `busy_timeout` with "database is locked"
+  once a step writes. On PostgreSQL, a step that writes rows the caller locked
+  waits for the caller, which waits for the saga, and neither ends until a
+  timeout (the step's, the caller's or the server's) does. Start
+  the saga outside the business transaction, or after it commits
+  (`pyfly.data.transaction.after_commit`). Through 26.09.07 the steps joined the
+  caller's unit and committed or rolled back with it.
+- **A step that fails.** In a saga, the steps of its layer that are still
+  running are awaited, never cancelled (a step cancelled while its `COMMIT` is in
+  flight would commit behind the engine's back); the steps waiting for the layer's
+  concurrency limit never start, and a running step starts no new attempt (one
+  sleeping in its retry backoff wakes up and fails with its last error). In a
+  workflow, the running siblings are cancelled and awaited (`asyncio.TaskGroup`
+  semantics). Either way compensation starts only once every step of the layer
+  has settled.
+- **A saga step that ends cancelled on its own** (its body awaited a future
+  something else cancelled, such as a reply future a client library gave up on,
+  while nothing cancelled the saga) failed: the attempt raises an
+  `OrchestrationError` chained from the `CancelledError`, and is retried,
+  compensated and reported like any other failure. The saga never takes it for
+  a success, nor for its own cancellation.
+- **The caller cancels** (a request timeout, `@time_limiter`, a client
+  disconnect, shutdown). The saga cancels and awaits every step task, compensates
+  the steps that committed, records its final state, and then re-raises
+  `CancelledError`; no step task outlives it. A TCC runs its CANCEL phase for the
+  participants that tried before it re-raises, also when the cancellation lands
+  during a CANCEL phase a failed TRY or CONFIRM started: that phase runs shielded
+  to completion. A workflow compensates and is
+  recorded `CANCELLED` (a workflow timeout records `TIMED_OUT`).
+- **Knowing what committed.** Commits are shielded: a cancellation or a step
+  timeout that fires while a step's `COMMIT` is in flight lets the commit finish,
+  and is raised afterwards. Each attempt therefore runs in
+  `pyfly.data.transaction.track_commits()`, and a step whose attempt failed,
+  timed out or was cancelled after a unit of work of it committed (or with a
+  commit whose outcome is unknown, `CommitOutcomeUnknownError`) is compensated
+  like a completed step (`SagaContext.committed_steps`, a workflow step record's
+  `committed` flag), and it is **never retried**: a retry would apply its writes
+  twice. An attempt that committed nothing is retried as configured. The
+  framework's idempotent bookkeeping on the step's way does not count (numbering
+  the events a read of the global stream returns, a cache fill after a miss, a
+  lease: `pyfly.data.transaction.untracked()`), so a step that only read is
+  retried. A write that commits as it runs and then fails counts as a commit
+  whose outcome is unknown: a single-statement write on an autocommit
+  connection (PostgreSQL) that failed after its statement ran, and a MongoDB
+  write outside a transaction (a single-command `save`, `delete` or
+  `delete_by_id`, a `$out` or `$merge` pipeline, every write on a standalone
+  server) whose after-insert or after-save event actions, write concern or
+  connection failed after the write. In TCC, a
+  TRY that failed after committing is cancelled with the participants that tried
+  (an optional one at once) and is not retried; neither is a CONFIRM or CANCEL
+  attempt that committed. A CONFIRM attempt whose timeout fired after a unit of
+  it committed is therefore a failed CONFIRM, as any other: the TCC fails and
+  runs CANCEL for every participant that tried, the ones already confirmed
+  included (the engine cannot tell whether the CONFIRM's work is complete), so
+  make CANCEL undo a confirmed reservation too, or give CONFIRM a timeout it
+  never reaches.
+- **An orchestration run by a step.** Commit tracking stops at a detached
+  task: the steps of a saga (or workflow) that a step runs commit in units of
+  their own, which the outer step's tracking does not see. A workflow step that
+  ran a saga to completion and then timed out counts as having committed
+  nothing, so it is retried and the saga runs again. Conversely, TCC
+  participants run in the step's task, so the commits of a CANCEL phase make the
+  step count as committed, and it is not retried although the TCC left nothing
+  behind. Make a step that runs another orchestration idempotent, or give it no
+  retries.
+- **TCC participants run in the caller's task.** Unlike saga and workflow steps,
+  the TRY, CONFIRM and CANCEL methods are not detached: called inside the
+  caller's `@transactional`, their units of work join the caller's unit (they
+  commit or roll back with it), and the TCC cannot see what they committed. A
+  participant whose `@transactional` method raises there, or whose statement
+  fails, marks the caller's unit rollback-only: the TCC runs CANCEL and reports
+  the failure, and the caller's commit then raises `UnexpectedRollbackError`.
+  Start a TCC outside a transaction, or give its phase methods units of their own
+  (`@transactional(propagation=Propagation.REQUIRES_NEW)`).
+- **Only the framework's units of work are seen**: `@transactional`, repository
+  calls, `TransactionTemplate`, `SessionProvider.unit()`. A step that opens a
+  session from the `async_sessionmaker` and commits it by hand is invisible to
+  the engine (and its commit is not shielded); a step that calls another system
+  should make that call idempotent, since a cancelled call's outcome is unknown.
+
+Through 26.09.07 a saga cancelled a failed layer's running siblings (one cancelled
+mid-commit stayed `RUNNING` and was never compensated), a cancelled saga left its
+step tasks running and committing, a step whose timeout fired during `COMMIT` was
+retried and committed twice, a workflow compensated while its siblings were still
+running, and a TCC TRY that timed out after committing was never cancelled.
 
 ### Parameter Injection
 
@@ -350,6 +452,7 @@ from pyfly.transactional.saga.core.context import SagaContext
 | `idempotency_keys` | `set[str]` | Deduplication keys seen so far. |
 | `topology_layers` | `list[list[str]]` | Computed topology layers. |
 | `step_dependencies` | `dict[str, list[str]]` | Step dependency graph. |
+| `committed_steps` | `list[str]` | Steps whose work committed, in the order they ended (compensated on failure, never retried). |
 
 #### Helper Methods
 
@@ -984,7 +1087,37 @@ result = await compositor.execute(composition, initial_inputs)
 
 The compositor executes sagas in topological order, resolves data flows
 between them, and applies the configured compensation policy if any saga
-fails.
+fails. The sagas of one layer run concurrently, and the compositor waits for
+all of them: when one fails, it compensates every saga that completed, in the
+earlier layers and in the failing layer alike. Each saga runs under a
+correlation id of its own, the composition's followed by `:` and the saga's
+name, so a persistence provider keeps the state of each saga apart.
+
+- **Compensation runs on its own.** As a saga's own compensation does, the
+  compensation of a composed saga runs in a task of its own with the
+  transaction state cleared (`pyfly.data.transaction.detached`), to completion
+  even when the caller is cancelled meanwhile: the saga's steps committed on
+  their own, never in the caller's unit, so their compensation commits on its
+  own too, and a caller's `@transactional` that rolls back keeps it. (On a
+  SQLite file the composition's steps cannot run inside a write
+  `@transactional` at all: see [Step Transactions, Failures and
+  Cancellation](#step-transactions-failures-and-cancellation).)
+- **Compensated sagas are persisted as failed.** Each saga the composition
+  compensates has its compensated steps recorded `COMPENSATED`
+  (`update_step_status`) and is marked failed (`mark_completed(..., False)`):
+  its effects did not stay. These updates run where the engine records a
+  saga's state, in the caller's task.
+- **A saga that ends cancelled on its own** (nothing cancelled the
+  composition) failed: the composition fails with an `OrchestrationError` and
+  compensates, as for any other failure.
+- **The caller cancels the composition.** The sagas of the running layer are
+  cancelled and awaited (each compensates its own committed steps), the sagas
+  that completed are compensated, and `CancelledError` is re-raised.
+
+Through 26.09.07 the compensation of a composed saga ran in the caller's task
+(inside the caller's unit of work, rolled back with it), a composed saga the
+composition compensated stayed `COMPLETED`, and a saga that ended cancelled, or
+a cancellation of the composition, skipped the compensation.
 
 ---
 
@@ -1024,8 +1157,44 @@ the values below:
 | `cache` | `CachePersistenceProvider` | Depends on backend | Active `CacheAdapter` bean |
 
 The `memory` provider is the default and requires no additional packages.
-The `redis`, `sqlalchemy`, and `cache` providers are **durable**: they survive
-process restarts because execution state is held outside the Python process.
+The `redis` and `sqlalchemy` providers are **durable**: they survive process
+restarts because execution state is held outside the Python process. The
+`cache` provider is as durable as its cache backend.
+
+The provider stores the state of **every** engine. Workflows use it directly;
+the saga engine, the TCC engine and `SagaRecoveryService` persist through the
+`transactional_persistence_port` bean, a `ProviderPersistencePort`
+(`pyfly.transactional.persistence.provider_port`) that implements
+`TransactionalPersistencePort` on the configured provider. A saga cut short by
+a crash is therefore still there for the next process: its
+`SagaRecoveryService.recover_stale()` finds it in flight and marks it failed,
+and `/api/orchestration/executions` lists sagas and TCC transactions beside
+workflows. (Before 26.09.08 the saga and TCC engines always used an in-memory
+adapter, whatever the provider.) An application's own
+`TransactionalPersistencePort` bean replaces `transactional_persistence_port`.
+
+The engines record when an execution starts (`persist_state`, its
+`IN_FLIGHT` row) and how it ends (`mark_completed`); they do not persist step
+statuses (the `SagaResult` carries them), except that a saga composition
+records the steps it compensated (`update_step_status`, see
+[Saga Composition](#execution)). The port's `update_step_status` is otherwise
+there for callers that record step progress themselves. The port serializes
+the updates of one execution (`update_step_status`, `mark_completed`: two
+updates that run together each keep the other's change), and executions never
+wait for one another.
+
+With the `sqlalchemy` provider, saga and TCC state is written through the unit
+of work bound for the provider's datasource, like any other state: a saga run
+inside a `@transactional` method writes its `IN_FLIGHT` row and its completion
+in the caller's transaction. Three consequences follow. Until the caller
+commits, no other process sees the saga, so a crash mid-saga leaves nothing to
+recover; when the caller rolls back, the record of the saga (including the
+remote steps it already ran) is rolled back with it; and when the caller's own
+work, or a TCC participant (it joins the caller's unit; saga steps never do),
+left that transaction unusable (on PostgreSQL, a failed statement aborts it),
+the engine's final `mark_completed` fails on it and its error replaces the
+`SagaResult` or `TccResult` (the `memory` provider has no such failure). Start a saga outside
+the business transaction when its log must outlive it.
 
 #### Redis provider
 
@@ -1051,15 +1220,43 @@ pyfly:
     persistence:
       provider: sqlalchemy
       sqlalchemy:
-        url: postgresql+asyncpg://user:pass@host/db
+        datasource: orchestration   # a datasource of pyfly.data.relational.datasources
+        # url: postgresql+asyncpg://user:pass@host/db   (or its URL; not both)
 ```
 
-Config key `pyfly.transactional.persistence.sqlalchemy.url` is used when
-set; otherwise the adapter falls back to `pyfly.data.relational.url`. A
-`ValueError` is raised if neither key is configured. The adapter creates
-the table `pyfly_orchestration_state` on first use and requires
-`sqlalchemy[asyncio]` plus an async driver (`asyncpg` for Postgres,
-`aiosqlite` for SQLite).
+Config key `pyfly.transactional.persistence.sqlalchemy.url` resolves
+through the [datasource registry](data-relational.md#module-datasources) (the
+application's `DataSourceRegistry` bean when it defines one), and
+`pyfly.transactional.persistence.sqlalchemy.datasource` names one of its
+datasources; setting both is an error. With neither the adapter uses the
+primary datasource (`pyfly.data.relational.url`); a
+`DataSourceConfigurationError` (a `ValueError`) naming both keys is raised if
+no primary is configured either. A URL identical to a registered datasource's
+reuses that datasource's engine, and another URL registers the
+`transactional-persistence` datasource. The adapter requires
+`sqlalchemy[asyncio]` plus an async driver (`asyncpg` for Postgres, `asyncmy`
+for MySQL and MariaDB, `aiosqlite` for SQLite).
+
+The state lives in the framework table `pyfly_orchestration_state`
+(`pyfly.data.relational.framework_schema.orchestration_state`): the columns the
+recovery scan filters on (`status`, `updated_at` and the other instants as UTC
+timestamps with microseconds on every backend) and the execution's JSON in
+`payload`. The provider creates the table when the context starts if
+`pyfly.data.relational.ddl-auto` is `create` (the default on an embedded
+database) or `create-drop`; with `none` (the default on a database server and
+beside startup migrations) or `validate` a migration must create it (the
+`env.py` of `pyfly db init` lists `framework_metadata` in Alembic's
+`target_metadata`), or the startup fails naming it. `save()` is the dialect's upsert, so the provider runs on
+PostgreSQL, MySQL, MariaDB and SQLite. Its operations join the unit of work
+bound for its datasource (the state commits or rolls back with the business
+step that wrote it); outside one each is a single statement on an autocommit
+connection on PostgreSQL.
+
+A table created by an earlier release on PostgreSQL has `TIMESTAMP` columns,
+which the provider refuses at startup with the statement that converts them:
+`ALTER TABLE pyfly_orchestration_state ALTER COLUMN started_at TYPE TIMESTAMPTZ
+USING started_at AT TIME ZONE 'UTC'` (and the same for `updated_at` and
+`completed_at`).
 
 #### Cache provider
 
@@ -1077,11 +1274,30 @@ execution state from the cache backend — there is no in-process index, so
 it is suitable only when the underlying cache adapter supports key scanning.
 A `ValueError` is raised at startup if no `CacheAdapter` bean is present
 (enable `pyfly.cache`, for example by setting `pyfly.cache.provider=memory`).
+Like the SQL provider, which joins the caller's unit of work, it follows the
+transaction-aware cache contract: a state saved or deleted inside a unit of
+work is written once the unit commits and dropped if it rolls back, and outside
+a unit it is written at once. The cache holds the state's JSON text, never a
+live object.
+
+The two providers order concurrent writes differently, though. A write the SQL
+provider makes outside the unit waits for the row lock of the unit that wrote
+the same execution, so it lands after that unit's commit. The cache provider
+writes it at once, and the unit's deferred write lands after it, at the commit.
+The engines never write one execution's state from two tasks at once: a saga or
+TCC writes its state from the task that runs it, and a background workflow run
+started inside a unit starts after that unit commits (see
+[Background runs and shutdown](#background-runs-and-shutdown)). The difference
+shows only when an application writes an execution's state itself, inside a
+unit and outside it at the same time.
 
 ### InMemoryPersistenceAdapter
 
-The default adapter stores all state in a Python `dict`. All state is lost
-on process restart.
+A standalone in-memory `TransactionalPersistencePort` that stores all state in
+a Python `dict` (lost on process restart). The auto-configuration still
+registers it as the `in_memory_persistence_adapter` bean for applications that
+inject it, but the engines persist through the configured provider (see
+[Persistence Providers](#persistence-providers)).
 
 ```python
 from pyfly.transactional.shared.persistence.memory import InMemoryPersistenceAdapter
@@ -1239,7 +1455,8 @@ pyfly:
 |-----|------|---------|-------------|
 | `pyfly.transactional.persistence.provider` | `str` | `memory` | Persistence backend: `memory`, `redis`, `sqlalchemy`, or `cache`. |
 | `pyfly.transactional.persistence.redis.url` | `str` | `redis://localhost:6379/0` | Redis connection URL (only used when provider is `redis`). |
-| `pyfly.transactional.persistence.sqlalchemy.url` | `str` | *(none)* | SQLAlchemy async database URL (provider `sqlalchemy`). Falls back to `pyfly.data.relational.url`. |
+| `pyfly.transactional.persistence.sqlalchemy.datasource` | `str` | *(none)* | A datasource of the registry (provider `sqlalchemy`); not together with `.url`. |
+| `pyfly.transactional.persistence.sqlalchemy.url` | `str` | *(none)* | SQLAlchemy async database URL (provider `sqlalchemy`). None: the primary datasource. Resolved through the datasource registry. |
 
 ### Saga Properties
 
@@ -1299,7 +1516,8 @@ DI container:
 | `tcc_engine_properties` | `TccEngineProperties` | TCC configuration. |
 | `backpressure_properties` | `BackpressureProperties` | Backpressure configuration. |
 | `orchestration_persistence` | `ExecutionPersistenceProvider` | Provider selected by `pyfly.transactional.persistence.provider` (`InMemoryPersistenceProvider`, `RedisPersistenceProvider`, `SqlAlchemyPersistenceProvider`, or `CachePersistenceProvider`). |
-| `in_memory_persistence_adapter` | `InMemoryPersistenceAdapter` | Legacy in-memory persistence (kept for back-compat). |
+| `transactional_persistence_port` | `TransactionalPersistencePort` | `ProviderPersistencePort` on `orchestration_persistence`: what the saga engine, the TCC engine and `SagaRecoveryService` persist through (unless the application defines its own `TransactionalPersistencePort` bean). |
+| `in_memory_persistence_adapter` | `InMemoryPersistenceAdapter` | Legacy in-memory persistence (kept for back-compat; the engines do not use it). |
 | `logger_events_adapter` | `LoggerEventsAdapter` | Default logging events adapter. |
 | `saga_argument_resolver` | `ArgumentResolver` | Parameter injection resolver. |
 | `saga_step_invoker` | `StepInvoker` | Saga step and compensation invoker. |
@@ -1324,8 +1542,8 @@ class TransactionalEngineAutoConfiguration:
 
 When more advanced infrastructure is available:
 
-* **Persistence**: If `pyfly.data` provides a database adapter, it replaces
-  `InMemoryPersistenceAdapter`.
+* **Persistence**: `pyfly.transactional.persistence.provider` selects the
+  store of every engine (see [Persistence Providers](#persistence-providers)).
 * **Events**: If `pyfly.eda` or `pyfly.observability` are available, a
   `CompositeEventsAdapter` is created that fans events to Logger + EDA +
   Metrics.
@@ -1818,6 +2036,50 @@ definition = (
 )
 workflow_registry._definitions[definition.id] = definition  # or expose register_definition
 ```
+
+### Background runs and shutdown
+
+An ASYNC workflow (and `WorkflowEngine.start_async`) runs in a background task
+started with the transaction state cleared, so it never joins, nor outlives, the
+caller's unit of work.
+
+**Started inside a unit of work** (`@transactional`, a `TransactionTemplate`
+block, a `@transactional` step), the run starts once that unit commits, as
+Spring's `TransactionSynchronization.afterCommit` would start it. Its `PENDING`
+state is saved in the unit (the `sqlalchemy` provider joins it, the `cache`
+provider writes it at the commit), and the run is started by an after-commit
+synchronization registered right after that save. The states the run writes
+(`RUNNING`, then its final state) therefore always come after `PENDING`, with
+every provider. The other outcomes:
+
+- **The unit rolls back.** The run never starts, and its `PENDING` state is
+  deleted: a provider outside the unit (`memory`, `redis`, or `sqlalchemy` on
+  another datasource) wrote it at once.
+- **The commit outcome is unknown** (`CommitOutcomeUnknownError`). The run is not
+  started, a warning names it, and its `PENDING` state is kept, since the unit may
+  have committed. The recovery scan reports it once it is stale.
+- **The unit commits while the engine drains** (the context is stopping). The
+  run is not started either: a warning names it, and its `PENDING` state is kept.
+
+`start` and `start_async` still return `PENDING` at once, but the run does not
+progress before the commit, so do not wait inside the unit for it to progress
+(its signals, its queries, its completion). A start inside a
+`Propagation.NESTED` scope that rolls back to its savepoint still runs when the
+unit commits: synchronizations belong to the unit, not to a savepoint. Outside a
+unit of work the run starts at once. Through 26.09.07 the run started at once
+inside a unit too, so a caller that rolled back still ran the workflow.
+
+The auto-configured `WorkflowRuns` bean (a lifecycle bean
+of `CONSUMER_PHASE`) drains those runs when the application context stops,
+before any `@pre_destroy`: a run started just before shutdown (by a one-shot
+shell command, say) completes, and so do the fire-and-forget `async_` steps the
+runs spawn meanwhile. When `pyfly.context.shutdown-timeout` cuts the
+wait short, the runs still in flight are cancelled (each compensates what it
+committed) and awaited, and while it drains the engine refuses new ASYNC
+starts with `OrchestrationError`. A cancelled run records its final state
+(`CANCELLED`) to completion, even when it is cancelled again meanwhile. `@workflow_step(compensation_method="name")`
+names the compensating method directly; `@compensation_step(for_step=...)` still
+works.
 
 ### Persistence + REST
 

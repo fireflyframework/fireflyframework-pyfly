@@ -46,7 +46,7 @@ class TestAutoConfiguration:
 class TestDiscoverAutoConfigurations:
     def test_returns_all_auto_config_classes(self):
         classes = discover_auto_configurations()
-        assert len(classes) == 51
+        assert len(classes) == 53
 
     def test_all_classes_have_auto_configuration_marker(self):
         for cls in discover_auto_configurations():
@@ -86,6 +86,7 @@ class TestDiscoverAutoConfigurations:
             "FormLoginAutoConfiguration",
             "LogoutAutoConfiguration",
             "CqrsAutoConfiguration",
+            "DataAuditingAutoConfiguration",
             "DocumentAutoConfiguration",
             "EcmAutoConfiguration",
             "EdaAutoConfiguration",
@@ -108,6 +109,7 @@ class TestDiscoverAutoConfigurations:
             "OAuth2ResourceServerAutoConfiguration",
             "PasswordEncoderAutoConfiguration",
             "PluginsAutoConfiguration",
+            "DataSourceAutoConfiguration",
             "RelationalAutoConfiguration",
             "MigrationAutoConfiguration",
             "ResilienceAutoConfiguration",
@@ -291,7 +293,8 @@ class TestAutoConfigurationClasses:
         instance = RelationalAutoConfiguration()
         engine = instance.async_engine(config)
         factory = instance.async_session_factory(engine)
-        session = instance.async_session(factory)
+        manager = instance.primary_transaction_manager(factory, config)
+        session = instance.async_session(factory, manager)
         assert isinstance(session, AsyncSession)
 
     def test_relational_auto_config_produces_post_processor(self):

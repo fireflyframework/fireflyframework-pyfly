@@ -57,9 +57,13 @@ class TestRelationalProperties:
         config = Config({"pyfly": {"data": {"relational": {}}}})
         props = config.bind(RelationalProperties)
         assert props.enabled is False
-        assert props.url == "sqlite+aiosqlite:///pyfly.db"
+        # No invented URL (it was sqlite:///pyfly.db, which no engine used: C043).
+        assert props.url is None
         assert props.echo is False
-        assert props.pool_size == 5
+        # pool-size was a dead key; the pool settings live under pool.* (SQLAlchemy defaults when unset).
+        assert props.pool_size is None
+        assert props.pool.size is None
+        assert props.pool.recycle == 1800
 
     def test_bind_enabled(self):
         config = Config({"pyfly": {"data": {"relational": {"enabled": True, "url": "postgresql://localhost/db"}}}})

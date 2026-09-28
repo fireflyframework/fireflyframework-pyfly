@@ -76,6 +76,36 @@ def test_registers_compensation_method() -> None:
     assert step.compensation_method is not None
 
 
+def test_compensation_method_names_a_plain_method() -> None:
+    """``@workflow_step(compensation_method="release")`` resolves the method by its name, with no
+    ``@compensation_step`` (the name used to be looked up among step ids, so it never resolved)."""
+
+    @workflow(id="by-name")
+    class ByName:
+        @workflow_step(id="reserve", compensation_method="release", compensatable=True)
+        async def reserve(self) -> None: ...
+
+        async def release(self) -> None: ...
+
+    definition = WorkflowRegistry().register_from_bean(ByName())
+    assert definition.steps["reserve"].compensation_method is ByName.release
+
+
+def test_compensation_step_for_the_step_id_still_resolves() -> None:
+    from pyfly.transactional.workflow.annotations import compensation_step
+
+    @workflow(id="by-step")
+    class ByStep:
+        @workflow_step(id="reserve", compensatable=True)
+        async def reserve(self) -> None: ...
+
+        @compensation_step(for_step="reserve")
+        async def undo(self) -> None: ...
+
+    definition = WorkflowRegistry().register_from_bean(ByStep())
+    assert definition.steps["reserve"].compensation_method is ByStep.undo
+
+
 def test_dag_with_cycle_rejected() -> None:
     @workflow(id="bad")
     class Bad:

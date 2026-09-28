@@ -11,193 +11,102 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""A second boot of :class:`PostgresEventBus` issues no DDL.
+"""A second boot of the outbox bus issues no DDL, and ``auto_create_tables=False`` never does.
 
-The adapter used to replay ``CREATE TABLE/INDEX IF NOT EXISTS`` in every process
-at every boot, so a serving role needed schema-creation rights — in practice
-ownership of two framework-internal tables — for work it never did. These tests
-drive ``start()`` against a fake asyncpg and assert on the statements it sends.
-The privilege behaviour itself is proved against a real server in
-``tests/integration/test_eda_postgres_least_privilege.py``.
+The adapter used to replay ``CREATE TABLE/INDEX IF NOT EXISTS`` in every process at every boot, so a serving
+role needed schema-creation rights for work it never did. The outbox tables are framework tables now: the bus
+creates the missing ones through the framework metadata (``ensure_tables``), and when they all exist it only
+reads the catalog. These tests count the statements a real SQLite file database receives; the privilege
+behavior itself is proved against PostgreSQL in ``tests/integration/test_eda_postgres_least_privilege.py``.
 """
 
 from __future__ import annotations
 
-import sys
-import types
-from typing import Any
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
+from sqlalchemy import inspect
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from pyfly.data.relational.framework_schema import FrameworkSchemaError
 from pyfly.eda.adapters.postgres import PostgresEventBus
+from pyfly.testing import StatementCounter
+from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
-
-class FakeConnection:
-    """Records every statement, and answers the existence probe as told."""
-
-    def __init__(self, tables_present: bool) -> None:
-        self.tables_present = tables_present
-        self.executed: list[str] = []
-        self.queried: list[str] = []
-        self.listeners: list[str] = []
-
-    async def execute(self, sql: str, *args: Any) -> None:
-        self.executed.append(sql.strip())
-
-    async def fetchval(self, sql: str, *args: Any) -> Any:
-        self.queried.append(sql.strip())
-        if "to_regclass" in sql:
-            return self.tables_present
-        if "RETURNING id" in sql:
-            return 1
-        return None
-
-    async def fetch(self, sql: str, *args: Any) -> list[Any]:
-        return []
-
-    async def add_listener(self, channel: str, _callback: Any) -> None:
-        self.listeners.append(channel)
-
-    async def remove_listener(self, channel: str, _callback: Any) -> None:
-        self.listeners.remove(channel)
-
-    async def close(self) -> None:
-        return None
-
-    # -- assertions the tests read ------------------------------------
-
-    @property
-    def ddl(self) -> list[str]:
-        return [sql for sql in self.executed if sql.upper().startswith("CREATE")]
-
-    @property
-    def probes(self) -> list[str]:
-        return [sql for sql in self.queried if "to_regclass" in sql]
-
-
-class _Acquired:
-    def __init__(self, conn: FakeConnection) -> None:
-        self._conn = conn
-
-    async def __aenter__(self) -> FakeConnection:
-        return self._conn
-
-    async def __aexit__(self, *_exc: Any) -> None:
-        return None
-
-
-class FakePool:
-    def __init__(self, conn: FakeConnection) -> None:
-        self._conn = conn
-
-    def acquire(self) -> _Acquired:
-        return _Acquired(self._conn)
-
-    async def close(self) -> None:
-        return None
+OUTBOX_TABLES = {
+    "pyfly_outbox_events",
+    "pyfly_outbox_deliveries",
+    "pyfly_outbox_consumers",
+    "pyfly_outbox_dead_letters",
+}
+DDL = ("CREATE", "ALTER", "DROP")
 
 
 @pytest.fixture
-def fake_asyncpg(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Install a fake ``asyncpg`` module; the connection is set per test."""
-    holder: dict[str, FakeConnection] = {}
-
-    async def create_pool(_dsn: str, **_kwargs: Any) -> FakePool:
-        return FakePool(holder["conn"])
-
-    async def connect(_dsn: str, **_kwargs: Any) -> FakeConnection:
-        return holder["conn"]
-
-    module = types.ModuleType("asyncpg")
-    module.create_pool = create_pool  # type: ignore[attr-defined]
-    module.connect = connect  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "asyncpg", module)
-
-    def use(conn: FakeConnection) -> FakeConnection:
-        holder["conn"] = conn
-        return conn
-
-    return use
-
-
-OFFSETS_INSERT = "INSERT INTO pyfly_eda_offsets"
-
-
-@pytest.mark.asyncio
-async def test_a_second_boot_issues_no_ddl(fake_asyncpg: Any) -> None:
-    conn = fake_asyncpg(FakeConnection(tables_present=True))
-    bus = PostgresEventBus(dsn="postgresql://x/y", group="serving")
+async def engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'outbox.db'}")
+    enable_sqlite_foreign_keys(engine)
     try:
-        await bus.start()
+        yield engine
     finally:
-        await bus.stop()
-
-    assert conn.ddl == [], f"DDL was issued against existing tables: {conn.ddl}"
-    assert conn.probes, "the adapter did not probe for the tables"
-    assert any(sql.startswith(OFFSETS_INSERT) for sql in conn.executed), (
-        "the consumer group's cursor row must still be created"
-    )
+        await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_a_first_boot_still_creates_the_tables(fake_asyncpg: Any) -> None:
-    conn = fake_asyncpg(FakeConnection(tables_present=False))
-    bus = PostgresEventBus(dsn="postgresql://x/y")
-    try:
-        await bus.start()
-    finally:
-        await bus.stop()
+async def _tables(engine: AsyncEngine) -> set[str]:
+    def names(connection: Connection) -> set[str]:
+        return set(inspect(connection).get_table_names())
 
-    assert len(conn.ddl) == 2
-    assert "CREATE TABLE IF NOT EXISTS pyfly_eda_outbox" in conn.ddl[0]
-    assert "CREATE INDEX IF NOT EXISTS pyfly_eda_outbox_dest_idx" in conn.ddl[0]
-    assert "CREATE TABLE IF NOT EXISTS pyfly_eda_offsets" in conn.ddl[1]
-    assert any(sql.startswith(OFFSETS_INSERT) for sql in conn.executed)
+    async with engine.connect() as connection:
+        return await connection.run_sync(names)
 
 
-@pytest.mark.asyncio
-async def test_auto_create_tables_false_neither_probes_nor_creates(fake_asyncpg: Any) -> None:
-    """Whatever the database holds: the framework issues no DDL at all."""
-    conn = fake_asyncpg(FakeConnection(tables_present=False))
-    bus = PostgresEventBus(dsn="postgresql://x/y", auto_create_tables=False)
-    try:
-        await bus.start()
-    finally:
-        await bus.stop()
-
-    assert conn.ddl == []
-    assert conn.probes == []
-    assert any(sql.startswith(OFFSETS_INSERT) for sql in conn.executed)
+async def _boot(engine: AsyncEngine, **options: object) -> StatementCounter:
+    bus = PostgresEventBus(datasource=engine, **options)  # type: ignore[arg-type]
+    with StatementCounter(engine) as counter:
+        try:
+            await bus.start()
+        finally:
+            await bus.stop()
+    return counter
 
 
-@pytest.mark.asyncio
-async def test_a_publisher_that_lazily_starts_hits_the_same_gate(fake_asyncpg: Any) -> None:
-    """``publish()`` starts the bus on a bus nobody started — the DDL path too."""
-    conn = fake_asyncpg(FakeConnection(tables_present=True))
-    bus = PostgresEventBus(dsn="postgresql://x/y")
-    try:
+async def test_a_first_boot_creates_the_outbox_tables(engine: AsyncEngine) -> None:
+    counter = await _boot(engine)
+    assert await _tables(engine) >= OUTBOX_TABLES
+    assert counter.count("CREATE") >= 4
+
+
+async def test_a_second_boot_issues_no_ddl(engine: AsyncEngine) -> None:
+    await _boot(engine)
+    counter = await _boot(engine)
+    assert [statement.sql for statement in counter.statements if statement.verb in DDL] == []
+
+
+async def test_auto_create_tables_false_issues_no_ddl_when_the_tables_exist(engine: AsyncEngine) -> None:
+    await _boot(engine)
+    counter = await _boot(engine, auto_create_tables=False)
+    assert [statement.sql for statement in counter.statements if statement.verb in DDL] == []
+
+
+async def test_auto_create_tables_false_fails_fast_when_a_table_is_missing(engine: AsyncEngine) -> None:
+    with pytest.raises(FrameworkSchemaError, match="pyfly_outbox_events does not exist"):
+        await _boot(engine, auto_create_tables=False)
+    assert await _tables(engine) == set()
+
+
+async def test_a_publisher_issues_no_ddl(engine: AsyncEngine) -> None:
+    """``publish()`` starts nothing (it used to start the bus, DDL included, on a bus nobody started)."""
+    await _boot(engine)
+    bus = PostgresEventBus(datasource=engine)
+    with StatementCounter(engine) as counter:
         await bus.publish("pyfly.events", "order.created", {"id": 1})
-    finally:
-        await bus.stop()
-
-    assert conn.ddl == []
-    assert any("INSERT INTO pyfly_eda_outbox" in sql for sql in conn.queried)
-
-
-@pytest.mark.asyncio
-async def test_the_probe_asks_about_both_tables(fake_asyncpg: Any) -> None:
-    conn = fake_asyncpg(FakeConnection(tables_present=True))
-    bus = PostgresEventBus(dsn="postgresql://x/y")
-    try:
-        await bus.start()
-    finally:
-        await bus.stop()
-
-    probe = conn.probes[0]
-    assert "pyfly_eda_outbox" in probe
-    assert "pyfly_eda_offsets" in probe
+    assert counter.counts() == {"INSERT": 2}  # the event, and what it is owed (an INSERT ... SELECT)
+    assert [statement.sql for statement in counter.statements if statement.verb in DDL] == []
+    assert bus.running is False
 
 
 def test_auto_create_tables_defaults_to_on() -> None:
     """A fresh database still just works — the flag is an opt-OUT."""
-    assert PostgresEventBus(dsn="postgresql://x/y")._auto_create_tables is True
+    assert PostgresEventBus(dsn="postgresql://x/y").outbox.creates_tables is True

@@ -19,6 +19,8 @@
   - [CrudRepository\[T, ID\]](#crudrepositoryt-id)
   - [ReactiveSortingRepository\[T, ID\]](#reactivesortingrepositoryt-id)
   - [PagingAndSortingRepository\[T, ID\]](#pagingandsortingrepositoryt-id)
+  - [BatchRepository\[T, ID\]](#batchrepositoryt-id)
+  - [Persistable](#persistable)
   - [Hexagonal Usage Pattern](#hexagonal-usage-pattern)
 - [Derived Query Methods](#derived-query-methods)
   - [QueryMethodParser](#querymethodparser)
@@ -34,6 +36,7 @@
   - [Pageable](#pageable)
   - [Sort and Order](#sort-and-order)
   - [Page\[T\]](#paget)
+  - [Slice\[T\] and Window\[T\]](#slicet-and-windowt)
 - [Entity Mapping](#entity-mapping)
   - [Basic Mapping](#basic-mapping)
   - [Custom Field Mapping](#custom-field-mapping)
@@ -98,13 +101,14 @@ The data module follows a hexagonal architecture with two distinct layers:
 │  BaseEntity      │   │  BaseDocument           │
 │  QueryMethod-    │   │  MongoQueryMethod-       │
 │    Compiler      │   │    Compiler             │
-│  reactive_       │   │  mongo_                 │
-│    transactional │   │    transactional        │
+│  SqlAlchemy-     │   │  MongoTransaction-      │
+│    Transaction-  │   │    Manager              │
+│    Manager       │   │                         │
 └────────┬─────────┘   └───────────┬─────────────┘
          │                         │
          ▼                         ▼
 ┌──────────────────┐   ┌───────────────────────┐
-│  SQLAlchemy      │   │  Beanie ODM + Motor    │
+│  SQLAlchemy      │   │  Beanie ODM + pymongo  │
 │  (async)         │   │  (async)               │
 └──────────────────┘   └───────────────────────┘
 ```
@@ -119,7 +123,7 @@ The data module follows a hexagonal architecture with two distinct layers:
 |----------------------|--------------------------------------|-------------------------------------------------|
 | Spring Data Commons  | `pyfly.data`                         | Shared ports, types, parser, `Page`, `Sort`     |
 | Spring Data JPA      | `pyfly.data.relational.sqlalchemy`   | Relational database adapter (SQLAlchemy)        |
-| Spring Data MongoDB  | `pyfly.data.document.mongodb`        | Document database adapter (Beanie/Motor)        |
+| Spring Data MongoDB  | `pyfly.data.document.mongodb`        | Document database adapter (Beanie/pymongo)      |
 
 ### Import Rules
 
@@ -176,6 +180,7 @@ For hexagonal architecture, your service layer should depend on port protocols r
 ```python
 class CrudRepository(Protocol[T, ID]):
     async def save(self, entity: T) -> T: ...
+    async def save_all(self, entities: list[T]) -> list[T]: ...
     async def find_by_id(self, id: ID) -> T | None: ...
     async def find_all_by_id(self, ids: Iterable[ID]) -> list[T]: ...
     async def find_all(self, **filters: Any) -> list[T]: ...
@@ -199,20 +204,43 @@ RepositoryPort = CrudRepository  # alias
 | `delete(entity)`             | `None`             | Delete the given entity (no-op if not present)       |
 | `delete_by_id(id)`           | `None`             | Delete by primary key (no-op if not found)          |
 | `delete_all_by_id(ids)`      | `None`             | Delete all entities whose IDs are in `ids`          |
-| `delete_all(entities=None)`  | `None`             | Delete the given entities; with no args, truncate all|
+| `delete_all(entities=None)`  | `None`             | Delete the given entities; with no args, every row   |
 | `count()`                    | `int`              | Count all entities                                  |
 | `exists_by_id(id)`           | `bool`             | Check if an entity with this ID exists              |
 
 ### SessionPort
 
-Abstract session interface for transaction management:
+**Deprecated.** `SessionPort` is an alias of `pyfly.data.transaction.TransactionManager`, the SPI a
+backend implements so the unit of work can run on it (the old three-method protocol was implemented by
+nothing). A transaction manager serves one datasource:
 
 ```python
-class SessionPort(Protocol):
-    async def begin(self) -> Any: ...
-    async def commit(self) -> None: ...
-    async def rollback(self) -> None: ...
+class TransactionManager(Protocol):
+    datasource: str                      # the name units are bound under
+    capabilities: TransactionCapabilities  # savepoints, isolation levels, fast autocommit reads
+
+    async def begin(self, definition: TransactionDefinition) -> UnitOfWork: ...
+    async def open_auto_unit(self, *, read_only: bool, autocommit: bool | None = None) -> UnitOfWork: ...
+    async def commit(self, unit: UnitOfWork) -> None: ...
+    async def rollback(self, unit: UnitOfWork) -> None: ...
+    async def release(self, unit: UnitOfWork) -> None: ...
+    async def create_savepoint(self, unit: UnitOfWork) -> Any: ...
+    async def release_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None: ...
+    async def rollback_to_savepoint(self, unit: UnitOfWork, savepoint: Any) -> None: ...
+    def resource_active(self, unit: UnitOfWork) -> bool: ...
+    def marks_rollback_only(self, unit: UnitOfWork, error: Exception) -> bool: ...
+    def is_disconnect(self, error: BaseException) -> bool: ...
 ```
+
+The `TransactionTemplate` (behind `@transactional`) drives it: propagation, rollback rules,
+synchronizations and cancellation are implemented once, for every backend. See
+[Transaction Management](data-relational.md#transaction-management).
+
+A backend with savepoints opens each one under the unit's operation guard (`async with
+unit.operation():`), records it there with `unit.savepoint_opened(handle)` and reports its end with
+`unit.savepoint_closed(handle)`, including a savepoint that ends along with an enclosing one. The unit then
+refuses any other task's statement or savepoint while that savepoint is open: savepoints are a stack on
+one connection.
 
 ### CrudRepository[T, ID]
 
@@ -223,6 +251,7 @@ the repository protocol hierarchy and the target of the `RepositoryPort` alias
 ```python
 class CrudRepository(Protocol[T, ID]):
     async def save(self, entity: T) -> T: ...
+    async def save_all(self, entities: list[T]) -> list[T]: ...
     async def find_by_id(self, id: ID) -> T | None: ...
     async def find_all_by_id(self, ids: Iterable[ID]) -> list[T]: ...
     async def find_all(self) -> list[T]: ...
@@ -234,7 +263,9 @@ class CrudRepository(Protocol[T, ID]):
     async def exists_by_id(self, id: ID) -> bool: ...
 ```
 
-All delete methods return `None`. `delete_all()` with no arguments truncates the whole table/collection.
+All delete methods return `None`. `delete_all()` with no arguments deletes every row or document (not a
+`TRUNCATE`: a relational repository deletes through the ORM, or in one bulk `DELETE` when nothing needs the
+ORM, and a `SoftDeleteRepository` soft-deletes them).
 
 ### ReactiveSortingRepository[T, ID]
 
@@ -267,8 +298,9 @@ class PagingAndSortingRepository(ReactiveSortingRepository[T, ID], Protocol[T, I
     async def find_all(self, pageable: Pageable) -> Page[T]: ...
 ```
 
-`find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`,
-and returns a `Page[T]`. Pageables are **1-based** (`page >= 1`):
+`find_all(pageable)` applies the `Pageable`'s sort (then the primary key, so pages are deterministic),
+slices with `LIMIT`/`OFFSET`, counts the total when the page does not give it, and returns a `Page[T]`.
+Pageables are **1-based** (`page >= 1`):
 
 ```python
 from pyfly.data import Pageable, Sort
@@ -276,9 +308,31 @@ from pyfly.data import Pageable, Sort
 page = await repo.find_all(Pageable.of(page=1, size=20, sort=Sort.by("created_at").descending()))
 ```
 
+### BatchRepository[T, ID]
+
+Extends `PagingAndSortingRepository` with bulk deletes and count-free paging (Spring `JpaRepository`'s
+`deleteAllInBatch` and `deleteAllByIdInBatch`, and `Slice`):
+
+```python
+class BatchRepository(PagingAndSortingRepository[T, ID], Protocol[T, ID]):
+    async def delete_all_in_batch(self, entities: list[T] | None = None) -> None: ...
+    async def delete_all_by_id_in_batch(self, ids: list[ID]) -> None: ...
+    async def find_slice(self, pageable: Pageable, **filters: Any) -> Slice[T]: ...
+```
+
+`delete_all`/`delete_all_by_id` delete entity by entity, so the backend's cascades, version checks and
+delete hooks run; the `*_in_batch` forms are one bulk statement per chunk that bypasses them, by design.
+
+### Persistable
+
+`save()` persists a new entity and merges any other (Spring's `save`). An entity is new when its
+`is_new()` hook says so (the `Persistable` protocol), else when its version is `None`, else when its
+primary key is `None`. Implement `is_new` on an entity whose key the application assigns, so saving it is
+one insert with no merge lookup.
+
 The full protocol hierarchy is therefore:
-`CrudRepository[T, ID]` → `ReactiveSortingRepository[T, ID]` → `PagingAndSortingRepository[T, ID]`,
-with `RepositoryPort` as an alias of `CrudRepository`.
+`CrudRepository[T, ID]` → `ReactiveSortingRepository[T, ID]` → `PagingAndSortingRepository[T, ID]` →
+`BatchRepository[T, ID]`, with `RepositoryPort` as an alias of `CrudRepository`.
 
 The `find_all` overloads across the chain are:
 
@@ -288,6 +342,7 @@ The `find_all` overloads across the chain are:
 | `find_all(**filters)`   | `list[T]`            | `CrudRepository`                 |
 | `find_all(sort)`        | `list[T]`            | `ReactiveSortingRepository`      |
 | `find_all(pageable)`    | `Page[T]`            | `PagingAndSortingRepository`     |
+| `find_slice(pageable)`  | `Slice[T]`           | `BatchRepository`                |
 | `stream_all(sort)`      | `AsyncIterator[T]`   | `ReactiveSortingRepository`      |
 
 ### Hexagonal Usage Pattern
@@ -316,7 +371,7 @@ PyFly can automatically generate query implementations from method names, follow
 
 ### QueryMethodParser
 
-The `QueryMethodParser` lives in the commons layer and is shared by all adapters. It parses method names into structured `ParsedQuery` objects that are backend-agnostic.
+The `QueryMethodParser` lives in the commons layer and is shared by all adapters (Spring's `PartTree`). It parses method names into structured `ParsedQuery` objects that are backend-agnostic.
 
 ```python
 from pyfly.data import QueryMethodParser
@@ -329,22 +384,30 @@ parsed = parser.parse("find_by_status_and_role_order_by_name_desc")
 #      connectors=["and"],
 #      order_clauses=[OrderClause("name", "desc")]
 #    )
+
+# Against the entity's properties (what the repository post-processors do at startup)
+parser.parse("find_by_logged_in", properties={"logged_in", "name"})
+# -> FieldPredicate("logged_in", "eq"): the property is read whole, not as "logged" IN
 ```
+
+With `properties=` (the relational post-processor passes the entity's columns, synonyms, hybrids and relationships to one entity), every field must be one of them, or the parse raises `InvalidQueryMethodError` naming it, and the property names decide how the method name splits: `find_by_terms_and_conditions_accepted` is one property when the entity has it (the longest property that fits wins). That parse also knows the full keyword set below. Without `properties=`, the parser keeps the original keyword set and splits on every `_and_`/`_or_`.
 
 ### Naming Convention
 
 ```
-<prefix>_<field>[_<operator>][_<connector>_<field>[_<operator>]]*[_order_by_<field>_<direction>]*
+<prefix>_<field>[_<operator>][_ignore_case][_<connector>_<field>[_<operator>][_ignore_case]]*[_all_ignore_case][_order_by_<field>[_<direction>]]*
 ```
 
 ### Prefixes
 
 | Prefix       | Return Type | Description                            |
 |--------------|-------------|----------------------------------------|
-| `find_by_`   | `list[T]`   | Find all matching entities             |
+| `find_by_`   | `list[T]`, `T \| None`, `Page[T]`, `Slice[T]` (by the return annotation) | Find matching entities (or projections) |
 | `count_by_`  | `int`       | Count matching entities                |
 | `exists_by_` | `bool`      | Check if any entity matches            |
-| `delete_by_` | `int`       | Delete matching entities (return count)|
+| `delete_by_` | `int`, `None`, `list[T]` | Delete matching entities (the count, nothing, or the entities) |
+
+On both adapters, the result's shape follows the method's return annotation (`pyfly.data.query_parser.result_shape`); a single-result method that matches two rows raises `IncorrectResultSizeException`. A parameter annotated `Pageable` or `Sort` pages or sorts a `find_by_` query and binds no value. The MongoDB adapter's `find_by_` returns documents, projections (read with a server-side projection) or `dict` rows, and its `delete_by_` the number of documents deleted (see [Data Document](data-document.md#result-shapes)).
 
 ### Operators
 
@@ -352,22 +415,33 @@ Operators are suffixed to field names. They are checked longest-first to avoid p
 
 | Suffix                 | Operator      | Meaning              | Args  |
 |------------------------|---------------|----------------------|-------|
-| *(none)*               | `eq`          | equals               | 1     |
-| `_greater_than`        | `gt`          | `>`                  | 1     |
-| `_less_than`           | `lt`          | `<`                  | 1     |
+| *(none)*, `_is`, `_equals` | `eq`      | equals (`IS NULL` for a `None` argument) | 1     |
+| `_greater_than`, `_after` | `gt`       | `>`                  | 1     |
+| `_less_than`, `_before` | `lt`         | `<`                  | 1     |
 | `_greater_than_equal`  | `gte`         | `>=`                 | 1     |
 | `_less_than_equal`     | `lte`         | `<=`                 | 1     |
 | `_between`             | `between`     | `BETWEEN ? AND ?`    | 2     |
-| `_like`                | `like`        | `LIKE ?`             | 1     |
-| `_containing`          | `containing`  | contains substring   | 1     |
+| `_like`                | `like`        | `LIKE ?` (the argument is a pattern) | 1     |
+| `_not_like`            | `not_like`    | `NOT LIKE ?`         | 1     |
+| `_containing`, `_contains` | `containing` | contains the argument as it is | 1     |
+| `_not_containing`      | `not_containing` | does not contain it | 1     |
+| `_starting_with`, `_starts_with` | `starting_with` | starts with the argument as it is | 1 |
+| `_ending_with`, `_ends_with` | `ending_with` | ends with the argument as it is | 1 |
 | `_in`                  | `in`          | `IN (?)`             | 1 (list) |
-| `_not`                 | `not`         | `!=`                 | 1     |
-| `_is_null`             | `is_null`     | `IS NULL`            | 0     |
-| `_is_not_null`         | `is_not_null` | `IS NOT NULL`        | 0     |
+| `_not_in`              | `not_in`      | `NOT IN (?)`         | 1 (list) |
+| `_not`, `_is_not`      | `not`         | `!=` (`IS NOT NULL` for `None`) | 1     |
+| `_is_null`, `_null`    | `is_null`     | `IS NULL`            | 0     |
+| `_is_not_null`, `_not_null` | `is_not_null` | `IS NOT NULL`   | 0     |
+| `_true`, `_is_true`    | `is_true`     | the boolean is true  | 0     |
+| `_false`, `_is_false`  | `is_false`    | the boolean is false | 0     |
+
+Every keyword may be preceded by `_is` (`_is_between`, `_is_in`). `_ignore_case` (or `_ignoring_case`) after a predicate compares that string property without case; `_all_ignore_case` at the end of the criteria does it for every string property of the query. The keywords after the first column of the table, the `_is` forms, `_ignore_case` and `_all_ignore_case` need the parse against the entity's properties, which both adapters' post-processors do.
+
+"As it is" means the argument's `%` and `_` are plain characters (escaped on both backends), so `find_by_name_containing("50%")` does not match `"500"`; `_like` takes a pattern whose wildcards stay wildcards. On MongoDB the operators keep SQL's meaning: `_like` is anchored and case-sensitive, and `_not`, `_not_in` and `_not_like` are false for a null or missing field (see [Data Document](data-document.md#mongoquerymethodcompiler-operator-mapping)).
 
 ### Connectors
 
-Connect multiple predicates with `_and_` or `_or_`:
+Connect multiple predicates with `_and_` or `_or_`. On both adapters, `and` binds tighter than `or`, as in Spring and SQL:
 
 ```python
 # AND: status = ? AND customer_id = ?
@@ -375,7 +449,12 @@ async def find_by_status_and_customer_id(self, status: str, customer_id: str) ->
 
 # OR: status = ? OR role = ?
 async def find_by_status_or_role(self, status: str, role: str) -> list[T]: ...
+
+# Both: owner = ? OR (tag = ? AND balance = ?)
+async def find_by_owner_or_tag_and_balance(self, owner: str, tag: str, balance: int) -> list[T]: ...
 ```
+
+`ParsedQuery.groups` holds the predicates as an `or` of `and` groups (`[[owner], [tag, balance]]`).
 
 ### Ordering
 
@@ -395,15 +474,19 @@ async def find_by_active_order_by_name_asc_created_at_desc(self, active: bool) -
 @dataclass
 class ParsedQuery:
     prefix: str                          # "find_by", "count_by", "exists_by", "delete_by"
-    predicates: list[FieldPredicate]     # [{field_name: "status", operator: "eq"}, ...]
+    predicates: list[FieldPredicate]     # [{field_name: "status", operator: "eq", ignore_case: False}, ...]
     connectors: list[str]                # ["and", "or", ...]
     order_clauses: list[OrderClause]     # [{field_name: "name", direction: "desc"}, ...]
+    all_ignore_case: bool = False        # the name ends its criteria with _all_ignore_case
+
+    groups: list[list[FieldPredicate]]   # property: the or of and groups
+    argument_count: int                  # property: the method arguments the predicates take
 ```
 
 The parsing algorithm:
 1. Extracts the prefix (`find_by_`, `count_by_`, etc.).
-2. Splits off the `_order_by_` suffix.
-3. Splits the remaining body by `_and_` and `_or_` connectors.
+2. Splits off the `_order_by_` suffix (against the properties: the first `order_by` after which both parts read as properties).
+3. Splits the remaining body by `_and_` and `_or_` connectors (against the properties: where the properties say, longest property first).
 4. Parses each segment for field name and operator suffix (longest-match).
 
 ### QueryMethodCompilerPort
@@ -419,11 +502,11 @@ class QueryMethodCompilerPort(Protocol):
     ) -> Callable[..., Coroutine[Any, Any, Any]]: ...
 ```
 
-The parser is fully shared — you never need to reimplement parsing logic. Your adapter only needs to compile parsed queries into the target database's query format.
+The parser is fully shared — you never need to reimplement parsing logic. Your adapter only needs to compile parsed queries into the target database's query format, as an `or` of the `and` groups in `ParsedQuery.groups`.
 
 | Adapter    | Compiler Class             | Output                           |
 |------------|---------------------------|----------------------------------|
-| SQLAlchemy | `QueryMethodCompiler`      | SQLAlchemy column expressions    |
+| SQLAlchemy | `QueryMethodCompiler`      | SQLAlchemy statements, built once per shape |
 | MongoDB    | `MongoQueryMethodCompiler` | MongoDB filter documents         |
 
 ### Complete Derived Query Examples
@@ -479,10 +562,11 @@ async def find_by_status_and_customer_id_order_by_total_desc(
 ) -> list[T]: ...
 ```
 
-Each method body should be a stub (`...` or `pass`). The adapter's `BeanPostProcessor` detects them and replaces them with real implementations at startup.
+Each method body must be a stub: after an optional docstring, nothing else, `...`, `pass` or `raise NotImplementedError` (`pyfly.data.post_processor.is_stub`). The adapter's `BeanPostProcessor` recognizes stubs by the shape of their body, also on intermediate base classes and mixins, and replaces them with real implementations at startup; any other body is a hand-written method and is kept. The implementation takes its arguments by position or by keyword, and a stub whose parameters do not match its name fails at startup.
 
 Source files:
-- `src/pyfly/data/query_parser.py` — `QueryMethodParser`, `ParsedQuery`, `FieldPredicate`, `OrderClause`
+- `src/pyfly/data/query_parser.py` — `QueryMethodParser`, `ParsedQuery`, `FieldPredicate`, `OrderClause`, `result_shape`, `InvalidQueryMethodError`, `IncorrectResultSizeException`
+- `src/pyfly/data/post_processor.py` — `BaseRepositoryPostProcessor`, `is_stub`
 - `src/pyfly/data/ports/compiler.py` — `QueryMethodCompilerPort`
 
 ---
@@ -556,12 +640,30 @@ sort = Sort.unsorted()
 reversed_sort = sort.descending()  # All orders become desc
 ```
 
-`Order` is a single sort directive:
+`Order` is a single sort directive: a property, a direction, a `NullHandling` and an `ignore_case` flag.
 
 ```python
 order_asc = SortOrder.asc("name")       # Order(property="name", direction="asc")
 order_desc = SortOrder.desc("created_at") # Order(property="created_at", direction="desc")
+
+scored = SortOrder.desc("score").nulls_last()      # NULLs after every value, on every backend
+named = SortOrder.asc("name").ignoring_case()      # orders a string property by its lower-cased value
+sort = Sort.by(scored, named, "id")                # Sort.by takes orders and property names
 ```
+
+NULL placement differs by database (PostgreSQL and Oracle put NULLs last in ascending order, SQLite, MySQL,
+MariaDB, SQL Server and MongoDB first), so an order over a nullable property should name it with
+`nulls_first()` or `nulls_last()` (`NullHandling.NATIVE` keeps the database's own). Collation and the order
+of native enum values still follow the database. The flips `descending()`/`ascending()` keep each order's
+NULL handling and case.
+
+Sort and filter property names are validated against the entity by `PropertyResolver`
+(`pyfly.data.PropertyResolver`): a name that is not one of the entity's mapped properties (a relationship,
+a Python `@property`, a typo, an operator key such as `$where`) raises `InvalidPropertyError`, an
+`InvalidRequestException` the web layer answers with 400. `PropertyResolver.for_entity(Model,
+allowed=("name", "created_at"))` narrows the names to an allow-list; repositories take theirs from
+`__sortable__` and `__filterable__`. The MongoDB adapter registers the introspector of Beanie documents: a
+document's properties are its fields, and `id` maps to `_id` and an aliased field to its alias.
 
 ### Page[T]
 
@@ -589,9 +691,25 @@ dto_page: Page[OrderDTO] = page.map(
 )
 ```
 
+A repository counts the total only when the page cannot tell it: a first page shorter than its size is the
+whole result, and a short page after it gives the total too.
+
+### Slice[T] and Window[T]
+
+`Slice[T]` is a page that knows whether another one follows, but not the total, so it needs no `COUNT`
+(`repo.find_slice(pageable)`): `items`, `page`, `size`, `has_next`, `has_previous`, `is_first`, `is_last`
+and `map()`.
+
+`Window[T]` is a keyset scroll's result (`repo.scroll(sort, position, size=...)`): `items`, `has_next` and
+`next_position`, the `KeysetPosition` after its last item (the values of the sort properties and the
+primary key). Pass it back to continue; `KeysetPosition.of(name="m", id=42)` rebuilds one from a cursor
+token. A position is a value (equal positions hash alike, so one can be a cache key). A keyset scroll's cost
+does not grow with the depth, as an `OFFSET` does.
+
 Source files:
-- `src/pyfly/data/pageable.py` — `Pageable`, `Sort`, `Order`
-- `src/pyfly/data/page.py` — `Page[T]`
+- `src/pyfly/data/pageable.py` — `Pageable`, `Sort`, `Order`, `NullHandling`, `KeysetPosition`
+- `src/pyfly/data/page.py` — `Page[T]`, `Slice[T]`, `Window[T]`
+- `src/pyfly/data/property_resolver.py` — `PropertyResolver`, `InvalidPropertyError`
 
 ---
 
@@ -990,10 +1108,10 @@ from pyfly.data import BaseRepositoryPostProcessor, DERIVED_PREFIXES
 **Shared behaviour:**
 - `before_init(bean, bean_name)` — Returns the bean unchanged (default no-op)
 - `after_init(bean, bean_name)` — Iterates class attributes, detects stubs, compiles derived queries
-- `_is_stub(method)` — Bytecode analysis to detect `...` or `pass` stubs
+- `_is_stub(method)` — Reads the body's shape (`pyfly.data.post_processor.is_stub`): an optional docstring, then nothing, `...`, `pass` or `raise NotImplementedError`; any other body is a hand-written method and is kept
 - `DERIVED_PREFIXES` — `("find_by_", "count_by_", "exists_by_", "delete_by_")`
 
-**Abstract hooks:**
+**Hooks** (the first three are abstract):
 
 | Method | Description |
 |--------|-------------|
@@ -1001,6 +1119,9 @@ from pyfly.data import BaseRepositoryPostProcessor, DERIVED_PREFIXES
 | `_compile_derived(parsed, entity, bean)` | Compile a parsed derived query into a callable |
 | `_wrap_derived_method(compiled_fn)` | Wrap a compiled function for binding onto the bean |
 | `_process_query_decorated(...)` | Handle decorator-based queries (default: no-op) |
+| `_implement_derived(bean, method)` | Build one derived method (default: `_parse` the name against `_properties(entity)`, check the arguments, then `_compile_derived` and `_wrap_derived_method`) |
+
+The SQLAlchemy adapter overrides `_implement_derived` to build each derived statement once per repository class. A subclass of it that overrides `_compile_derived` or `_wrap_derived_method` still has its derived methods built with those hooks.
 
 **Adapter implementations:**
 
@@ -1146,17 +1267,29 @@ Some capabilities are **backend-specific** today:
 | CRUD + batch, Pageable/Sort/Page, derived queries, `@query`, Specifications, QBE | ✅ | ✅ |
 | Projections | ✅ | ✅ (closed/field-subset) |
 | Soft delete (`SoftDeleteRepository`) | ✅ | ❌ not yet |
-| Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ❌ not yet |
-| Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ⚠️ timestamps at insert only |
-| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ propagation / isolation / read-only / `rollback_for` | ✅ commit/abort + `rollback_for` (replica set; propagation/isolation are relational-only) |
+| Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ✅ Beanie's `use_revision` (a stale write raises `OptimisticLockingFailureException`) |
+| Pessimistic locking (`find_by_id(id, lock=LockMode...)` / `@Lock`) | ✅ `FOR UPDATE`, `FOR SHARE`, `NOWAIT`, `SKIP LOCKED` inside a read-write transaction (not rendered on SQLite, whose write unit holds the database lock) | ❌ |
+| Read-replica routing (`@transactional(read_only=True)`) | ✅ a new read-only unit runs on the replica | ❌ |
+| Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ✅ `created/updated_at` **and** `created/updated_by` (`BaseDocument`) |
+| `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ✅ the same unit of work on a replica set, except `NESTED` (no savepoints: `NestedTransactionNotSupportedError`) and isolation levels |
+| Transactional outbox for events (`pyfly.eda.outbox.*`, the `database` bus) | ✅ `SqlOutboxStore`: the `pyfly_outbox_*` tables, appended in the relational unit (SQLite, PostgreSQL, MySQL, MariaDB) | ✅ `MongoOutboxStore`: the `pyfly_outbox_*` collections, appended in the document unit's transaction (a replica set; no LISTEN/NOTIFY wake-ups: the relays poll). `pyfly.eda.outbox.store: auto` picks it when the document datasource is the default of `@transactional` ([The outbox on MongoDB](events.md#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)) |
 
-**Not yet implemented on either backend** (so you don't reach for them): `@Modifying`-style
-declarative bulk `UPDATE`/`DELETE`; `Slice` (count-less paging) and streaming/reactive result
-types; DTO / open (SpEL) / dynamic / association-traversing projections; the derived-query keywords
-`StartingWith` / `EndingWith` / `IgnoreCase` / `True` / `False` / `Distinct` / `Top<N>` /
-`After` / `Before` (use `_like`/`_containing`/`@query` instead); `ExampleMatcher` string-match
-modes; named queries and `Pageable`/SpEL injection into `@query`. For these, fall back to `@query`
-(or `native=True`) — it covers every case the derived parser doesn't.
+For a write that must not lose a concurrent update, or a check two requests must not both pass (two
+withdrawals of 60 from a balance of 100), choose between a guarded atomic `UPDATE`, a pessimistic lock and
+`VersionedMixin`: [Concurrency Control](data-relational.md#concurrency-control) compares them.
+
+**Not yet implemented on either backend** (so you don't reach for them): streaming return types
+(`AsyncIterator[T]`) for derived and `@query` methods (use `stream_all`); open
+(SpEL) / dynamic / association-traversing projections, and DTO projections of derived queries (a relational
+`@query` builds any class from its rows: `-> list[OrderSummary]` is `OrderSummary(**row)`); the
+derived-query keywords `Distinct` / `Top<N>` / `First` and property paths through relationships (use `@query`
+instead); `ExampleMatcher` string-match modes; named queries and `Pageable`/SpEL injection into `@query`. For
+these, fall back to `@query` (or `native=True`) — it covers every case the derived parser doesn't.
+
+On the relational backend, `@modifying` (Spring's `@Modifying`) marks a bulk `UPDATE`/`DELETE` `@query`. On both
+backends, derived queries return `T | None`, `Page[T]` and `Slice[T]`, and the derived-query keywords
+`StartingWith` / `EndingWith` / `IgnoreCase` / `AllIgnoreCase` / `True` / `False` / `After` / `Before` / `NotIn` /
+`NotLike` / `NotContaining` are available (see [Operators](#operators)).
 
 ---
 
@@ -1164,25 +1297,93 @@ modes; named queries and `Pageable`/SpEL injection into `@query`. For these, fal
 
 ### SqlAlchemyHealthIndicator
 
-`SqlAlchemyHealthIndicator` is an actuator `HealthIndicator` that probes the configured relational
-database by executing `SELECT 1`.  It is auto-wired by `RelationalAutoConfiguration` and
-contributed to `/actuator/health` as the `db` component — no manual registration required.
+`SqlAlchemyHealthIndicator` is an actuator `HealthIndicator` that probes the relational databases with
+a portable `SELECT 1` (`select(literal(1))`, which Oracle renders with `FROM DUAL`).
+`RelationalAutoConfiguration` wires it as the `db_health_indicator` bean. It is contributed to
+`/actuator/health` under that name, with no manual registration.
+
+It belongs to the **readiness** probe only. Its class declares `probe_groups = {READINESS}`, which the
+aggregator honors when no groups are given. When the database is unreachable, the pod leaves the load
+balancer instead of failing liveness and being restarted, along with every other replica, at once.
+
+The check is bounded:
+
+- Each check has `pyfly.data.relational.health.timeout` seconds (2 by default), and the probe answers
+  by then whatever the driver does. The `SELECT 1` runs in a task of its own, and the probe stops
+  waiting for it at the deadline. This matters when the database goes silent on a connection that is
+  already pooled: cancelling the query makes asyncpg send a cancel request over a new connection and
+  then wait, with no timeout, for the server's answer on the silent one.
+- The late check does not keep its connection. The socket of the connection it holds, or is still
+  checking out (reconnecting, recycling or pre-pinging it), is closed on the spot (the dialect's
+  `terminate`, which sends nothing and waits for nothing), and then the check is cancelled. This
+  matters when a middlebox drops the packets of flows it has expired without a reset, such as an Azure
+  Load Balancer without TCP reset on idle (its default) or a stateful firewall that drops packets of
+  flows it no longer tracks: those pooled connections are black-holed while the database still accepts
+  new ones. (A middlebox that answers them with a reset, such as an AWS NAT gateway or an Azure NAT
+  Gateway, makes the connection fail at once instead: with `pool.pre-ping` on the check reconnects,
+  and without it that probe answers `DOWN` with the disconnect error.) Cancelled on a black-holed
+  connection without this, asyncpg sends a cancel request and waits for the server's answer on the
+  dead socket with no timeout, even once the connection is lost, so the check would never end and
+  would keep its pool slot. With it, the check usually ends at once and its pool slot is free again.
+  When the driver turns the cancellation into a disconnect error instead (a pre-ping whose rollback
+  fails on the closed socket), SQLAlchemy reconnects, within the connect timeout, and the check runs
+  its `SELECT 1` on the new connection.
+- Each black-holed pooled connection costs one probe, with `pool.pre-ping` on or off: that probe
+  answers `DOWN`, and the next one runs on another connection. When a middlebox silently forgets every
+  idle flow at once, up to one probe per idle connection answers `DOWN`. With the readiness probe's
+  default `failureThreshold` of 3, a pool holding three or more idle connections can therefore take
+  the replica out of rotation until a probe answers `UP` again. A check still in its checkout is
+  reached through the pool entry that the registry's pool (`MeteredAsyncQueuePool`) reports, so this
+  holds for every engine the [datasource registry](data-relational.md#datasource-registry) builds.
+- On a connection the pool shares with the application (`StaticPool`, SQLite `:memory:`) the late
+  check is neither closed nor cancelled, since that would close the application's connection; it runs
+  after the statement ahead of it.
+- While a check that missed its deadline is still winding down with its connection, the next probe of
+  that datasource answers `DOWN` at once (`previous check still running`) and borrows no connection.
+  A late check that never got its connection (stuck connecting or pre-pinging) does not hold the next
+  probes back: they start a new check on another connection while fewer than two late checks of that
+  datasource are still running, and answer `previous check still running` beyond that. Probes that
+  arrive while a check is running within its deadline share its answer, and a probe whose client hangs
+  up stops the check only when no other probe is waiting for it.
+- That bound matters for an engine the registry did not build (a user-supplied `async_engine` bean)
+  with pre-ping on. Its pool reports no entry, so a check stuck in an asyncpg pre-ping cannot be closed
+  and, once cancelled, never ends, not even when the kernel gives up on the socket. Each silent drop
+  can leave one such check behind, holding a pool slot, two per engine at most. After that the
+  datasource answers `previous check still running` until the application stops, and a pool of two
+  connections or fewer without overflow is starved. Build engines through the registry to avoid it.
+- When the pool has no idle connection and no overflow left, the check does not queue behind the
+  application for `pool.timeout`. It answers `UNKNOWN` (validation skipped), which keeps the aggregate
+  status `UP`. A pod whose every connection is stuck in application work therefore stays in rotation;
+  watch `pyfly_db_pool_checked_out` and `pyfly_db_pool_acquire_seconds` for that case.
+
+The bean checks every datasource of the [datasource registry](data-relational.md#datasource-registry)
+concurrently: the primary, the replicas, the named datasources and the module datasources. It reports
+each one under `details["datasources"]`, and any `DOWN` makes the component `DOWN`. A registry that holds
+only the checked engine answers with that one check, without `datasources`, and an application `AsyncEngine`
+bean the registry does not own is checked alone. Once the context has stopped, the check answers
+`OUT_OF_SERVICE` without touching the disposed engines.
 
 ```python
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
 
-indicator = SqlAlchemyHealthIndicator(engine)
+indicator = SqlAlchemyHealthIndicator(engine, timeout=2.0)          # one engine
+indicator = SqlAlchemyHealthIndicator(engine, registry=registry)    # every registry datasource
 status = await indicator.health()
 # HealthStatus(status="UP", details={"database": "postgresql"})
-# HealthStatus(status="DOWN", details={"error": "OperationalError", "message": "..."})
+# HealthStatus(status="DOWN", details={"database": "postgresql", "error": "TimeoutError", "message": "no answer within 2 s"})
 ```
 
-**Behaviour:**
+**Behavior:**
 
 | State | `status` | `details` keys |
 |-------|----------|----------------|
 | Connection succeeds | `"UP"` | `database` — SQLAlchemy dialect name (e.g. `"postgresql"`, `"sqlite"`) |
-| Connection fails | `"DOWN"` | `error` — exception class name; `message` — first 200 chars of the error message |
+| Connection fails | `"DOWN"` | `database`; `error` — exception class name; `message` — first 200 chars of the error message, password masked |
+| No answer within the timeout | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` |
+| Previous check still running (a late check that holds its connection, or two late checks without one) | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` = `"previous check still running after ... s"` |
+| Pool exhausted | `"UNKNOWN"` | `database`; `validation` = `"skipped: pool exhausted"` |
+| With a registry | aggregate | `database` (the primary's dialect); `datasources` — one entry per datasource (`primary`, `primary.replica`, named...) |
+| Registry closed (the context stopped) | `"OUT_OF_SERVICE"` | `database`; `reason` = `"datasources closed"` |
 
 Source file: `src/pyfly/data/relational/health.py`
 
@@ -1192,7 +1393,8 @@ Source file: `src/pyfly/data/relational/health.py`
 
 When the observability module is active (i.e. a `MetricsRegistry` bean is present from
 `pyfly.observability`), the `QueryMetricsLifecycle` bean automatically attaches SQLAlchemy
-event listeners to the engine and records the following Prometheus metrics:
+event listeners to every engine of the datasource registry, including those registered later.
+It records the following Prometheus metrics:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -1201,7 +1403,25 @@ event listeners to the engine and records the following Prometheus metrics:
 | `pyfly_db_query_errors_total` | Counter | `operation` | Total number of failed queries |
 
 The `operation` label contains the SQL command verb (e.g. `SELECT`, `INSERT`, `UPDATE`,
-`DELETE`).  No configuration is required — the bean is created automatically when
+`DELETE`).
+
+It also exports every datasource's connection pool (`SqlAlchemyPoolMetrics`, labeled `datasource`:
+`primary`, `primary.replica`, the named datasources). The gauges are read from the pool at scrape time.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `pyfly_db_pool_size` | Gauge | Configured pool size |
+| `pyfly_db_pool_checked_out` | Gauge | Connections in use |
+| `pyfly_db_pool_idle` | Gauge | Connections idle in the pool |
+| `pyfly_db_pool_overflow` | Gauge | Overflow connections in use |
+| `pyfly_db_pool_invalidated_total` | Counter | Connections invalidated (disconnects, errors) |
+| `pyfly_db_pool_acquire_seconds` | Histogram | Time a checkout took to obtain its connection: the wait for an idle one while the pool is busy, a connect when the pool grows, the pre-ping when it is on |
+
+The acquire histogram is the pool's wait time. Values near `pool.timeout` mean the pool is exhausted,
+and a failed checkout (a pool timeout) is recorded too. The registry builds queue-pool engines with
+`MeteredAsyncQueuePool`, which measures it; the in-memory SQLite `StaticPool` does not report it.
+
+No configuration is required — the bean is created automatically when
 `prometheus_client` is installed and the `MetricsRegistry` is available; when neither is
 present the relational module continues to work unchanged.
 
@@ -1213,7 +1433,7 @@ Source file: `src/pyfly/data/relational/metrics.py`
 
 | Adapter | Package | Backend | Guide |
 |---------|---------|---------|-------|
-| **SQLAlchemy** | `pyfly.data.relational.sqlalchemy` | PostgreSQL, MySQL, SQLite | [Data Relational Guide](data-relational.md) · [Adapter Reference](../adapters/sqlalchemy.md) |
+| **SQLAlchemy** | `pyfly.data.relational.sqlalchemy` | PostgreSQL, MySQL, MariaDB, SQLite | [Data Relational Guide](data-relational.md) · [Adapter Reference](../adapters/sqlalchemy.md) |
 | **MongoDB** | `pyfly.data.document.mongodb` | MongoDB (Beanie ODM) | [Data Document Guide](data-document.md) · [Adapter Reference](../adapters/mongodb.md) |
 
 Both adapters can coexist in the same project. The CLI supports selecting both `data-relational` (SQL) and `data-document` features together.

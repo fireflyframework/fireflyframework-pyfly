@@ -873,11 +873,11 @@ class OrderRepository(Repository[Order, int]):
     async def find_by_status(self, status: str) -> list[Order]: ...
     async def find_by_status_and_customer_name(self, status: str, name: str) -> list[Order]: ...
 
-    @query("SELECT o FROM orders WHERE o.total > :amount")
+    @query("SELECT o FROM Order o WHERE o.total > :amount")
     async def find_expensive_orders(self, amount: float) -> list[Order]: ...
 ```
 
-Just like Spring Data JPA, you declare the repository by subclassing `Repository[T, ID]` with concrete type parameters. The entity type and ID type are extracted automatically via `__init_subclass__` — no explicit `__init__` or model passing needed. The `AsyncSession` is auto-configured and injected by the container.
+Just like Spring Data JPA, you declare the repository by subclassing `Repository[T, ID]` with concrete type parameters. The entity type and ID type are extracted automatically via `__init_subclass__` — no explicit `__init__` or model passing needed. The container never injects a session: like Spring's shared `EntityManager`, the repository resolves the session of the current unit of work on every call, and a call outside a transaction runs in a short unit of its own that commits (a write) or ends (a read).
 
 **Derived queries** work the same way: define a method signature following the naming convention (`find_by_<field>_and_<field>`), and PyFly generates the query at startup.
 
@@ -897,10 +897,10 @@ List<Order> results = repository.findAll(spec);
 
 **PyFly:**
 ```python
-spec = (
-    Specification.where(field="status", op="eq", value="ACTIVE")
-    .and_where(field="total", op="gt", value=100)
-)
+from pyfly.data.relational.sqlalchemy import FilterOperator, Specification
+
+spec = FilterOperator.eq("status", "ACTIVE") & FilterOperator.gt("total", 100)
+# or a predicate of your own: Specification(lambda root, q: q.where(root.total > 100))
 results = await repository.find_all_by_spec(spec)
 ```
 
@@ -916,7 +916,7 @@ page: Page[Order] = await repository.find_all(
 # page.content, page.total_elements, page.total_pages, page.number
 ```
 
-`find_all(pageable)` counts the total, applies the `Pageable`'s sort, slices with `LIMIT`/`OFFSET`, and returns a `Page[T]`. PyFly's `Pageable` is **1-based** (`page >= 1`). Import with `from pyfly.data import Pageable, Sort`.
+`find_all(pageable)` applies the `Pageable`'s sort followed by the primary key (so pages are deterministic), slices with `LIMIT`/`OFFSET`, counts the total only when the page itself does not tell it, and returns a `Page[T]`. `find_slice(pageable)` returns a `Slice[T]` without any count, and `scroll(...)` pages by key. PyFly's `Pageable` is **1-based** (`page >= 1`). Import with `from pyfly.data import Pageable, Sort`.
 
 ### Entity ↔ DTO Mapping — MapStruct → `Mapper`
 
@@ -951,26 +951,34 @@ dto = default_mapper.map(user, UserDTO)
 
 **Key difference:** MapStruct generates `*Impl` classes at compile time. PyFly's `Mapper` is a runtime, reflection-based mapper — intentionally no codegen, no generated classes, and no string-expression DSL. It is Pydantic-aware: it keeps nested models as live instances and constructs the destination through its (validating) constructor.
 
-### Read/Write Routing — `AbstractRoutingDataSource` → `RoutingSessionFactory`
+### Read/Write Routing — `@Transactional(readOnly = true)` → `@transactional(read_only=True)`
 
-**Spring** routes between datasources with `AbstractRoutingDataSource` and `@Transactional(readOnly = true)`. **PyFly** uses `RoutingSessionFactory` plus a `read_only()` context:
+**Spring** routes between datasources with `AbstractRoutingDataSource`, driven by `@Transactional(readOnly = true)`. **PyFly** does the same with `@transactional(read_only=True)`: a new read-only unit of work runs on the datasource's read replica when one is configured (`pyfly.data.relational.read-replica.url`), every repository call inside it joins that unit, and the unit refuses writes:
 
 ```python
+from pyfly.data import transactional
+
+@transactional(read_only=True)       # a new unit on the replica, when one is configured
+async def list_users(self) -> list[User]:
+    return await self._users.find_all()
+```
+
+For code that opens its own sessions, `RoutingSessionFactory` is the `AbstractRoutingDataSource` analogue. `factory()` returns a replica session inside a `read_only()` block or a read-only transactional boundary, and a primary session otherwise. The session is not part of any unit of work, so open it with `async with`:
+
+```python
+from sqlalchemy import select
+
 from pyfly.data.relational import RoutingSessionFactory, read_only
 
 factory = ctx.get_bean(RoutingSessionFactory)
 
-async def list_users() -> list[User]:
-    with read_only():            # routes to the read replica when one is configured
-        session = factory()      # AsyncSession from the replica session maker
-        ...
-
-async def create_user(data: dict) -> User:
-    session = factory()          # outside read_only() -> primary (read/write)
-    ...
+async def user_names() -> list[str]:
+    with read_only():                          # routes to the read replica when one is configured
+        async with factory() as session:       # closed, and its connection returned, on exit
+            return list((await session.execute(select(User.name))).scalars())
 ```
 
-The factory picks the primary or read-replica session maker based on whether the current block is inside `read_only()` (the `@Transactional(readOnly = true)` analogue). Routing is opt-in: with no replica configured, the factory always uses the primary. `factory.primary()` and `factory.replica()` force a specific side regardless of context.
+Routing is opt-in: with no replica configured, every unit and every session uses the primary. `factory.primary()` and `factory.replica()` force a specific side regardless of context.
 
 ---
 
@@ -1412,16 +1420,18 @@ def test_with_real_postgres():
         ...
 ```
 
-`pyfly.testing.testcontainers` is the `@Testcontainers` / `@ServiceConnection` equivalent: it spins up a real Postgres/MySQL/Redis/MongoDB/Kafka in Docker, then maps each started container's connection details straight into pyfly config keys.
+`pyfly.testing.testcontainers` is the `@Testcontainers` / `@ServiceConnection` equivalent: it spins up a real PostgreSQL, MySQL, MariaDB, Redis, MongoDB (standalone or a single-node replica set), Kafka or RabbitMQ server in Docker, then maps each started container's connection details straight into pyfly config keys.
 
 | Spring | PyFly | Purpose |
 |--------|-------|---------|
 | `@Testcontainers` | `with postgres_container() as pg:` | Container lifecycle (context-managed) |
 | `@ServiceConnection` | `pyfly_config(pg)` / `pyfly_config_for(pg)` | Map connection details into config |
 | `PostgreSQLContainer` | `postgres_container()` | Postgres (async URL rewritten to `asyncpg`) |
-| `MySQLContainer` | `mysql_container()` | MySQL (rewritten to `aiomysql`) |
+| `MySQLContainer` | `mysql_container()` | MySQL (rewritten to `mysql+asyncmy://`; `mysql+aiomysql://` when only aiomysql is installed) |
+| `MariaDBContainer` | `mariadb_container()` | MariaDB (rewritten to `mariadb+asyncmy://`) |
 | `GenericContainer` (Redis) | `redis_container()` | Redis (cache + session URLs) |
-| `MongoDBContainer` | `mongodb_container()` | MongoDB |
+| `MongoDBContainer` | `mongodb_container()` | MongoDB, a standalone server (no transactions) |
+| `MongoDBContainer` (replica set) | `mongodb_replica_set_container()` | A single-node replica set, which runs multi-document transactions |
 | `KafkaContainer` | `kafka_container()` | Kafka |
 | `@DynamicPropertySource` | `pyfly_config(*containers, base=...)` | One-call Config for several containers |
 
@@ -1577,7 +1587,7 @@ class ShoppingCart: ...
 
 | Spring (Spring Kafka) | PyFly | Notes |
 |-----------------------|-------|-------|
-| `@RetryableTopic` / `DefaultErrorHandler` DLT | `@message_listener(..., retries=, retry_delay=, dead_letter_topic=)` | Adapter-agnostic linear-backoff retry; on exhaustion the message is re-published to the DLQ with `x-original-topic` / `x-exception` headers. See [Messaging Guide](modules/messaging.md#retry-and-dead-letter-routing). |
+| `DefaultErrorHandler` (seek back, back-off, DLT) / AMQP requeue and DLX | `@message_listener(..., retries=, retry_delay=, dead_letter_topic=)` | On Kafka and RabbitMQ the listener container attempts a failed delivery again after a back-off (5 attempts, 1 s doubling, by default), outside its unit of work and acknowledging only what committed, then dead-letters it (`<topic>.DLT`, `<queue>.dlq`) with `x-original-topic` / `x-exception` headers. See [Messaging Guide](modules/messaging.md#retry-and-dead-letter-routing) and [Delivery Guarantees](modules/messaging.md#delivery-guarantees). |
 
 ### Multiple named datasources
 
@@ -1590,7 +1600,8 @@ class ShoppingCart: ...
 | Spring | PyFly | Notes |
 |--------|-------|-------|
 | `@WebMvcTest` | `web_slice(*controllers, overrides=…)` → `(context, client)` | Starts a minimal context + `PyFlyTestClient`. |
-| `@DataJpaTest` / `@SpringBootTest` slices | `data_slice(...)` / `service_slice(...)` → `context` | Intent-named aliases of `slice_context`; `overrides` accept a class or a pre-built instance; fail-fast on missing collaborators. See [Testing Guide](modules/testing.md#functional-slices-web_slice-service_slice-data_slice). |
+| `@DataJpaTest` | `@DataTest`, or `data_slice(..., rollback=True)` → `context` | Every unit of work a test runs rolls back when the test ends. See [Testing Guide](modules/testing.md). |
+| `@SpringBootTest` slices | `data_slice(...)` / `service_slice(...)` → `context` | Intent-named aliases of `slice_context`; `overrides` accept a class or a pre-built instance; fail-fast on missing collaborators. See [Testing Guide](modules/testing.md#functional-slices-web_slice-service_slice-data_slice). |
 
 ### Session concurrency control
 
@@ -1710,8 +1721,14 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `Page<T>` | `Page[T]` | Paginated results |
 | `Pageable` | `Pageable` | Pagination request |
 | MapStruct `@Mapper` | `Mapper` / `@mapping` | Entity ↔ DTO mapping |
-| `AbstractRoutingDataSource` | `RoutingSessionFactory` | Read/write datasource routing |
-| `@Transactional(readOnly=true)` | `read_only()` context | Route to read replica |
+| `@Transactional` | `@transactional` / `TransactionTemplate` (`pyfly.data`, `pyfly.data.transaction`) | Declarative and programmatic transactions |
+| `@Transactional(readOnly=true)` | `@transactional(read_only=True)` | A new unit on the read replica, writes refused |
+| `AbstractRoutingDataSource` | `RoutingSessionFactory` + `read_only()` | Routed sessions for code that opens its own |
+| `@Version` | `VersionedMixin` | Optimistic locking |
+| `@Lock(PESSIMISTIC_WRITE)` | `find_by_id(id, lock=LockMode.PESSIMISTIC_WRITE)` | Pessimistic locking |
+| `@Modifying` | `@modifying` | `UPDATE`/`DELETE` queries returning the row count |
+| `spring.jpa.hibernate.ddl-auto` | `pyfly.data.relational.ddl-auto` | Schema strategy (`none`, `validate`, `create`, `create-drop`) |
+| Flyway on startup | `pyfly.data.relational.migrations.enabled` | Alembic migrations before the schema strategy |
 | Multiple `DataSource` beans | `NamedDataSources` | Secondary datasources by name |
 | Actuator `/health` | Actuator `/actuator/health` | Health checks |
 | Actuator `/info` | Actuator `/actuator/info` | App metadata |
@@ -1764,7 +1781,7 @@ A complete mapping of Spring Boot concepts to PyFly equivalents:
 | `ActuatorAutoConfiguration` | `ActuatorAutoConfiguration` + `MetricsActuatorAutoConfiguration` | Split by optional dependency |
 | `WebServerFactoryAutoConfiguration` | `ServerAutoConfiguration` | Auto-detects Granian > Uvicorn > Hypercorn |
 | `@WebMvcTest` | `web_slice(*controllers)` | Web slice → `(context, client)` |
-| `@DataJpaTest` | `data_slice(*beans)` | Data slice → `context` |
+| `@DataJpaTest` | `@DataTest` / `data_slice(*beans, rollback=True)` | Data slice whose units roll back |
 | `@SpringBootTest` (focused slice) | `service_slice(*beans)` / `slice_context(...)` | Minimal started context |
 | `maximumSessions` / `SessionRegistry` | `SessionConcurrencyController` + `SessionRegistry` | Per-principal session cap |
 | `@Testcontainers` | `postgres_container()` (context-managed) | Container lifecycle |

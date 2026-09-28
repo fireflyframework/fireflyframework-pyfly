@@ -25,19 +25,28 @@ def message_listener(
     topic: str,
     group: str | None = None,
     *,
-    retries: int = 0,
-    retry_delay: float = 0.0,
+    retries: int | None = None,
+    retry_delay: float | None = None,
     dead_letter_topic: str | None = None,
 ) -> Callable[[F], F]:
     """Mark a method as a message listener for the given topic.
 
+    On Kafka and RabbitMQ the listener container runs each delivery in a unit of work of its own (the
+    method's ``@transactional`` joins it) and acknowledges it only after that unit committed. A failed
+    delivery is attempted again after a back-off, then dead-lettered (see
+    :mod:`pyfly.messaging.listener_container`); the arguments below override the container's
+    ``pyfly.messaging.listener.retry.*`` settings for this listener.
+
     Args:
         topic: Topic to subscribe to.
         group: Optional consumer group.
-        retries: Times to re-invoke the handler on failure (linear ``retry_delay`` backoff).
-        retry_delay: Base delay (seconds) between retries; attempt N waits ``retry_delay * N``.
-        dead_letter_topic: When set, a message still failing after *retries* is re-published
-            here (with ``x-original-topic`` / ``x-exception`` headers) instead of propagating.
+        retries: Deliveries after the first one (``0``: dead-letter at the first failure). ``None``
+            keeps the container's ``retry.max-attempts``.
+        retry_delay: Linear back-off: attempt N+1 waits ``retry_delay * N`` seconds. ``None`` keeps the
+            container's exponential back-off.
+        dead_letter_topic: Where a message still failing after its last attempt goes (instead of
+            ``<topic>.DLT`` on Kafka, ``<queue>.dlq`` on RabbitMQ), with ``x-original-topic`` /
+            ``x-exception`` headers.
     """
 
     def decorator(func: F) -> F:

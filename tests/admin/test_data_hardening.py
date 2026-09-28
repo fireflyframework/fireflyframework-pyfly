@@ -130,6 +130,36 @@ async def test_adapter_for_sqlalchemy_type_without_python_type(tmp_path):
         await engine.dispose()
 
 
+def test_a_type_without_a_python_type_needs_a_field_adapter_and_json_is_a_json_field():
+    """SQLAlchemy 2.0 raises ``NotImplementedError`` for a type without a Python type where 2.1 answers ``object``,
+    and 2.1's ``JSON`` no longer answers ``dict``: the administration describes both alike on either line."""
+    from sqlalchemy import JSON, String, TypeDecorator
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+    from pyfly.admin.data.adapters.sqlalchemy import SqlAlchemyAdminProvider
+    from pyfly.admin.data.models import ModelAdmin
+
+    class CodeType(TypeDecorator):
+        impl = String
+        cache_ok = True
+
+    class Base(DeclarativeBase):
+        pass
+
+    class Coded(Base):
+        __tablename__ = "coded_items"
+        id: Mapped[int] = mapped_column(primary_key=True)
+        code: Mapped[str] = mapped_column(CodeType())
+        payload: Mapped[dict] = mapped_column(JSON)
+
+    provider = SqlAlchemyAdminProvider(async_sessionmaker(), edit_token_key="python-type-key-of-at-least-32-bytes")
+    with pytest.raises(ValueError, match="unsupported field code; configure a field adapter"):
+        provider.describe(ModelAdmin("coded", Coded, fields=("id", "code")))
+    (payload,) = provider.describe(ModelAdmin("coded", Coded, fields=("payload",)))
+    assert payload.type == "json"
+
+
 async def test_policy_hook_cannot_expand_readonly_operations(admin):
     from pyfly.admin.data.models import ModelAdmin
     from pyfly.admin.data.registry import AdminResourceRegistry

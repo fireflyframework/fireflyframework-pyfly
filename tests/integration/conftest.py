@@ -18,6 +18,11 @@ Each fixture starts a real backend in Docker (testcontainers) — or, if the mat
 starts no container. Failures normally ``skip`` so the suite degrades cleanly where Docker is
 absent; setting ``PYFLY_INTEGRATION_REQUIRE_DOCKER=1`` (the CI integration job) flips skip -> FAIL
 so missing backends cannot masquerade as "passing".
+
+The backend-matrix fixtures (``relational_backend``, ``mongo_backend``, ``pg_server_url``,
+``mysql_server_url``, ``mariadb_server_url``, ``mongo_rs_url``) come from
+``tests/support/backend_matrix.py`` and are available here too. ``mysql_url`` is the matrix's MySQL
+server, so a run starts one MySQL container, not two.
 """
 
 from __future__ import annotations
@@ -34,7 +39,6 @@ from pyfly.testing import (
     is_docker_available,
     kafka_container,
     mongodb_container,
-    mysql_container,
     postgres_container,
     pyfly_config_for,
     rabbitmq_container,
@@ -55,11 +59,18 @@ def unavailable(reason: str) -> NoReturn:
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Auto-apply @pytest.mark.integration to everything collected under tests/integration/,
-    then (if Docker is required but unreachable) abort the whole run so the CI job fails."""
+    then (if Docker is required but unreachable) abort the whole run so the CI job fails.
+
+    The one exception is a backend-matrix run on the sqlite-file lane (marked ``sqlite_file``): it
+    needs no Docker, so it stays in the fast suite, while the same test's server lanes carry
+    ``integration`` from their parametrization.
+    """
     has_integration = False
     for item in items:
         item_path = item.path.resolve()  # pytest >= 7 guarantees Node.path (a pathlib.Path)
         if item_path == _INTEGRATION_DIR or _INTEGRATION_DIR in item_path.parents:
+            if item.get_closest_marker("sqlite_file") is not None and item.get_closest_marker("integration") is None:
+                continue
             item.add_marker(pytest.mark.integration)
             has_integration = True
     if REQUIRE_DOCKER and has_integration and not is_docker_available():
@@ -109,17 +120,12 @@ def pg_url() -> Iterator[str]:
 # The fixtures below are session-scoped: one container is shared for the whole run (fast to start
 # once). Tests using them must namespace their data (unique keys/topics/tables) — state is shared.
 @pytest.fixture(scope="session")
-def mysql_url() -> Iterator[str]:
-    env = os.environ.get("PYFLY_IT_MYSQL_URL")
-    if env:
-        yield env
-        return
-    container = _started(mysql_container, "MySQL")
-    try:
-        yield pyfly_config_for(container)["pyfly.data.relational.url"]
-    finally:
-        with contextlib.suppress(Exception):
-            container.stop()
+def mysql_url(mysql_server_url: str) -> str:
+    """The shared MySQL 8 server's ``pyfly`` database (root, asyncmy). ``PYFLY_IT_MYSQL_URL`` overrides it.
+
+    For a database of your own, use ``relational_backend`` with ``@pytest.mark.backends("mysql")``.
+    """
+    return mysql_server_url
 
 
 @pytest.fixture(scope="session")

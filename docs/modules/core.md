@@ -50,7 +50,7 @@ The `pyfly.core` module provides three concerns that every application needs:
 | **Bootstrap** | `@pyfly_application`, `PyFlyApplication` | Mark an entry-point class and orchestrate the startup/shutdown lifecycle. |
 | **Configuration** | `Config`, `@config_properties`, `Value` | Load, layer, and access configuration from YAML/TOML files, profiles, and environment variables. |
 | **Banner** | `BannerMode`, `BannerPrinter` | Render a startup banner to stdout (ASCII art, minimal one-liner, or off). |
-| **Lifecycle** | `Lifecycle` protocol | Unified `start()`/`stop()` contract for all infrastructure adapters. |
+| **Lifecycle** | `Lifecycle` protocol | Unified `start()`/`stop()` contract for all infrastructure adapters, with `SmartLifecycle`-style phases (`pyfly.kernel.lifecycle`). |
 | **Logging Fallback** | `StdlibLoggingAdapter` | Zero-dependency fallback when `structlog` is not installed. Wraps stdlib `logging` with structlog-style key-value API. |
 
 All public symbols are re-exported from `pyfly.core`:
@@ -197,9 +197,10 @@ This is the async entry point you call to bring the application to life. It:
 async def shutdown(self) -> None:
 ```
 
-Logs a shutdown message and delegates to `ApplicationContext.stop()`, which calls
-`@pre_destroy` on all resolved beans in reverse initialization order and publishes
-`ContextClosedEvent`.
+Logs a shutdown message and delegates to `ApplicationContext.stop()`, which publishes
+`ContextClosedEvent`, drains the consumers and the scheduler, calls `@pre_destroy` on every bean
+(each before the beans it depends on), stops the remaining lifecycle beans and disposes the
+datasource registry last (see the stop() lifecycle in the dependency-injection guide).
 
 ### Fail-Fast Startup
 
@@ -598,7 +599,7 @@ class BannerMode(enum.Enum):
 | Mode | Behavior |
 |---|---|
 | `TEXT` | Full ASCII art banner (default) with a framework version line. |
-| `MINIMAL` | Single line: `:: PyFly :: (v26.09.07)` |
+| `MINIMAL` | Single line: `:: PyFly :: (v26.09.08)` |
 | `OFF` | No banner output at all. |
 
 ### BannerPrinter Class
@@ -639,7 +640,7 @@ ______ ___.__._/ ____\  | ___.__.
 |   __// ____| |__|  |____/ ____|
 |__|   \/                 \/
 
-:: PyFly Framework :: (v26.09.07)
+:: PyFly Framework :: (v26.09.08)
 ```
 
 ### Custom Banner Files
@@ -760,8 +761,8 @@ pyfly:
 | `pyfly.logging.level.root` | `"INFO"` | Root log level |
 | `pyfly.logging.format` | `"console"` | Log output format |
 | `pyfly.data.enabled` | `false` | Enable data layer |
-| `pyfly.data.url` | `"sqlite+aiosqlite:///pyfly.db"` | Database URL |
-| `pyfly.data.pool-size` | `5` | Connection pool size |
+| `pyfly.data.relational.url` | — (required) | Database URL; `pyfly.data.url` is a deprecated alias |
+| `pyfly.data.relational.pool.size` | SQLAlchemy's (5) | Connection pool size; `pyfly.data.pool-size` is a deprecated alias |
 | `pyfly.cache.enabled` | `false` | Enable caching |
 | `pyfly.cache.provider` | `"memory"` | Cache backend (`redis`, `memory`) |
 | `pyfly.cache.ttl` | `300` | Default TTL in seconds |

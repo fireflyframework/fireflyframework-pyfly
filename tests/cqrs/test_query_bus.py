@@ -14,10 +14,10 @@
 """Tests for DefaultQueryBus pipeline with caching."""
 
 from dataclasses import dataclass
-from datetime import timedelta
 
 import pytest
 
+from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.command.validation import CommandValidationService
 from pyfly.cqrs.context.execution_context import ExecutionContextBuilder
@@ -29,6 +29,9 @@ from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.types import Query
 from pyfly.cqrs.validation.exceptions import CqrsValidationException
 from pyfly.cqrs.validation.types import ValidationResult
+
+CALLER = ExecutionContextBuilder().with_tenant_id("acme").with_user_id("alice").build()
+"""Who runs the cached queries: the query cache caches a call only when it can see who the caller is."""
 
 # -- Test messages ----------------------------------------------------------
 
@@ -85,28 +88,6 @@ class CacheableGetOrderHandler(QueryHandler[GetOrderQuery, dict]):
     async def do_handle(self, query: GetOrderQuery) -> dict:
         self.call_count += 1
         return {"id": query.order_id, "status": "fresh"}
-
-
-# -- Fake cache adapter -----------------------------------------------------
-
-
-class FakeCacheAdapter:
-    """In-memory cache adapter mimicking the CacheAdapter port."""
-
-    def __init__(self) -> None:
-        self._store: dict[str, object] = {}
-
-    async def get(self, key: str) -> object | None:
-        return self._store.get(key)
-
-    async def put(self, key: str, value: object, ttl: timedelta | None = None) -> None:
-        self._store[key] = value
-
-    async def evict(self, key: str) -> None:
-        self._store.pop(key, None)
-
-    async def clear(self) -> None:
-        self._store.clear()
 
 
 # -- Tests ------------------------------------------------------------------
@@ -170,85 +151,85 @@ class TestDefaultQueryBus:
     async def test_cache_hit_returns_cached_result(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         query1 = GetOrderQuery(order_id="ord-cached")
-        result1 = await bus.query(query1)
+        result1 = await bus.query_with_context(query1, CALLER)
         assert result1 == {"id": "ord-cached", "status": "fresh"}
         assert handler.call_count == 1
 
         query2 = GetOrderQuery(order_id="ord-cached")
-        result2 = await bus.query(query2)
+        result2 = await bus.query_with_context(query2, CALLER)
         assert result2 == {"id": "ord-cached", "status": "fresh"}
         assert handler.call_count == 1  # handler not called again
 
     async def test_cache_miss_executes_handler(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
-        result = await bus.query(GetOrderQuery(order_id="ord-new"))
+        result = await bus.query_with_context(GetOrderQuery(order_id="ord-new"), CALLER)
         assert result == {"id": "ord-new", "status": "fresh"}
         assert handler.call_count == 1
 
     async def test_cache_disabled_when_query_not_cacheable(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         q1 = GetOrderQuery(order_id="ord-1")
         q1.set_cacheable(False)
-        await bus.query(q1)
+        await bus.query_with_context(q1, CALLER)
 
         q2 = GetOrderQuery(order_id="ord-1")
         q2.set_cacheable(False)
-        await bus.query(q2)
+        await bus.query_with_context(q2, CALLER)
 
         assert handler.call_count == 2  # handler called each time
 
     async def test_cache_disabled_when_handler_not_cacheable(self, registry: HandlerRegistry) -> None:
         handler = GetOrderHandler()  # not decorated with cacheable=True
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
-        await bus.query(GetOrderQuery(order_id="ord-1"))
-        await bus.query(GetOrderQuery(order_id="ord-1"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-1"), CALLER)
+        await bus.query_with_context(GetOrderQuery(order_id="ord-1"), CALLER)
         # no error, runs fine without caching
 
     async def test_clear_cache_evicts_key(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
         query = GetOrderQuery(order_id="ord-evict")
-        await bus.query(query)
+        await bus.query_with_context(query, CALLER)
         assert handler.call_count == 1
 
-        # _build_cache_key now returns the RAW key (no ":cqrs:" prefix).
-        # FakeCacheAdapter does not add any prefix, so we evict using the raw key.
+        # The bus takes the query's own key and evicts it for every caller (the ":cqrs:" prefix and the
+        # caller's scope are the query cache's business).
         cache_key = query.get_cache_key()
         await bus.clear_cache(cache_key)
 
-        await bus.query(GetOrderQuery(order_id="ord-evict"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-evict"), CALLER)
         assert handler.call_count == 2
 
     async def test_clear_all_cache(self, registry: HandlerRegistry) -> None:
         handler = CacheableGetOrderHandler()
         registry.register_query_handler(handler)
-        cache = FakeCacheAdapter()
+        cache = InMemoryCache()
         bus = DefaultQueryBus(registry=registry, cache_adapter=cache)
 
-        await bus.query(GetOrderQuery(order_id="ord-all"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-all"), CALLER)
         assert handler.call_count == 1
 
         await bus.clear_all_cache()
 
-        await bus.query(GetOrderQuery(order_id="ord-all"))
+        await bus.query_with_context(GetOrderQuery(order_id="ord-all"), CALLER)
         assert handler.call_count == 2
 
     async def test_clear_cache_no_adapter_is_noop(self) -> None:

@@ -350,8 +350,10 @@ The callback (`_handle_callback`) is the security-critical step. In order it:
 5. exchanges the code for tokens at `token_uri`, sending the `code_verifier`;
 6. establishes identity from the verified `id_token` (preferred) or the
    `user_info_uri`;
-7. **rotates the session id** (`session.rotate_id()`) to defeat session fixation,
-   then stores the `SecurityContext` under the session;
+7. **rotates the session id** (`session.rotate_id(on_login=True)`) to defeat session
+   fixation, then stores the `SecurityContext` under the session; with session
+   concurrency control, it saves the session before registering it with the
+   controller;
 8. fails with `401` if no authenticated principal could be determined (no silent
    anonymous session).
 
@@ -526,7 +528,7 @@ pyfly:
 |---|---|---|---|
 | `secret` | `str` | required | HMAC signing key (used for `HS*` algorithms) |
 | `client_repository` | `ClientRegistrationRepository` | required | Client lookup |
-| `token_store` | `TokenStore` | required | Refresh-token / code / family / PAR storage |
+| `token_store` | `AtomicTokenStore` or `TokenStore` | required | Refresh-token / code / family / PAR storage; a key-value `TokenStore` runs through `KeyValueTokenStore` |
 | `access_token_ttl` | `int` | `3600` | Access token lifetime (seconds) |
 | `refresh_token_ttl` | `int` | `86400` | Refresh token lifetime (seconds) |
 | `issuer` | `str \| None` | `None` | `iss` claim + RFC 9207 `iss` on authorize results |
@@ -582,6 +584,15 @@ already-rotated (used) refresh token is treated as theft and **revokes the entir
 token family** (`INVALID_GRANT`). A token whose family was already revoked is
 likewise refused.
 
+A rotation is one atomic step of the token store: the presented token is consumed
+only if it is still unused and unexpired and its family still active, and the
+successor is stored in the same step. Of N requests presenting one refresh token at
+the same time (a thief racing the client, or two instances of the server), exactly
+one rotates it; the others are replays and revoke the family. A revocation is final:
+a rotation in flight never brings the family back, and a grant that fails midway (a
+dropped connection) changes nothing, so the client's retry succeeds instead of being
+taken for theft.
+
 ```python
 new_response = await auth_server.token(
     grant_type="refresh_token",
@@ -627,10 +638,12 @@ tokens = await auth_server.token(
 )
 ```
 
-The code is **single-use**: redeeming a code marks it consumed and remembers the
-refresh token it issued. Replaying a used code is treated as injection — any
-refresh token already issued from it is revoked and the request fails with
-`INVALID_GRANT`. The code also expires after `auth_code_ttl` (default 60s), is
+The code is **single-use**: redeeming a code consumes it and issues the refresh
+token in one atomic step of the token store, and the code records the family it
+issued. Replaying a used code is treated as injection — the family already issued
+from it is revoked and the request fails with `INVALID_GRANT`. Of N concurrent
+redemptions of one code (on one instance or several) exactly one succeeds, and the
+others revoke what it issued (RFC 6749 §4.1.2). The code also expires after `auth_code_ttl` (default 60s), is
 bound to the issuing client, and PKCE verification (`S256(code_verifier) ==
 code_challenge`) is mandatory.
 
@@ -722,8 +735,9 @@ auth_server = AuthorizationServer(
   (client-authenticated) and receives a one-time `request_uri`
   (`urn:ietf:params:oauth:request_uri:...`, 90-second TTL). It then calls
   `/oauth2/authorize?request_uri=...`; the server consumes the stored params
-  (one-time use, bound to the client) and proceeds. This keeps authorization
-  parameters off the front channel.
+  (one-time use, bound to the client: the store removes the request atomically,
+  so of concurrent requests presenting one `request_uri` one gets the params) and
+  proceeds. This keeps authorization parameters off the front channel.
 - **JAR** — alternatively the client passes a signed `request` object (a JWT
   signed with its client secret, HS256) to `/oauth2/authorize`. The server
   verifies it via `verify_request_object` (confidential clients only) and merges
@@ -757,8 +771,29 @@ publish the server metadata, including:
 
 ### Token stores (memory / redis / postgres)
 
-The `TokenStore` port persists refresh tokens, authorization codes, rotation
-families and PAR requests:
+A token store persists refresh tokens, authorization codes, rotation families and
+PAR requests. The server runs every grant through `AtomicTokenStore`, whose
+operations each check the state they depend on and change it in one atomic step:
+
+```python
+class AtomicTokenStore(Protocol):
+    async def save(self, record: TokenRecord) -> None: ...          # a new code / pushed request
+    async def load(self, kind: str, token_id: str) -> TokenRecord | None: ...
+    async def issue(self, token: TokenRecord) -> None: ...          # a token opening a new family
+    async def redeem(self, code: str, token: TokenRecord, *, now: int) -> GrantOutcome: ...
+    async def rotate(self, token_id: str, token: TokenRecord, *, now: int) -> GrantOutcome: ...
+    async def take(self, kind: str, token_id: str, *, client_id: str, now: int) -> TokenRecord | None: ...
+    async def revoke_family(self, family_id: str) -> None: ...
+```
+
+`TokenRecord` holds the typed fields (`token_id`, `kind`, `client_id`,
+`expires_at`, `family_id`, `used`, and `family_active` on a loaded record) and
+`data` (scope, user, PKCE challenge...). `GrantOutcome` is `GRANTED`, `REPLAYED`
+(the code or token was consumed already: its family is revoked), `REVOKED`,
+`EXPIRED` or `UNKNOWN`. The server validates what never changes (client, redirect
+URI, PKCE) on a loaded record, then calls the operation.
+
+The key-value port still works for a store of your own:
 
 ```python
 class TokenStore(Protocol):
@@ -767,14 +802,20 @@ class TokenStore(Protocol):
     async def revoke(self, token_id: str) -> None: ...
 ```
 
+The server runs such a store through `KeyValueTokenStore`, which keeps the record
+layout the server always wrote (`authcode:<code>`, `par:<request_uri>`,
+`family:<id>`) and serializes the grants of one process with a lock: atomic
+within one process only. A store shared by several instances implements
+`AtomicTokenStore`.
+
 `OAuth2AuthorizationServerAutoConfiguration._build_token_store()` selects the
 backend from `pyfly.security.oauth2.token-store.provider` (case-insensitive):
 
 | Provider | Adapter | Persistence | When to use |
 |---|---|---|---|
-| `memory` (default) | `InMemoryTokenStore` | Process-local; **lost on restart**, not shared across instances | Development / testing, single instance |
-| `redis` | `RedisTokenStore` (`pyfly.security.adapters.redis_token_store`) | Cross-instance, fast distributed revocation; tokens self-evict at `refresh-token-ttl` | Multi-instance servers wanting fast revocation |
-| `postgres` | `PostgresTokenStore` (`pyfly.security.adapters.postgres_token_store`) | Durable + auditable in a SQL table | Multi-instance servers needing durable, auditable storage |
+| `memory` (default) | `InMemoryTokenStore` | Process-local; **lost on restart**, not shared across instances; purges expired records | Development / testing, single instance |
+| `redis` | `RedisTokenStore` (`pyfly.security.adapters.redis_token_store`) | Cross-instance; every grant one Lua script; every key expires with its record (plus the grace period) | Multi-instance servers wanting fast revocation |
+| `postgres` | `PostgresTokenStore` (`pyfly.security.adapters.postgres_token_store`) | Durable + auditable in SQL tables on any relational backend; every grant one unit of work; purged | Multi-instance servers needing durable, auditable storage |
 
 ```yaml
 pyfly:
@@ -783,18 +824,59 @@ pyfly:
       authorization-server:
         enabled: true
         secret: "${OAUTH2_SECRET}"
-        refresh-token-ttl: 86400          # also the Redis token TTL
+        refresh-token-ttl: 86400
       token-store:
         provider: redis                   # memory (default) | redis | postgres
         redis:
           url: "redis://localhost:6379/0" # falls back to pyfly.session.redis.url
 ```
 
-The Redis adapter is wired only when the `redis.asyncio` driver is available (it
-falls back to `InMemoryTokenStore` otherwise); the Postgres adapter resolves a
-SQLAlchemy `AsyncEngine` bean from the container. Both are hexagonal — the
-client/engine is injected by the composition root, never imported at module
-scope.
+**The SQL store** (`postgres`) keeps its records in the framework tables
+`pyfly_oauth2_grants` (one row per refresh token, code or pushed request, with
+typed `kind`, `client_id`, `family_id`, `used` and `expires_at` columns, the rest
+as JSON in `data`) and `pyfly_oauth2_token_families` (one row per rotation family,
+whose `active` only goes from true to false). A code or token is consumed with a
+conditional `UPDATE ... WHERE used = false AND expires_at >= :now`; a rotation
+locks the family's row first and mints its token only while the family is active;
+a revocation is one `UPDATE` of the family and one `DELETE` of its tokens, whatever
+the family's length. A refresh costs two pool checkouts and one commit. No
+operation joins a unit of work of its caller: a grant is a security decision the
+client acts on at once, so a caller's rollback must not resurrect a used code or a
+revoked family. On SQLite, which allows one writer at a time, a grant called
+inside a unit of work that has written on the store's datasource raises
+`IllegalTransactionStateError` (the grant's own unit would wait for the caller's
+write lock): call the token endpoint outside that unit, or give the store a
+datasource of its own (`token-store.datasource`). Records that expired more than `purge_grace` (one hour) ago are
+purged, a batch at a time, by writes at most once a minute, and by
+`purge_expired()`. The datasource is resolved in the context's
+`DataSourceRegistry`: `token-store.datasource` names one, `token-store.url` is an
+alias (the registered datasource with that URL, or a new `oauth2-token-store`
+datasource), and with neither it is the primary. The tables are created when the
+server starts if `pyfly.data.relational.ddl-auto` allows it, otherwise checked
+(list `framework_metadata` in Alembic's `target_metadata` to migrate them).
+
+**The Redis store** keeps a record as a hash at `<key_prefix><kind>:<id>` and a
+family as a hash at `<key_prefix>family:<id>` with the set of its unused tokens (a
+rotation removes the token it used, so the set does not grow with the family's
+length); every key expires at its record's expiry plus `purge_grace`. A revocation or replay
+reaches keys the presented token does not name, so on Redis Cluster the store
+needs its keys on one shard.
+
+> **Before 26.09.08** every grant was a read, a check and separate writes: one
+> refresh token, code or `request_uri` was redeemed by every concurrent request, a
+> rotation racing a revocation wrote the revoked family back as active, and the
+> SQL table (a JSON blob per key, with a family blob growing per rotation) was
+> never purged. The SQL store's old table, `pyfly_oauth2_tokens`, is not read:
+> refresh tokens issued before the upgrade are refused (clients authenticate
+> again); drop that table afterwards. The Redis store no longer reads its old
+> layout either (a JSON string per key at `<key_prefix><id>`,
+> `<key_prefix>authcode:<code>`, `<key_prefix>par:<request_uri>` and
+> `<key_prefix>family:<id>`): refresh tokens, codes and pushed requests written
+> before the upgrade are refused, and clients authenticate again. Those keys expire
+> with the `ttl` they were written with; without one, delete the keys of type
+> `string` under the prefix (the new layout writes hashes and sets only). The Redis
+> and SQL adapters no longer offer the key-value `store`/`find`/`revoke`
+> operations.
 
 ### Signing-secret hardening
 
@@ -929,9 +1011,9 @@ PyFly's OAuth2 defaults follow [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700
 | **Exact redirect-URI matching** | `authorize()` rejects any `redirect_uri` that is not character-for-character equal to the registration (`INVALID_REDIRECT_URI`, never redirected). |
 | **No implicit grant** | Only `response_type=code` is accepted (`UNSUPPORTED_RESPONSE_TYPE`); metadata advertises `response_types_supported: ["code"]`. |
 | **No resource-owner password (ROPC)** | The AS implements no password grant. The IdP module's ROPC (`grant_type=password`) against keycloak/cognito/azure-ad is disabled unless `pyfly.idp.allow-password-grant=true`. |
-| **Refresh-token rotation** | Every refresh use rotates the token within its family. |
+| **Refresh-token rotation** | Every refresh use rotates the token within its family, atomically: one of concurrent redemptions succeeds. |
 | **Refresh-token reuse / replay detection** | Replaying a used refresh token revokes the entire token family (`INVALID_GRANT`). |
-| **Authorization-code single use + injection defense** | Codes are single-use; replaying a used code revokes any refresh token already issued from it. |
+| **Authorization-code single use + injection defense** | Codes are single-use, atomically on every store; replaying a used code revokes the family already issued from it. |
 | **Sender-constrained tokens** | DPoP (`cnf.jkt`, RFC 9449) and mTLS (`cnf["x5t#S256"]`, RFC 8705), enforced by the resource server when `enforce-sender-constraints` is on. |
 | **Audience restriction** | The AS emits an `aud` claim when `audience` is set; the resource server validates `aud` against its configured `audiences`. |
 | **Issuer identification (mix-up defense)** | RFC 9207 `iss` on authorize responses; the client validates `iss` (mandatory with `require_iss`); the resource server validates the token `iss`. |
@@ -999,8 +1081,10 @@ Every key below nests under `pyfly:`. Defaults reflect the source.
 | `authorization-server.audience` | (unset) | `aud` claim (comma-separated or list) |
 | `authorization-server.access-token-ttl` | `3600` | Access token lifetime (seconds) |
 | `authorization-server.refresh-token-ttl` | `86400` | Refresh token lifetime (seconds) |
-| `token-store.provider` | `memory` | `memory`, `redis`, or `postgres` |
+| `token-store.provider` | `memory` | `memory`, `redis`, or `postgres`; any other value, and `redis` without `redis.asyncio`, falls back to `memory` |
 | `token-store.redis.url` | falls back to `pyfly.session.redis.url`, then `redis://localhost:6379/0` | Redis URL (redis provider) |
+| `token-store.datasource` | primary | Datasource of the SQL store (postgres provider) |
+| `token-store.url` | — | Alias resolved through the `DataSourceRegistry` (postgres provider) |
 
 **IdP module** — `pyfly.idp.*` (external identity providers; see ROPC note above)
 

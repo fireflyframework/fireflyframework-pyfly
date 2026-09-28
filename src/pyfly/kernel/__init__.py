@@ -23,6 +23,7 @@ from pyfly.kernel.exceptions import (
     ConflictException,
     DataIntegrityException,
     DegradedServiceException,
+    DuplicateKeyException,
     ExternalServiceException,
     ForbiddenException,
     GatewayTimeoutException,
@@ -33,6 +34,7 @@ from pyfly.kernel.exceptions import (
     MethodNotAllowedException,
     NotImplementedException,
     OperationTimeoutException,
+    OptimisticLockingFailureException,
     PayloadTooLargeException,
     PluginException,
     PluginLoadError,
@@ -52,7 +54,14 @@ from pyfly.kernel.exceptions import (
     UnsupportedMediaTypeException,
     ValidationException,
 )
-from pyfly.kernel.lifecycle import Lifecycle
+from pyfly.kernel.lifecycle import (
+    CONSUMER_PHASE,
+    DEFAULT_PHASE,
+    Lifecycle,
+    ResourceRegistry,
+    SmartLifecycle,
+    lifecycle_phase,
+)
 from pyfly.kernel.types import (
     ErrorCategory,
     ErrorResponse,
@@ -62,7 +71,12 @@ from pyfly.kernel.types import (
 
 __all__ = [
     # Lifecycle
+    "CONSUMER_PHASE",
+    "DEFAULT_PHASE",
     "Lifecycle",
+    "ResourceRegistry",
+    "SmartLifecycle",
+    "lifecycle_phase",
     # Types
     "ErrorCategory",
     "ErrorSeverity",
@@ -79,7 +93,9 @@ __all__ = [
     "GoneException",
     "InvalidRequestException",
     "DataIntegrityException",
+    "DuplicateKeyException",
     "ConcurrencyException",
+    "OptimisticLockingFailureException",
     "LockedResourceException",
     "MethodNotAllowedException",
     "UnsupportedMediaTypeException",

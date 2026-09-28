@@ -2,7 +2,7 @@
 
 > **Module:** Data Relational — [Module Guide](../modules/data-relational.md)
 > **Package:** `pyfly.data.relational.sqlalchemy`
-> **Backend:** SQLAlchemy 2.0+ (async), Alembic, aiosqlite
+> **Backend:** SQLAlchemy 2.0.50 or later (async; tested on the 2.0 and 2.1 lines), Alembic, aiosqlite
 
 ## Quick Start
 
@@ -13,6 +13,9 @@ uv add "pyfly[data-relational]"
 
 # For PostgreSQL (production)
 uv add "pyfly[data-relational,postgresql]"
+
+# For MySQL or MariaDB (asyncmy driver)
+uv add "pyfly[data-relational,mysql]"
 ```
 
 ### Minimal Configuration
@@ -29,16 +32,21 @@ pyfly:
 ### Minimal Example
 
 ```python
+from uuid import UUID
+
+from sqlalchemy import Float, String
+from sqlalchemy.orm import Mapped, mapped_column
+
 from pyfly.container import repository
-from pyfly.data.relational.sqlalchemy import Repository, BaseEntity
+from pyfly.data.relational.sqlalchemy import BaseEntity, Repository
 
 class OrderEntity(BaseEntity):
     __tablename__ = "orders"
-    name: str
-    total: float
+    name: Mapped[str] = mapped_column(String(255))
+    total: Mapped[float] = mapped_column(Float)
 
 @repository
-class OrderRepository(Repository[OrderEntity, int]):
+class OrderRepository(Repository[OrderEntity, UUID]):   # BaseEntity's key is a UUID
     async def find_by_name(self, name: str) -> list[OrderEntity]: ...
 ```
 
@@ -48,15 +56,23 @@ class OrderRepository(Repository[OrderEntity, int]):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter |
-| `pyfly.data.relational.url` | `str` | `"sqlite+aiosqlite:///pyfly.db"` | Database connection URL |
-| `pyfly.data.relational.echo` | `bool` | `false` | Log all SQL statements |
-| `pyfly.data.relational.ddl-auto` | `str` | `"create"` | DDL strategy: `create`, `create-drop`, or `none` |
+| `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter. Without it (and without a `RepositoryBeanPostProcessor` registered by hand) a relational repository with derived or `@query` methods fails the start: they would never be compiled, and each would answer `None` |
+| `pyfly.data.relational.url` | `str` | *(required)* | Database connection URL. Startup fails without it, except in the `dev` profile (`sqlite+aiosqlite:///./app.db`, with a warning) |
+| `pyfly.data.relational.echo` | `bool` or `debug` | `false` | Log all SQL statements (`debug` also logs rows); `"false"` from an env var is `false` |
+| `pyfly.data.relational.ddl-auto` | `str` | `create` on SQLite; `none` on a database server, and whenever `migrations.enabled` | Schema strategy: `none`, `validate`, `create` or `create-drop`; any other value fails the startup ([Schema Strategy](../modules/data-relational.md#schema-strategy-ddl-auto)) |
 | `pyfly.data.relational.pool.size` | `int` | *(driver default)* | Connection pool size (`pool_size`) |
 | `pyfly.data.relational.pool.max-overflow` | `int` | *(driver default)* | Max overflow connections above pool size |
 | `pyfly.data.relational.pool.timeout` | `float` | *(driver default)* | Seconds to wait for a connection from the pool |
-| `pyfly.data.relational.pool.recycle` | `int` | *(driver default)* | Seconds before a connection is recycled |
-| `pyfly.data.relational.pool.pre-ping` | `bool` | *(driver default)* | Issue a `SELECT 1` ping before each checkout |
+| `pyfly.data.relational.pool.recycle` | `int` | `1800` | Seconds before a connection is recycled (`-1` never) |
+| `pyfly.data.relational.pool.pre-ping` | `bool` | `false` | Test each pooled connection at checkout (the driver's ping on MySQL/MariaDB) and replace it if the server dropped it |
+| `pyfly.data.relational.connect-args.*` | mapping | — | Passed to the driver verbatim (asyncpg `statement_cache_size: 0` behind pgbouncer, `server_settings`, SSL, timeouts) |
+| `pyfly.data.relational.sqlite.*` | mapping | see below | `foreign-keys` (`true`), `journal-mode` (`WAL`), `synchronous` (`NORMAL`), `busy-timeout` (`5000` ms) |
+| `pyfly.data.relational.health.timeout` | `float` | `2` | Seconds each `db` readiness check may take |
+
+Every key accepts `${...}` placeholders and `PYFLY_*` overrides, and the same settings apply to the
+read replica, the named datasources and the datasources the framework modules use. All of them are
+built by one datasource registry; see
+[Datasource Registry](../modules/data-relational.md#datasource-registry).
 
 ### Database URLs by Driver
 
@@ -64,7 +80,12 @@ class OrderRepository(Repository[OrderEntity, int]):
 |----------|-----------|
 | SQLite | `sqlite+aiosqlite:///app.db` |
 | PostgreSQL | `postgresql+asyncpg://user:pass@host:5432/db` |
-| MySQL | `mysql+aiomysql://user:pass@host:3306/db` |
+| MySQL | `mysql+asyncmy://user:pass@host:3306/db` (`pyfly[mysql]`; `mysql+aiomysql://` also works) |
+| MariaDB | `mariadb+asyncmy://user:pass@host:3306/db` (`pyfly[mysql]`; `mariadb+aiomysql://` also works) |
+
+SQLite, PostgreSQL, MySQL 8 and MariaDB 11 are the databases the test suite runs on. On MySQL and
+MariaDB, `pool.pre-ping` needs SQLAlchemy 2.0.50 or later, which the `data-relational` extra requires:
+with 2.0.49 and PyMySQL 1.2 installed, every other pre-pinged checkout raised `TypeError`.
 
 ---
 
@@ -92,34 +113,41 @@ Compiles derived query method names into SQLAlchemy queries using the `QueryMeth
 Build dynamic queries with `Specification[T]`:
 
 ```python
-spec = (
-    Specification.where(field="status", op="eq", value="ACTIVE")
-    .and_where(field="total", op="gt", value=100)
-)
-results = await repository.find_all_by_spec(spec)
+from pyfly.data.relational.sqlalchemy import FilterOperator, Specification
+
+spec = FilterOperator.eq("status", "ACTIVE") & FilterOperator.gt("total", 100)
+recent = Specification(lambda root, q: q.where(root.total > 1000))   # a predicate of your own
+results = await repository.find_all_by_spec(spec | recent)
 ```
 
 ### Alembic Migrations
 
 ```bash
-pyfly db init          # Initialize Alembic
+pyfly db init          # Initialize Alembic (env.py imports your models and the framework tables)
 pyfly db migrate -m "add orders table"
-pyfly db upgrade       # Apply pending migrations
+pyfly db upgrade       # Apply pending migrations to pyfly.data.relational.url
 ```
 
 ---
 
 ## Testing
 
-Use SQLite in-memory for tests:
+Test repositories with `@DataTest` (or `data_slice(..., rollback=True)`): each test's units of work roll back
+when it ends. By default the slice runs on a SQLite **file** in the test's `tmp_path`; point it at the
+database you run in production with a container ([Testing](../modules/testing.md#datatest)):
 
-```yaml
-# pyfly-test.yaml
-pyfly:
-  data:
-    relational:
-      url: "sqlite+aiosqlite:///:memory:"
+```python
+@DataTest(beans=[OrderRepository])
+class TestOrders:
+    async def test_saves(self, data_context) -> None:
+        orders = data_context.get_bean(OrderRepository)
+        await orders.save(OrderEntity(name="first"))
+        assert await orders.count() == 1
 ```
+
+Do not test transaction semantics on `sqlite+aiosqlite:///:memory:`: an in-memory database lives on one
+connection that every session shares, so one session sees (and another's commit commits) writes that were never
+committed. It suits single-session unit tests only.
 
 ---
 

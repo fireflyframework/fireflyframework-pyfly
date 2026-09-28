@@ -26,6 +26,17 @@ _logger = logging.getLogger(__name__)
 _KEY_PREFIX = "pyfly:session:"
 _TYPE_KEY = "__pyfly_type__"
 
+# KEYS[1] the session's key, KEYS[2] its new key; ARGV[1] the data, ARGV[2] the TTL in seconds. The session
+# moves only while its key exists (an expired key does not): 1 when it moved, 0 when it was gone.
+_RENAME = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+redis.call('DEL', KEYS[1])
+return 1
+"""
+
 # Tagged dataclass types allowed to be reconstructed from session JSON on read.
 # Restricting this prevents an arbitrary-object instantiation gadget if the
 # session store is ever attacker-writable. Framework types are pre-registered;
@@ -89,6 +100,7 @@ class RedisSessionStore:
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        self._rename: Any = None
 
     def _key(self, session_id: str) -> str:
         return f"{_KEY_PREFIX}{session_id}"
@@ -108,6 +120,22 @@ class RedisSessionStore:
         """Serialize and store session data with a TTL in seconds."""
         raw = json.dumps(data, default=_json_default)
         await self._client.set(self._key(session_id), raw.encode(), ex=ttl)
+
+    async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Serialize and store the session data with a TTL in seconds only if the key exists (``SET ... XX``,
+        one atomic command); ``False`` when the session is gone (deleted or expired), and nothing is written."""
+        raw = json.dumps(data, default=_json_default)
+        return bool(await self._client.set(self._key(session_id), raw.encode(), ex=ttl, xx=True))
+
+    async def rename(self, old_id: str, new_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Move the session to *new_id* with *data* and a TTL in seconds only if its key exists, in one Lua
+        script (both keys must be on one node: a Redis Cluster needs them in one hash slot); ``False`` when the
+        session is gone (deleted or expired), and nothing is written."""
+        if self._rename is None:
+            self._rename = self._client.register_script(_RENAME)
+        raw = json.dumps(data, default=_json_default)
+        moved = await self._rename(keys=[self._key(old_id), self._key(new_id)], args=[raw.encode(), ttl])
+        return bool(int(moved))
 
     async def delete(self, session_id: str) -> None:
         """Remove a session."""

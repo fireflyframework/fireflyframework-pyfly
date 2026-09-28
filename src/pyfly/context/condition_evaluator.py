@@ -20,6 +20,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any, cast
 
+from pyfly.container.types import Scope
+
 if TYPE_CHECKING:
     from pyfly.container.container import Container
     from pyfly.core.config import Config
@@ -144,12 +146,14 @@ class ConditionEvaluator:
         return os.path.exists(cond["path"])
 
     def _eval_on_missing_bean(self, cond: dict[str, Any], declaring_cls: type | None = None) -> bool:
-        return not self._has_bean_of_type(cond["bean_type"], exclude=declaring_cls)
+        return not self._has_bean_of_type(
+            cond["bean_type"], exclude=declaring_cls, singletons_only=bool(cond.get("singletons_only", False))
+        )
 
     def _eval_on_bean(self, cond: dict[str, Any], declaring_cls: type | None = None) -> bool:
         return self._has_bean_of_type(cond["bean_type"], exclude=declaring_cls)
 
-    def _has_bean_of_type(self, bean_type: type, *, exclude: type | None = None) -> bool:
+    def _has_bean_of_type(self, bean_type: type, *, exclude: type | None = None, singletons_only: bool = False) -> bool:
         """Check if any registered bean is the given type, or a subclass of it.
 
         ``exclude`` (the declaring class) is skipped so a configuration's own bean
@@ -160,8 +164,18 @@ class ConditionEvaluator:
         ``_candidate_bean_groups`` below). Previously exact matches were skipped, which
         broke ``@conditional_on_bean(T)`` for any bean registered exactly as ``T`` and
         forced callers to subclass ``T`` purely to be detected.
+
+        With *singletons_only*, only a singleton registration counts. Every registration is looked
+        at, not only the by-type slot, which holds the last one of a class: a singleton registered
+        before a scoped bean of the same class still counts.
         """
-        for cls in self._container._registrations:
+        if singletons_only:
+            registered = {id(reg): (cls, reg) for (cls, _name), reg in self._container._all.items()}
+            registered.update((id(reg), (cls, reg)) for cls, reg in self._container._registrations.items())
+            classes = [cls for cls, reg in registered.values() if reg.scope == Scope.SINGLETON]
+        else:
+            classes = list(self._container._registrations)
+        for cls in classes:
             if cls is exclude:
                 continue
             if cls is bean_type:

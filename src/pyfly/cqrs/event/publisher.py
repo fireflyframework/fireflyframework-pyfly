@@ -19,8 +19,9 @@ Mirrors Java's ``CommandEventPublisher`` / ``EdaCommandEventPublisher``.
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, is_dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from pyfly.domain.domain_event import DomainEvent, event_payload
 
 if TYPE_CHECKING:
     from pyfly.eda.ports.outbound import EventPublisher
@@ -51,21 +52,29 @@ class EdaCommandEventPublisher:
 
     * ``event_type`` is taken from the event's ``event_type`` attribute when
       present, otherwise the event class name.
-    * ``payload`` is the event serialised to a ``dict`` — via
-      :func:`dataclasses.asdict` for dataclasses, else ``__dict__``.
+    * ``payload`` is the event's JSON form: :meth:`pyfly.domain.DomainEvent.to_payload` (instants in
+      ISO-8601 UTC), or the same conversion of a dataclass's fields (else ``__dict__``) for any other event
+      (:func:`pyfly.domain.domain_event.event_payload`), so every bus can serialize it.
+
+    :attr:`joins_transactions` is the producer's: an outbox bus writes the event in the caller's unit of
+    work, and the command bus then publishes inside that unit instead of after its commit. That unit must still
+    be open, on the outbox's datasource: a handler whose own ``@transactional`` unit committed before the bus
+    publishes has its events written afterwards, in a unit of their own.
     """
 
     def __init__(self, producer: EventPublisher, default_destination: str = "cqrs.events") -> None:
         self._producer = producer
         self._default_destination = default_destination
 
+    @property
+    def joins_transactions(self) -> bool:
+        """Whether a publish joins the caller's unit of work (the producer is an outbox bus)."""
+        return bool(getattr(self._producer, "joins_transactions", False))
+
     async def publish(self, event: Any, *, destination: str | None = None) -> None:
         target = destination or self._default_destination
         event_type = str(getattr(event, "event_type", None) or type(event).__name__)
-        if is_dataclass(event) and not isinstance(event, type):
-            payload: dict[str, Any] = asdict(event)
-        else:
-            payload = dict(getattr(event, "__dict__", {}))
+        payload: dict[str, Any] = event.to_payload() if isinstance(event, DomainEvent) else event_payload(event)
         try:
             await self._producer.publish(target, event_type, payload)
             _logger.debug("Published event %s to %s", event_type, target)

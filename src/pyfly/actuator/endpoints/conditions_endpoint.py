@@ -37,7 +37,9 @@ def _describe(cond: dict[str, Any]) -> str:
     if ctype == "on_bean":
         return f"@conditional_on_bean({getattr(cond.get('bean_type'), '__name__', cond.get('bean_type'))})"
     if ctype == "on_missing_bean":
-        return f"@conditional_on_missing_bean({getattr(cond.get('bean_type'), '__name__', cond.get('bean_type'))})"
+        bean_type = getattr(cond.get("bean_type"), "__name__", cond.get("bean_type"))
+        scope = ", singletons_only=True" if cond.get("singletons_only") else ""
+        return f"@conditional_on_missing_bean({bean_type}{scope})"
     return f"@conditional({ctype})"
 
 

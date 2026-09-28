@@ -31,6 +31,17 @@ class TestMessageListenerDecorator:
         assert handle_order.__pyfly_listener_topic__ == "orders"
         assert handle_order.__pyfly_listener_group__ == "workers"
 
+    def test_retry_settings_default_to_the_container_s(self) -> None:
+        """``None`` retries and delay keep the listener container's policy (5 attempts, back-off > 0)."""
+
+        @message_listener("orders")
+        async def handle_order(msg: Message) -> None:
+            pass
+
+        assert handle_order.__pyfly_listener_retries__ is None
+        assert handle_order.__pyfly_listener_retry_delay__ is None
+        assert handle_order.__pyfly_listener_dlq__ is None
+
     def test_metadata_without_group(self) -> None:
         """When no group is provided, __pyfly_listener_group__ should be None."""
 

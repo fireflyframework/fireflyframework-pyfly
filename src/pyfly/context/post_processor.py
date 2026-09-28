@@ -22,9 +22,14 @@ from typing import Any, Protocol, runtime_checkable
 class BeanPostProcessor(Protocol):
     """Hook into bean initialization.
 
-    Implementations are called for every bean created by the ApplicationContext:
+    Implementations are called for every bean created by the ApplicationContext, of every scope:
     - ``before_init``: called before @post_construct
     - ``after_init``: called after @post_construct
+
+    A post-processor that hands the beans it processes to something that outlives them (a registry,
+    an event bus) declares the class attribute ``singletons_only = True``: the context then calls it
+    for singletons only, and calls its optional ``non_singleton_skipped(bean, bean_name, scope)`` for
+    each TRANSIENT, REQUEST, SESSION or custom-scoped instance it skipped.
     """
 
     def before_init(self, bean: Any, bean_name: str) -> Any:

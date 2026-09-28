@@ -11,24 +11,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""SQLAlchemy query-metrics adapter — R2dbcMetrics parity.
+"""SQLAlchemy query and pool metrics — R2dbcMetrics / HikariCP metrics parity.
 
-Attaches SQLAlchemy core event listeners to the engine's ``sync_engine`` to
-record per-operation query duration (histogram), query count (counter), and
-query errors (counter) via a :class:`~pyfly.observability.ports.MetricsRecorder`.
+:class:`SqlAlchemyQueryMetrics` attaches SQLAlchemy core event listeners to an engine's
+``sync_engine`` to record per-operation query duration (histogram), query count (counter), and
+query errors (counter) via a :class:`~pyfly.observability.ports.MetricsRecorder`. The ``operation``
+label is restricted to ``{SELECT, INSERT, UPDATE, DELETE, OTHER}`` so Prometheus cardinality stays
+bounded regardless of query shape.
 
-The ``operation`` label is restricted to ``{SELECT, INSERT, UPDATE, DELETE, OTHER}``
-so Prometheus cardinality stays bounded regardless of query shape.
+:class:`SqlAlchemyPoolMetrics` exports each datasource's connection pool (labeled ``datasource``):
+configured size, connections checked out, idle connections, overflow in use, invalidated connections,
+and the time checkouts take to obtain a connection. The relational auto-configuration binds both to
+every engine of the datasource registry.
 """
 
 from __future__ import annotations
 
 import time
+import weakref
 from typing import Any
 
 from pyfly.observability.ports import MetricsRecorder
 
 _KNOWN_OPS = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
+
+# From an idle pooled connection (tens of microseconds) to a checkout that waited out pool.timeout.
+_ACQUIRE_BUCKETS = (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0)
 
 
 def _operation(statement: str) -> str:
@@ -138,3 +146,117 @@ class SqlAlchemyQueryMetrics:
         """Increment the error counter when a statement raises a DB-level error."""
         op = _operation(exception_context.statement or "")
         self._errors.labels(operation=op).inc()
+
+
+class SqlAlchemyPoolMetrics:
+    """Exports connection-pool gauges per datasource, the HikariCP metrics equivalent.
+
+    ============================================  ===========================================
+    Metric (label ``datasource``)                 Meaning
+    ============================================  ===========================================
+    ``pyfly_db_pool_size``                        Configured pool size
+    ``pyfly_db_pool_checked_out``                 Connections in use
+    ``pyfly_db_pool_idle``                        Connections idle in the pool
+    ``pyfly_db_pool_overflow``                    Overflow connections in use (0 when none)
+    ``pyfly_db_pool_invalidated_total``           Connections invalidated (disconnects, errors)
+    ``pyfly_db_pool_acquire_seconds``             Histogram: time a checkout took to obtain its
+                                                  connection (the wait for an idle one, a
+                                                  connect, the pre-ping)
+    ============================================  ===========================================
+
+    With the Prometheus recorder the gauges are read from the pool at scrape time, so they are exact
+    at rest and under load; with a recorder whose gauges have no ``set_function`` they are refreshed on
+    every checkout and checkin. The gauges cover queue pools (every server database and SQLite files);
+    the in-memory SQLite ``StaticPool`` has one connection and reports invalidations only. The acquire
+    histogram needs the registry's
+    :class:`~pyfly.data.relational.datasource_registry.MeteredAsyncQueuePool`, which every registry
+    engine with a queue pool has; an acquire time near ``pool.timeout`` means the pool is exhausted.
+    The datasource label is the registry's ``qualified_name`` (``primary``, ``primary.replica``, ...).
+    """
+
+    def __init__(self, recorder: MetricsRecorder) -> None:
+        self._size: Any = recorder.gauge("pyfly_db_pool_size", "Configured connection pool size", labels=["datasource"])
+        self._checked_out: Any = recorder.gauge(
+            "pyfly_db_pool_checked_out", "Pooled connections in use", labels=["datasource"]
+        )
+        self._idle: Any = recorder.gauge("pyfly_db_pool_idle", "Pooled connections idle", labels=["datasource"])
+        self._overflow: Any = recorder.gauge(
+            "pyfly_db_pool_overflow", "Overflow connections in use", labels=["datasource"]
+        )
+        self._invalidated: Any = recorder.counter(
+            "pyfly_db_pool_invalidated_total", "Pooled connections invalidated", labels=["datasource"]
+        )
+        self._acquire: Any = recorder.histogram(
+            "pyfly_db_pool_acquire_seconds",
+            "Time a checkout took to obtain its pooled connection",
+            labels=["datasource"],
+            buckets=_ACQUIRE_BUCKETS,
+        )
+        # The labels each engine is exported under; weak, so a dropped engine leaves (and a new engine
+        # that happens to reuse its id is still bound).
+        self._bound: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
+
+    def bind(self, datasource: str, engine: Any) -> None:
+        """Export *engine*'s pool under the label *datasource* (idempotent per engine and label)."""
+        labels = self._bound.setdefault(engine, set())
+        if datasource in labels:
+            return
+        labels.add(datasource)
+
+        from sqlalchemy import event
+
+        sync_engine = engine.sync_engine
+        # The recorder may be process-wide (Prometheus' default registry) and read the gauges at scrape
+        # time: the readings hold the engine weakly, so a closed and dropped registry's engines can go.
+        engine_ref = weakref.ref(sync_engine)
+        readings: dict[Any, Any] = {
+            self._size: lambda: _pool_stat(engine_ref(), "size"),
+            self._checked_out: lambda: _pool_stat(engine_ref(), "checkedout"),
+            self._idle: lambda: _pool_stat(engine_ref(), "checkedin"),
+            self._overflow: lambda: max(_pool_stat(engine_ref(), "overflow"), 0),
+        }
+        live = True
+        for gauge, reading in readings.items():
+            child = gauge.labels(datasource=datasource)
+            set_function = getattr(child, "set_function", None)
+            if callable(set_function):
+                set_function(reading)
+            else:
+                live = False
+        if not live:
+
+            def _refresh(*_args: Any) -> None:
+                for gauge, reading in readings.items():
+                    setter = getattr(gauge.labels(datasource=datasource), "set", None)
+                    if callable(setter):  # a recorder without settable gauges records nothing here
+                        setter(reading())
+
+            for name in ("connect", "checkout", "checkin", "close", "detach"):
+                event.listen(sync_engine, name, _refresh)
+            _refresh()
+
+        invalidated = self._invalidated.labels(datasource=datasource)
+
+        def _on_invalidate(*_args: Any) -> None:
+            invalidated.inc()
+
+        event.listen(sync_engine, "invalidate", _on_invalidate)
+        event.listen(sync_engine, "soft_invalidate", _on_invalidate)
+
+        add_acquire_observer = getattr(sync_engine.pool, "add_acquire_observer", None)
+        if callable(add_acquire_observer):
+            add_acquire_observer(self._acquire.labels(datasource=datasource).observe)
+
+
+def _pool_stat(sync_engine: Any, name: str) -> int:
+    """One statistic of the engine's current pool (it changes on ``dispose()``).
+
+    0 when the pool does not track it, or when the engine is gone.
+    """
+    if sync_engine is None:
+        return 0
+    reader = getattr(sync_engine.pool, name, None)
+    if not callable(reader):
+        return 0
+    value = reader()
+    return int(value) if isinstance(value, int) else 0

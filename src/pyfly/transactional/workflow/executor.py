@@ -16,6 +16,15 @@
 Handles step pre-conditions (signal waits, timer waits, child workflows),
 delegates the actual method call to the shared :class:`StepInvoker`, and
 emits lifecycle events through :class:`OrchestrationEvents`.
+
+Each step runs in a task of its own named ``workflow-step-<id>``, started with the transaction state
+cleared (:func:`pyfly.data.transaction.detached`): its ``@transactional`` work is its own unit of work, never
+the caller's. A layer runs through the backpressure strategy, which settles every step it started before it
+returns or raises: when a step fails, its running siblings are cancelled and awaited first. Compensation then
+undoes every compensatable step whose work committed, the ones that completed and the ones that failed or were
+cancelled after committing (a sibling cancelled while its ``COMMIT`` was in flight commits, since commits are
+shielded, and :func:`pyfly.data.transaction.track_commits` tells). It runs in a task of its own with the
+transaction state cleared, to completion even when the workflow is being cancelled or timed out.
 """
 
 from __future__ import annotations
@@ -26,6 +35,8 @@ import logging
 import time
 from typing import Any
 
+from pyfly.data.transaction import detached
+from pyfly.data.transaction.template import run_shielded
 from pyfly.transactional.core.argument import ArgumentResolver
 from pyfly.transactional.core.backpressure import (
     AdaptiveBackpressureStrategy,
@@ -76,11 +87,17 @@ class WorkflowExecutor:
         # so the event loop does not GC-cancel them mid-flight (audit #60/#62).
         self._async_step_tasks: set[asyncio.Task[Any]] = set()
 
+    @property
+    def background_tasks(self) -> frozenset[asyncio.Task[Any]]:
+        """The fire-and-forget ``async_`` step tasks still in flight (the engine waits for them on stop)."""
+        return frozenset(self._async_step_tasks)
+
     async def execute(self, definition: WorkflowDefinition, ctx: ExecutionContext) -> None:
         """Run all steps respecting their dependency graph.
 
-        On any step failure, already-completed *compensatable* steps are rolled
-        back (in reverse execution order) before the original error propagates.
+        On any step failure (or a cancellation, a workflow timeout included), once every running sibling has
+        settled, the compensatable steps whose work committed are rolled back (in reverse execution order)
+        before the original error propagates.
         """
         layers = TopologyBuilder.build_layers(definition.graph())
         try:
@@ -88,7 +105,12 @@ class WorkflowExecutor:
                 steps = [definition.steps[sid] for sid in layer]
                 await self._execute_layer(definition, ctx, steps)
         except BaseException as exc:
-            await self._compensate(definition, ctx, layers, exc)
+            compensation = detached(
+                self._compensate(definition, ctx, layers, exc), name=f"workflow-compensation-{definition.id}"
+            )
+            _result, _error, cancelled = await run_shielded(compensation)
+            if cancelled and not isinstance(exc, asyncio.CancelledError):
+                raise asyncio.CancelledError from exc
             raise
 
     async def _compensate(
@@ -98,13 +120,14 @@ class WorkflowExecutor:
         layers: list[list[str]],
         error: BaseException,
     ) -> None:
-        """Roll back completed compensatable steps in reverse execution order.
+        """Roll back the compensatable steps whose work committed, in reverse execution order.
 
-        The set of completed steps is derived from the context (a step may have
-        succeeded concurrently with the one that failed), and ordered using the
-        topology layers so compensation runs newest-first. Compensation errors
-        are recorded and surfaced via events but never mask the original
-        failure that triggered the rollback.
+        The set of steps is derived from the context once every sibling has settled: the completed steps, and
+        the steps that failed or were cancelled after work of theirs committed
+        (:meth:`~pyfly.transactional.core.context.ExecutionContext.has_step_committed`); a skipped step is
+        not compensated. They are ordered using the topology layers so compensation runs newest-first.
+        Compensation errors are recorded and surfaced via events but never mask the original failure that
+        triggered the rollback.
         """
         completed_ids: list[str] = []
         for layer in layers:
@@ -112,7 +135,7 @@ class WorkflowExecutor:
                 step = definition.steps.get(step_id)
                 if step is None or not step.compensatable or step.compensation_method is None:
                     continue
-                if ctx.is_step_done(step_id):
+                if ctx.has_step_committed(step_id):
                     completed_ids.append(step_id)
 
         if not completed_ids:
@@ -161,7 +184,8 @@ class WorkflowExecutor:
         steps: list[WorkflowStepDefinition],
     ) -> None:
         async def run_one(step: WorkflowStepDefinition) -> None:
-            await self._run_step(definition, ctx, step)
+            # Its own task, with the transaction state cleared; cancelling run_one cancels it and awaits it.
+            await detached(self._run_step(definition, ctx, step), name=f"workflow-step-{step.id}")
 
         await self._backpressure.apply(steps, run_one)
 
@@ -267,7 +291,7 @@ class WorkflowExecutor:
         # Async steps fire-and-forget: schedule the invocation and let the
         # workflow proceed without blocking the layer (audit #60).
         if step.async_:
-            task = asyncio.create_task(self._run_step_body(definition, ctx, step))
+            task = detached(self._run_step_body(definition, ctx, step), name=f"workflow-async-step-{step.id}")
             self._async_step_tasks.add(task)
             task.add_done_callback(self._async_step_tasks.discard)
             return

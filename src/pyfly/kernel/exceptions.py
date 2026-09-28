@@ -89,12 +89,27 @@ class InvalidRequestException(BusinessException):
     """Request is syntactically valid but semantically incorrect."""
 
 
-class DataIntegrityException(BusinessException):
-    """Data integrity constraint violated."""
+class DataIntegrityException(ConflictException):
+    """Data integrity constraint violated (a duplicate key, a missing foreign row, a failed check).
+
+    A conflict with the current state, so HTTP 409. The persistence layer raises it for its backends'
+    integrity errors (``pyfly.data.exception_translation``), with ``context["violation"]`` (``unique``,
+    ``foreign_key``, ``not_null``, ``check``, ``exclusion``) and ``context["constraint"]`` (the violated
+    constraint's name, when the backend reports it) and a message that carries neither SQL nor values.
+    """
 
 
-class ConcurrencyException(BusinessException):
-    """Concurrent modification conflict (e.g. optimistic locking failure)."""
+class DuplicateKeyException(DataIntegrityException):
+    """A unique or primary key constraint was violated (Spring's ``DuplicateKeyException``)."""
+
+
+class ConcurrencyException(ConflictException):
+    """Concurrent modification conflict (e.g. optimistic locking failure). HTTP 409."""
+
+
+class OptimisticLockingFailureException(ConcurrencyException):
+    """The entity was changed or deleted by another transaction since it was read: its optimistic lock
+    (``VersionedMixin``) failed (Spring's ``OptimisticLockingFailureException``)."""
 
 
 class LockedResourceException(BusinessException):

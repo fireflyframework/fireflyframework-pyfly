@@ -1,0 +1,187 @@
+# Copyright 2026 Firefly Software Foundation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Session auto-configuration: the SQL session store, the registry's datasource and the store it checks
+(WP10b: C076, C154)."""
+
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from pyfly.context.application_context import ApplicationContext
+from pyfly.core.config import Config
+from pyfly.data.relational.datasource_registry import DataSourceRegistry
+from pyfly.session.adapters.memory import InMemorySessionStore
+from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
+from pyfly.session.adapters.sql_session_store import SqlSessionStore
+from pyfly.session.concurrency import SessionConcurrencyController
+from pyfly.session.ports.outbound import SessionStore
+
+
+def _config(tmp_path: Path, **session: Any) -> Config:
+    return Config(
+        {
+            "pyfly": {
+                "data": {"relational": {"enabled": True, "url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"}},
+                "session": {"enabled": True, **session},
+            }
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_store_postgres_is_the_sql_session_store_on_the_primary(tmp_path: Path) -> None:
+    ctx = ApplicationContext(
+        _config(tmp_path, store="postgres", concurrency={"enabled": True, "registry": "postgres", "max-sessions": 1})
+    )
+    await ctx.start()
+    try:
+        store = ctx.get_bean(SessionStore)
+        assert isinstance(store, SqlSessionStore)
+        assert store.engine is ctx.get_bean(DataSourceRegistry).engine()
+        controller = ctx.get_bean(SessionConcurrencyController)
+        assert isinstance(controller._registry, PostgresSessionRegistry)
+        assert controller.session_store is store
+
+        await store.save("s1", {"user": "ann"}, ttl=60)
+        assert await controller.on_login("ann", "s1", time.time())
+        await store.save("s2", {"user": "ann"}, ttl=60)
+        assert await controller.on_login("ann", "s2", time.time())  # evict-oldest: s1 goes
+        assert await store.get("s1") is None
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_cross_process_registry_beside_a_process_local_store_is_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C154: the registry is shared, the sessions are not: evicting a session another instance holds leaves it
+    usable there, and the registrations of dead sessions are not dropped."""
+    from pyfly.container.container import Container
+    from pyfly.session.auto_configuration import SessionConcurrencyAutoConfiguration
+
+    config = _config(tmp_path, concurrency={"registry": "postgres"})
+    store = InMemorySessionStore()
+    try:
+        with caplog.at_level(logging.WARNING, logger="pyfly.session.auto_configuration"):
+            controller = SessionConcurrencyAutoConfiguration().session_concurrency_controller(
+                config, store, Container()
+            )
+    finally:
+        # Without a context, the registry resolves its datasource in the configuration's DataSourceRegistry.
+        await DataSourceRegistry.for_config(config).close()
+
+    warnings = [record.getMessage() for record in caplog.records]
+    [warning] = [message for message in warnings if message.startswith("session_registry_not_shared")]
+    assert "keep counting toward the cap" in warning
+    # This instance's store knows only this instance's sessions: it must not tell the controller which of the
+    # shared registrations are dead.
+    assert controller.session_store is None
+
+
+@pytest.mark.asyncio
+async def test_a_shared_registry_beside_process_local_stores_caps_every_instance(tmp_path: Path) -> None:
+    """C154 (review): two instances share the SQL registry, each keeps its sessions in memory. The login on
+    the second instance asked its own store about the first instance's live session, found nothing, dropped
+    the registration and got in: max-sessions=1 no longer held across the instances."""
+    concurrency = {"enabled": True, "registry": "postgres", "max-sessions": 1, "strategy": "reject-new"}
+    contexts = [ApplicationContext(_config(tmp_path, concurrency=concurrency)) for _ in range(2)]
+    started: list[ApplicationContext] = []
+    try:
+        for ctx in contexts:
+            await ctx.start()
+            started.append(ctx)
+        (first, first_store), (second, second_store) = (
+            (ctx.get_bean(SessionConcurrencyController), ctx.get_bean(SessionStore)) for ctx in contexts
+        )
+        assert isinstance(first_store, InMemorySessionStore)
+
+        await first_store.save("on-first", {"user": "carol"}, ttl=600)
+        assert await first.on_login("carol", "on-first", time.time())
+        await second_store.save("on-second", {"user": "carol"}, ttl=600)
+
+        assert not await second.on_login("carol", "on-second", time.time())
+        assert await second.purge_expired() == 0
+        assert await second.registry.list_sessions("carol") == [("on-first", pytest.approx(time.time(), abs=60))]
+    finally:
+        for ctx in reversed(started):
+            await ctx.stop()
+
+
+@pytest.mark.parametrize("key", ["store", "concurrency.registry"])
+def test_an_unknown_backend_fails_fast(tmp_path: Path, key: str) -> None:
+    """``store: jdbc`` silently became the in-memory store."""
+    from pyfly.container.container import Container
+    from pyfly.session.auto_configuration import SessionConcurrencyAutoConfiguration, SessionStoreAutoConfiguration
+
+    if key == "store":
+        with pytest.raises(ValueError, match="pyfly.session.store"):
+            SessionStoreAutoConfiguration().session_store(_config(tmp_path, store="jdbc"), Container())
+    else:
+        with pytest.raises(ValueError, match="pyfly.session.concurrency.registry"):
+            SessionConcurrencyAutoConfiguration().session_concurrency_controller(
+                _config(tmp_path, concurrency={"registry": "jdbc"}), InMemorySessionStore(), Container()
+            )
+
+
+def test_a_redis_registry_without_its_driver_falls_back_loudly(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """registry=redis without redis.asyncio silently became the in-memory registry: the cap no longer held
+    across the instances and nothing said so."""
+    from pyfly.config.auto import AutoConfiguration
+    from pyfly.container.container import Container
+    from pyfly.session.auto_configuration import SessionConcurrencyAutoConfiguration
+    from pyfly.session.concurrency import InMemorySessionRegistry
+
+    available = AutoConfiguration.is_available
+    monkeypatch.setattr(
+        AutoConfiguration, "is_available", staticmethod(lambda module: module != "redis.asyncio" and available(module))
+    )
+    store = InMemorySessionStore()
+    with caplog.at_level(logging.WARNING, logger="pyfly.session.auto_configuration"):
+        controller = SessionConcurrencyAutoConfiguration().session_concurrency_controller(
+            _config(tmp_path, concurrency={"registry": "redis"}), store, Container()
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith("session_registry_fallback") for message in messages)
+    assert not any(message.startswith("session_registry_not_shared") for message in messages)
+    assert isinstance(controller.registry, InMemorySessionRegistry)
+    assert controller.session_store is store  # a registry of this instance: its store knows every session
+
+
+def test_the_in_memory_registry_is_purged_on_the_session_ttl(tmp_path: Path) -> None:
+    """C076: the default registry kept every registration until a logout or a restart. It comes due for a
+    liveness check one session TTL after it was registered, and the controller gets the store to check it."""
+    from datetime import timedelta
+
+    from pyfly.container.container import Container
+    from pyfly.session.auto_configuration import SessionConcurrencyAutoConfiguration
+    from pyfly.session.concurrency import ExpiringSessionRegistry, InMemorySessionRegistry
+
+    store = InMemorySessionStore()
+    controller = SessionConcurrencyAutoConfiguration().session_concurrency_controller(
+        _config(tmp_path, ttl=90, concurrency={"enabled": True}), store, Container()
+    )
+
+    registry = controller.registry
+    assert isinstance(registry, InMemorySessionRegistry) and isinstance(registry, ExpiringSessionRegistry)
+    assert registry._ttl == timedelta(seconds=90)
+    assert controller.session_store is store

@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar, overload
 
-from pyfly.container.types import Scope
+from pyfly.container.types import Scope, ScopeSpec
 
 T = TypeVar("T", bound=type)
 
@@ -43,7 +43,7 @@ def _make_stereotype(stereotype_name: str) -> Callable[..., Any]:
     def stereotype(
         *,
         name: str = "",
-        scope: Scope = Scope.SINGLETON,
+        scope: ScopeSpec = Scope.SINGLETON,
         profile: str = "",
         condition: Callable[..., bool] | None = None,
     ) -> Callable[[T], T]: ...
@@ -52,7 +52,7 @@ def _make_stereotype(stereotype_name: str) -> Callable[..., Any]:
         cls: T | None = None,
         *,
         name: str = "",
-        scope: Scope = Scope.SINGLETON,
+        scope: ScopeSpec = Scope.SINGLETON,
         profile: str = "",
         condition: Callable[..., bool] | None = None,
     ) -> T | Callable[[T], T]:

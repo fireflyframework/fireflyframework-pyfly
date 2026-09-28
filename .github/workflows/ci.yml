@@ -67,18 +67,6 @@ jobs:
       - name: Run tests
         run: >
           uv run pytest tests/
-          --ignore=tests/data/document
-          --ignore=tests/data/test_mongo_batch_operations.py
-          --ignore=tests/data/test_mongo_document.py
-          --ignore=tests/data/test_mongo_filter.py
-          --ignore=tests/data/test_mongo_post_processor.py
-          --ignore=tests/data/test_mongo_query_decorator.py
-          --ignore=tests/data/test_mongo_projection_query.py
-          --ignore=tests/data/test_mongo_query_compiler.py
-          --ignore=tests/data/test_mongo_repository.py
-          --ignore=tests/data/test_mongo_repository_parity.py
-          --ignore=tests/data/test_mongo_specification.py
-          --ignore=tests/data/test_mongo_wiring.py
           -q --tb=short
           --cov=src/pyfly --cov-report=term-missing --cov-report=xml
       - name: Upload coverage
@@ -87,6 +75,59 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  test-sqlalchemy-2-0:
+    name: Test (SQLAlchemy 2.0)
+    # The lock holds the latest SQLAlchemy (2.1); PyFly keeps supporting the 2.0 line (>=2.0.50). This job
+    # type-checks the package and runs the fast suite, the sqlite-file lane of the backend matrix included, on
+    # the newest 2.0 release. `uv run --no-sync` keeps it: a syncing `uv run` would put the locked 2.1 back.
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras --no-extra pii --group dev
+      - name: Install the SQLAlchemy 2.0 line
+        run: |
+          uv pip install "sqlalchemy[asyncio]>=2.0.50,<2.1"
+          uv run --no-sync python -c "import sqlalchemy as sa; print(sa.__version__); assert sa.__version__[:4] == '2.0.'"
+      - run: uv run --no-sync mypy src/pyfly --strict
+      - name: Run tests
+        run: >
+          uv run --no-sync pytest tests/
+          -q --tb=short
+
+  integration-sqlalchemy-2-0:
+    name: Integration lane integration-pg (SQLAlchemy 2.0)
+    # The pg lane on the SQLAlchemy 2.0 line (the sqlite-file lane runs in test-sqlalchemy-2-0: it has no
+    # integration marker). Same trigger policy as the other Docker jobs: manual dispatch + nightly, not a PR gate.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras --no-extra pii --group dev
+      - name: Install the SQLAlchemy 2.0 line
+        run: |
+          uv pip install "sqlalchemy[asyncio]>=2.0.50,<2.1"
+          uv run --no-sync python -c "import sqlalchemy as sa; print(sa.__version__); assert sa.__version__[:4] == '2.0.'"
+      - name: Run the integration-pg lane (Docker required — fail, don't skip)
+        env:
+          PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
+        run: uv run --no-sync pytest -m "integration and pg" tests/ -q --tb=short
 
   integration:
     name: Integration (Docker)
@@ -106,6 +147,39 @@ jobs:
         env:
           PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
         run: uv run pytest -m integration tests/integration -q --tb=short
+
+  integration-lanes:
+    name: Integration lane (${{ matrix.lane }})
+    # One job per database of the backend matrix (tests/support/backend_matrix.py), over the whole tests/
+    # tree, so backend-matrix tests outside tests/integration run on every server too. The sqlite-file lane
+    # is the `test` job. Same trigger policy as `integration`: manual dispatch + nightly, not a PR gate.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: integration-pg
+            marker: pg
+          - lane: integration-mysql
+            marker: mysql
+          - lane: integration-mariadb
+            marker: mariadb
+          - lane: integration-mongo-rs
+            marker: mongo
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --no-extra pii --group dev
+      - name: Run the ${{ matrix.lane }} lane (Docker required — fail, don't skip)
+        env:
+          PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
+        run: uv run pytest -m "integration and ${{ matrix.marker }}" tests/ -q --tb=short
 
   build:
     name: Build

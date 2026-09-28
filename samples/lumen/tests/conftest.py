@@ -82,10 +82,12 @@ async def repository(
 ) -> AsyncIterator[WalletRepository]:
     """The framework :class:`WalletRepository`, post-processed.
 
-    A single shared session backs reads/queries — exactly the shape the
-    container injects (one ``async_session`` bean). Command handlers swap a
-    per-unit-of-work session onto it via ``@transactional`` using the same
-    ``session_factory``.
+    Built with a session of its own (the repository's *manual mode*: it uses
+    that session as it is, in and outside ``@transactional``), so the
+    handlers' writes and the queries share one in-memory database session.
+    The booted application builds the repository without a session instead,
+    and there every call joins the unit of work of the handler that makes it
+    (``test_app_context_integration.py``, ``test_concurrent_balance_changes.py``).
     """
     session = session_factory()
     repo = WalletRepository(WalletEntity, session)

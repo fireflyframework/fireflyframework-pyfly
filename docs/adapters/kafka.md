@@ -56,7 +56,7 @@ When `provider` is `"auto"`, PyFly selects the adapter based on which library is
 Implements `MessageBrokerPort` using `AIOKafkaProducer` and `AIOKafkaConsumer`.
 
 - **Publishing:** Serializes messages to JSON and sends to the specified topic with optional headers
-- **Subscribing:** Creates async consumer loops with consumer group support
+- **Subscribing:** Creates async consumer loops with consumer group support and auto-commit off: an offset is committed after the listener's unit of work commits, a failed record is sought back and attempted again after a back-off, then published to `<topic>.DLT`. See [Delivery Guarantees](../modules/messaging.md#delivery-guarantees).
 - **Headers:** Encodes/decodes message headers (string values)
 
 ### Consumer Groups
@@ -66,7 +66,7 @@ The `group` parameter on `@message_listener` maps directly to Kafka consumer gro
 ### Lifecycle
 
 - `start()` — Starts the Kafka producer and all consumer loops
-- `stop()` — Gracefully stops consumers and flushes the producer
+- `stop()` — Gracefully stops consumers (waiting for the records in flight, never committing the offset of one it has to cancel) and flushes the producer
 
 ---
 

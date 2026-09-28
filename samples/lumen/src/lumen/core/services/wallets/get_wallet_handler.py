@@ -4,7 +4,8 @@
 
 A read-side handler: it loads the wallet row through ``find_by_id`` and
 projects it onto the public :class:`WalletDto`. Reads do not mutate, so no
-transaction is needed — the repository's injected session is used directly.
+transaction is needed: outside one, the repository runs the read in a short
+read-only unit of its own.
 """
 
 from __future__ import annotations

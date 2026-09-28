@@ -16,7 +16,7 @@
 import pytest
 
 from pyfly.container.bean import bean
-from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError
+from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError, NoUniqueBeanError
 from pyfly.container.stereotypes import configuration, service
 from pyfly.context.application_context import ApplicationContext
 from pyfly.context.lifecycle import post_construct
@@ -47,6 +47,44 @@ class TestBeanMethodErrors:
         err = exc_info.value
         assert "BadConfig" in (err.required_by or "")
         assert "produce_something" in (err.required_by or "")
+
+    @pytest.mark.asyncio
+    async def test_an_ambiguous_parameter_names_the_candidates_not_a_missing_bean(self):
+        """Two beans of the parameter's type and no primary: the error says so, and names both.
+
+        It used to be reported as "No matching bean is registered", which sent the reader looking for a
+        bean that was there twice.
+        """
+
+        class Endpoint:
+            def __init__(self, url: str) -> None:
+                self.url = url
+
+        @configuration
+        class Endpoints:
+            @bean
+            def orders_endpoint(self) -> Endpoint:
+                return Endpoint("orders")
+
+            @bean
+            def audit_endpoint(self) -> Endpoint:
+                return Endpoint("audit")
+
+            @bean
+            def client(self, endpoint: Endpoint) -> str:
+                return endpoint.url
+
+        ctx = ApplicationContext(Config({}))
+        ctx.register_bean(Endpoints)
+
+        with pytest.raises(NoUniqueBeanError) as exc_info:
+            await ctx.start()
+
+        err = exc_info.value
+        assert "Endpoints.client()" in (err.required_by or "")
+        assert err.parameter == "endpoint: Endpoint"
+        assert "orders_endpoint" in str(err) and "audit_endpoint" in str(err)
+        assert "No matching bean is registered" not in str(err)
 
 
 class TestPostConstructErrors:

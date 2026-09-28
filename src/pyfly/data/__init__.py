@@ -27,45 +27,59 @@ types from ``pyfly.data.relational`` or ``pyfly.data.document`` directly.
 
 from pyfly.data.filter import BaseFilterUtils
 from pyfly.data.mapper import Mapper, default_mapper, mapping
-from pyfly.data.page import Page
-from pyfly.data.pageable import Order, Pageable, Sort
+from pyfly.data.page import Page, Slice, Window
+from pyfly.data.pageable import KeysetPosition, NullHandling, Order, Pageable, Sort
 from pyfly.data.ports.compiler import QueryMethodCompilerPort
 from pyfly.data.ports.outbound import (
+    BatchRepository,
     CrudRepository,
     PagingAndSortingRepository,
+    Persistable,
     ReactiveSortingRepository,
     RepositoryPort,
     SessionPort,
 )
 from pyfly.data.post_processor import DERIVED_PREFIXES, BaseRepositoryPostProcessor
 from pyfly.data.projection import is_projection, projection, projection_fields
-from pyfly.data.query import query
-from pyfly.data.query_parser import QueryMethodParser
+from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
+from pyfly.data.query import modifying, query
+from pyfly.data.query_parser import IncorrectResultSizeException, InvalidQueryMethodError, QueryMethodParser
 from pyfly.data.specification import Specification
 from pyfly.data.transactional import Isolation, Propagation, transactional
 
 __all__ = [
     "BaseFilterUtils",
     "BaseRepositoryPostProcessor",
+    "BatchRepository",
     "CrudRepository",
     "DERIVED_PREFIXES",
+    "IncorrectResultSizeException",
+    "InvalidPropertyError",
+    "InvalidQueryMethodError",
     "Isolation",
+    "KeysetPosition",
     "Mapper",
+    "NullHandling",
     "Order",
     "Page",
     "Pageable",
     "PagingAndSortingRepository",
+    "Persistable",
     "Propagation",
+    "PropertyResolver",
     "QueryMethodCompilerPort",
     "QueryMethodParser",
     "ReactiveSortingRepository",
     "RepositoryPort",
     "SessionPort",
+    "Slice",
     "Sort",
     "Specification",
+    "Window",
     "default_mapper",
     "is_projection",
     "mapping",
+    "modifying",
     "projection",
     "projection_fields",
     "query",

@@ -26,11 +26,12 @@ from pyfly.session.concurrency import (
     SessionRegistry,
 )
 from pyfly.session.filter import SessionFilter
-from pyfly.session.ports.outbound import SessionStore
+from pyfly.session.ports.outbound import ConditionalSessionStore, SessionStore
 from pyfly.session.session import HttpSession
 
 __all__ = [
     "ConcurrencyControlPolicy",
+    "ConditionalSessionStore",
     "HttpSession",
     "InMemorySessionRegistry",
     "SessionConcurrencyController",

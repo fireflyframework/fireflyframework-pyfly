@@ -24,6 +24,11 @@ Usage — imperative (parity with .NET ``services.AddFireflyData``)::
 
     app = PyFlyApplication(MyApp)
     register_data_stack(app)
+
+The starter enables the relational module but sets no database URL: configure
+``pyfly.data.relational.url`` (or ``PYFLY_DATA_RELATIONAL_URL``). Startup fails without it,
+instead of silently writing to ``./app.db`` in the working directory; only the ``dev``
+profile falls back to that embedded database.
 """
 
 from __future__ import annotations
@@ -56,7 +61,8 @@ if TYPE_CHECKING:
 #: Properties activated by the data starter — extends the core stack.
 DATA_STACK_PROPERTIES: dict[str, str] = {
     **CORE_STACK_PROPERTIES,
-    # Relational data — SQLAlchemy adapter, repositories, transactions
+    # Relational data — SQLAlchemy adapter, repositories, transactions (the URL is the application's:
+    # pyfly.data.relational.url is required)
     "pyfly.data.relational.enabled": "true",
     # Document data — MongoDB / Beanie ODM
     "pyfly.data.document.enabled": "true",

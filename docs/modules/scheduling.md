@@ -64,9 +64,9 @@ The module is built around a hexagonal architecture:
   execution strategies; **AsyncIOTaskExecutor** and **ThreadPoolTaskExecutor**
   are the built-in adapters, selectable via `pyfly.scheduling.executor.type`.
 - **DistributedLock** coordinates `@scheduled(lock=...)` jobs across instances;
-  **LocalLock**, **InProcessDistributedLock**, **RedisDistributedLock**, and
-  **PostgresAdvisoryLock** are the built-in providers, selectable via
-  `pyfly.scheduling.lock.provider`.
+  **LocalLock**, **InProcessDistributedLock**, **RedisDistributedLock**,
+  **LeaseLock** (the database lease table) and **PostgresAdvisoryLock** are the
+  built-in providers, selectable via `pyfly.scheduling.lock.provider`.
 
 All public types are available from a single import:
 
@@ -85,6 +85,7 @@ from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
 from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
 # Built-in cluster-coordination lock adapters (normally selected via config):
 from pyfly.scheduling.adapters.redis_lock import RedisDistributedLock
+from pyfly.scheduling.adapters.lease_lock import LeaseLock
 from pyfly.scheduling.adapters.postgres_lock import PostgresAdvisoryLock
 ```
 
@@ -104,10 +105,11 @@ from pyfly.scheduling import scheduled
 ### fixed_rate
 
 Runs the method at a fixed interval, measured from the **start** of each
-invocation. If the method takes longer than the interval, the next run begins
-immediately after the current one finishes, but there is no overlap -- the
-scheduler awaits the executor's `submit()` then sleeps for the remaining
-interval.
+invocation. A job never runs concurrently with itself (Spring's scheduler
+contract): if a run takes longer than the interval, the next run starts as soon
+as it ends, late but never alongside it, and the following one an interval after
+that start. Each run of a `@transactional` job holds one pooled connection, so a
+database slowdown can no longer pile up one run (and one connection) per period.
 
 The parameter accepts a `datetime.timedelta`:
 
@@ -135,17 +137,27 @@ class DataSyncer:
         await self.pull_upstream_changes()
 ```
 
-The key difference from `fixed_rate`: with `fixed_delay`, the scheduler waits
-for the task to complete (`await task`), then sleeps for the full delay before
-running again. With `fixed_rate`, the scheduler fires-and-forgets the task,
-sleeps for the interval, then fires again.
+The key difference from `fixed_rate`: with `fixed_delay` the gap is measured
+from the end of a run, with `fixed_rate` from its start.
+
+### concurrent
+
+`@scheduled(concurrent=N)` lets up to *N* runs of a `fixed_rate` or `cron` job be
+in flight at once (the default is 1: no overlap). Keep it well below the
+connection pool's size when the job is `@transactional`. `fixed_delay` takes no
+`concurrent` (a `ValueError`): it starts a run after the previous one ended.
+
+Through 26.09.07 `fixed_rate` and `cron` submitted a run every period whether the
+previous one had ended or not, so a slow job overlapped itself without bound.
 
 ### cron
 
 Runs the method according to a cron expression. The scheduler calculates
 `seconds_until_next()` via `CronExpression`, sleeps that long, then executes
-the method. Both the standard 5-field format and the Spring-style 6-field
-(seconds-first) format are accepted.
+the method. The next fire time is computed once the previous run has ended, as
+Spring's cron trigger does: fire times that pass while a run is going are
+skipped, never run late or concurrently. Both the standard 5-field format and the
+Spring-style 6-field (seconds-first) format are accepted.
 
 ```python
 class ReportGenerator:
@@ -194,7 +206,9 @@ fire once *per instance*. The `lock` parameter provides ShedLock / Spring
 `@SchedulerLock` parity: before each tick the scheduler tries to acquire a
 named lock, and **skips the run** if it is already held elsewhere, so only one
 instance executes the job per fire. The lock is always released when the body
-finishes (the `lock_ttl` is the safety valve if an instance crashes mid-run).
+finishes, and `lock_ttl` is the safety valve: every built-in provider ends a
+lock after `lock_ttl` even when its holder hangs or crashes mid-run, so the job
+runs elsewhere after at most `lock_ttl`.
 
 ```python
 class ReportService:
@@ -211,7 +225,23 @@ class ReportService:
 - `lock=None` (default) — no locking.
 - `lock_ttl` — a `timedelta` for the maximum time the lock may be held before
   it auto-expires. Defaults to 60 seconds. Set it comfortably longer than the
-  job's worst-case runtime.
+  job's worst-case runtime: the run is time-boxed to it. The lock ends at its
+  TTL whatever the run does, and another instance may then start the job, so a
+  run still going at the TTL is cancelled (its `@transactional` work rolls back)
+  and logged at `ERROR` with the job's name. A synchronous job's thread cannot be
+  cancelled, so its run is not time-boxed: it waits for the thread, keeping the
+  job's slot (the next tick never starts a second thread of the job beside it),
+  and is logged at `ERROR` once it ends past the TTL. The run releases its lock from its own task once it has
+  ended: the built-in providers tell holders apart per task (or per acquisition),
+  so a run cancelled at its TTL that ends after the job's next run took the lock
+  leaves that run's lock alone.
+
+A failure to take or release the lock (the lock's database or Redis is down, a
+misconfigured provider) is logged at `ERROR` with the job's name, like a
+failure of the job itself, and the tick is skipped; it used to escape as an
+unnamed "Task exception was never retrieved". A provider that cannot work on the
+configured datasource fails at startup (the lease table is checked, the advisory
+lock needs PostgreSQL).
 
 ```python
 from datetime import timedelta
@@ -226,7 +256,7 @@ class ImportService:
 `fixed_delay`). Out of the box the scheduler uses an in-process `LocalLock`
 that always acquires — so single-instance behavior is unchanged. For real
 coordination, select a built-in lock provider with
-`pyfly.scheduling.lock.provider` (`memory`, `redis`, or `postgres`) — no custom
+`pyfly.scheduling.lock.provider` (`memory`, `redis`, `database` or `postgres`) — no custom
 code required — or register your own `DistributedLock` bean. See
 [Distributed Locking with DistributedLock](#distributed-locking-with-distributedlock).
 
@@ -245,6 +275,7 @@ function:
 | `__pyfly_scheduled_zone__` | The IANA zone string, or `None` |
 | `__pyfly_scheduled_lock__` | `True`, the lock-name string, or `None` |
 | `__pyfly_scheduled_lock_ttl__` | The TTL in seconds (`float`), or `None` |
+| `__pyfly_scheduled_concurrent__` | How many runs may be in flight at once |
 
 The `TaskScheduler` reads these attributes during its discovery phase. A
 `lock=True` value is resolved to the `"ClassName.method"` name at discovery
@@ -437,8 +468,9 @@ print(f"Found {count} scheduled methods")
 ### Starting and Stopping
 
 `start()` and `stop()` are async methods. `start()` creates an
-`asyncio.Task` for each discovered entry. `stop()` cancels all loop tasks,
-gathers them, clears the task list, and stops the executor:
+`asyncio.Task` loop for each entry discovered since the last start (calling it
+again starts only the new ones). `stop()` stops the loops and then drains the
+runs in flight through the executor:
 
 ```python
 await scheduler.start()
@@ -446,26 +478,37 @@ await scheduler.start()
 await scheduler.stop()
 ```
 
-Stops all scheduling loops and the executor. Always waits for pending tasks
-to complete (graceful shutdown).
+A loop only ever waits (for its next fire time, a free slot or its run's end),
+so stopping it never cancels a run: every run in flight finishes, whatever its
+trigger. When the caller cuts the drain short (the application context bounds
+it by `pyfly.context.shutdown-timeout`), the runs still going are cancelled and
+awaited. Through 26.09.07 `stop()` cancelled an in-flight `fixed_delay` run at once
+(rolling its transaction back) while it let `fixed_rate` and `cron` runs finish.
+
+`TaskScheduler` is a lifecycle bean of `CONSUMER_PHASE`: the application context
+stops it before any `@pre_destroy`, while the beans its jobs use still work.
 
 ### How Loops Work Internally
 
-Each trigger type has its own loop coroutine inside `TaskScheduler`:
+Each trigger type has its own loop coroutine inside `TaskScheduler`, and each
+entry has as many slots as its `concurrent` (1 by default); a run holds a slot
+until it ends:
 
-- **Cron loop** (`_run_cron_loop`): Calculates `seconds_until_next()` from a
-  `CronExpression`, sleeps that duration, submits the method to the executor,
+- **Cron loop** (`_run_cron_loop`): waits for a free slot, calculates
+  `seconds_until_next()` from a `CronExpression` (so, with one slot, after the
+  previous run ended), sleeps that duration, submits a run, then repeats.
+- **Fixed-rate loop** (`_run_fixed_rate_loop`): optionally sleeps for
+  `initial_delay`, then sleeps until the next start time, waits for a free slot,
+  submits a run and sets the next start time one interval later.
+- **Fixed-delay loop** (`_run_fixed_delay_loop`): optionally sleeps for
+  `initial_delay`, then submits a run, waits for it to end, sleeps for the delay,
   then repeats.
-- **Fixed-rate loop** (`_run_fixed_rate_loop`): Optionally sleeps for
-  `initial_delay`, then enters a loop that submits the method and sleeps for
-  the rate interval.
-- **Fixed-delay loop** (`_run_fixed_delay_loop`): Optionally sleeps for
-  `initial_delay`, then enters a loop that submits the method, **awaits
-  the returned task** (waits for completion), sleeps for the delay, then
-  repeats.
 
-Both sync and async methods are supported transparently. The static
-`_invoke()` helper calls the method and, if the result is awaitable, awaits it.
+Runs are submitted as tasks started with the transaction state cleared
+(`pyfly.data.transaction.detached`): a run's `@transactional` work is a unit of
+its own. Both sync and async methods are supported: an async method is awaited,
+a sync one runs in the executor's thread pool (`ThreadPoolTaskExecutor.run_sync`)
+or, with the asyncio executor, `asyncio.to_thread`.
 
 ---
 
@@ -485,14 +528,21 @@ class TaskExecutorPort(Protocol):
 ```
 
 You can implement this protocol to create custom executors -- for example, one
-that publishes tasks to a distributed queue or logs execution metrics.
+that publishes tasks to a distributed queue or logs execution metrics. Two
+rules keep the scheduler's guarantees: `submit()` runs the coroutine outside the
+submitter's unit of work (start the task with `pyfly.data.transaction.detached`,
+as the built-in executors do: an `@async_method` call made inside
+`@transactional` must not join, or outlive, the caller's transaction), and
+`stop()` waits for the tasks in flight, cancelling and awaiting them when it is
+cancelled itself.
 
 ---
 
 ## AsyncIOTaskExecutor
 
-The default executor. Wraps `asyncio.create_task()` and tracks running tasks in
-a `set` for clean shutdown:
+The default executor. Starts each coroutine in a task of its own with the
+transaction state cleared (`pyfly.data.transaction.detached`) and tracks the
+running tasks in a `set` for clean shutdown:
 
 ```python
 from pyfly.scheduling.adapters.asyncio_executor import AsyncIOTaskExecutor
@@ -502,10 +552,12 @@ task = await executor.submit(some_coroutine())
 await executor.stop()  # Wait for all pending tasks
 ```
 
-- **submit()**: Creates an `asyncio.Task` via `create_task()`, adds it to an
+- **submit()**: Creates an `asyncio.Task` via `detached()`, adds it to an
   internal tracking set, and registers a done-callback that removes it.
 - **start()**: No-op (ready after construction).
-- **stop()**: Waits for all pending tasks to complete, then clears the task set.
+- **stop()**: Waits for all pending tasks to complete (tasks submitted meanwhile
+  included), then clears the task set. Cancelled while it waits, it cancels the
+  pending tasks and waits for them to end before the cancellation propagates.
 
 This executor is ideal for I/O-bound tasks that use `async`/`await`.
 
@@ -522,12 +574,15 @@ from pyfly.scheduling.adapters.thread_executor import ThreadPoolTaskExecutor
 executor = ThreadPoolTaskExecutor(max_workers=4)
 ```
 
-It exposes two submission methods:
+It exposes three submission methods:
 
 - **submit(coro)**: Works identically to `AsyncIOTaskExecutor.submit()` --
-  creates an `asyncio.Task` for async coroutines.
+  creates a detached `asyncio.Task` for async coroutines.
 - **submit_sync(func, *args)**: Runs a synchronous function in the thread pool
   via `loop.run_in_executor()`, wraps the result with `asyncio.ensure_future()`.
+- **run_sync(func, *args)**: Awaits a synchronous function run in the thread
+  pool. The `TaskScheduler` runs synchronous `@scheduled` methods through it, so
+  `max_workers` bounds their threads.
 
 ```python
 # Async coroutine
@@ -546,7 +601,12 @@ task = executor.submit_sync(cpu_heavy_function, arg1, arg2)
 **API:**
 
 - **start()**: No-op (ready after construction).
-- **stop()**: Waits for all pending tasks, clears task set, shuts down the thread pool.
+- **stop()**: Waits for all pending tasks (as `AsyncIOTaskExecutor.stop()`), clears task set, shuts down the
+  thread pool and waits for its threads off the event loop: a thread may still be running a function whose
+  task was cancelled (a synchronous `@async_method` call its caller cancelled, say), and the application goes on
+  meanwhile. When the wait is cut short
+  (`pyfly.context.shutdown-timeout`), the functions still queued never start and a running one finishes on its
+  thread.
 
 ---
 
@@ -594,14 +654,16 @@ every `@scheduled(lock=...)` job:
 | `none` *(default)* | `LocalLock` | single instance (always acquires) | none |
 | `memory` | `InProcessDistributedLock` | one process (real mutual exclusion within the process) | none |
 | `redis` | `RedisDistributedLock` | cross-process / cluster | Redis |
-| `postgres` | `PostgresAdvisoryLock` | cross-process / cluster | none beyond an existing Postgres |
+| `database` | `LeaseLock` | cross-process / cluster | none beyond the application's database (any backend) |
+| `postgres` | `LeaseLock`, or `PostgresAdvisoryLock` with `postgres.advisory: true` | cross-process / cluster | none beyond an existing Postgres |
 
 ```yaml
 # pyfly.yaml
 pyfly:
   scheduling:
     lock:
-      provider: postgres   # none | memory | redis | postgres
+      provider: database   # none | memory | redis | database | postgres
+      datasource: primary  # the datasource of the lease table (default: the primary)
 ```
 
 - **`none`** — `LocalLock`; `try_acquire` always returns `True`. Single-instance
@@ -609,7 +671,8 @@ pyfly:
 - **`memory`** — `InProcessDistributedLock`; real mutual exclusion **within one
   process** (with a TTL self-heal so a crashed/never-released name auto-frees
   after `lock_ttl`). Prevents a slow tick from overlapping its next tick in the
-  same process, but does **not** coordinate across processes.
+  same process, but does **not** coordinate across processes. A tick whose lock
+  ended at `lock_ttl` does not release the lock the next tick took since.
 - **`redis`** — `RedisDistributedLock`; cross-process via an atomic Redis
   `SET key value NX PX <ttl-ms>`, with an owner-token compare-and-delete release
   (an instance only releases a lock it still owns). The async Redis client is
@@ -617,24 +680,59 @@ pyfly:
   `redis://localhost:6379/0`) and injected — the adapter never imports `redis`
   itself. Selected only when `redis.asyncio` is importable; otherwise the bean
   falls back to `LocalLock`. Keys are prefixed `pyfly:schedlock:`.
-- **`postgres`** — `PostgresAdvisoryLock`; cross-process via Postgres
-  **session-level advisory locks** (`pg_try_advisory_lock` /
-  `pg_advisory_unlock`). For apps already on Postgres this gives cluster-safe
-  coordination with **no extra infrastructure**. The lock name is mapped to a
-  stable signed 64-bit key (blake2b, deterministic across processes). The
-  `AsyncEngine` is resolved lazily from the container on first acquire (so
-  bean-ordering does not matter). Note there is **no TTL** for this provider:
-  the advisory lock lives with the holding connection and is auto-released when
-  the connection closes — including when the process dies, which is the
-  crash-safety mechanism in lieu of `lock_ttl`.
+- **`database`** — `LeaseLock`; a ShedLock-style **lease table**
+  (`pyfly_locks`: `name`, `lock_until`, `locked_at`, `locked_by`, `fence`) on
+  the datasource named by `pyfly.scheduling.lock.datasource` (or given by
+  `pyfly.scheduling.lock.url`), by default the primary. Taking a lock is one
+  statement on PostgreSQL and SQLite, `INSERT ... ON CONFLICT (name) DO UPDATE
+  ... WHERE lock_until <= now` (it inserts the row, takes an ended lease over,
+  or leaves a live one alone); on MySQL and MariaDB a conditional `UPDATE ...
+  WHERE lock_until <= now`, after an `INSERT IGNORE` when the node has not
+  found the row yet. Each runs in a short unit of its own that commits at once
+  (an autocommit statement on PostgreSQL); releasing it sets `lock_until` to
+  now. It works on every backend,
+  holds **no connection** while the job runs, and honors `lock_ttl`: a hung job
+  blocks its schedule for at most `lock_ttl`. When the hung job finally ends,
+  it does not release the lease another node took since, and a WARNING
+  (`scheduler_lease_expired_before_release`) says the job outlived its TTL. The
+  nodes compare `lock_until` with their own clocks: keep them synchronized (NTP).
+  The table is created at startup if `pyfly.data.relational.ddl-auto` is
+  `create` (the default on an embedded database) or `create-drop`, and only
+  checked with `none` (the default on a database server and beside startup
+  migrations) or `validate`. Lock names match exactly on every backend (a binary
+  collation on MySQL and MariaDB, so `Nightly` and `nightly` are two leases). A
+  lock name is at most 255 characters
+  (`LeaseLock.MAX_NAME_LENGTH`, the length of `pyfly_locks.name`): a longer one
+  raises `ValueError` before any statement runs, where MySQL and MariaDB would
+  otherwise truncate it into a lease nobody could release. `LeaseLock.acquire(name, ttl, wait=...)`,
+  `extend()` and `holder()` (with a fencing token that grows at every
+  acquisition) serve other work that must run on one node at a time.
+- **`postgres`** — the same lease table on a PostgreSQL datasource. With
+  `pyfly.scheduling.lock.postgres.advisory: true` it is `PostgresAdvisoryLock`
+  instead, an opt-in accelerator on Postgres **session-level advisory locks**
+  (`pg_try_advisory_lock` / `pg_advisory_unlock`): the server releases the lock
+  the moment the holder's connection goes away. The lock name is mapped to a
+  stable signed 64-bit key (blake2b, deterministic across processes). The lock
+  holds a pooled connection for the whole job, in `AUTOCOMMIT` (idle, never
+  idle in transaction, so `idle_in_transaction_session_timeout` cannot drop it
+  mid-job); a watchdog ends the lock at `lock_ttl` with a WARNING
+  (`scheduler_advisory_lock_expired`) but does not cancel the job itself, as
+  with the lease table (the `TaskScheduler` cancels an async `@scheduled` run at
+  `lock_ttl`, see [lock](#lock-distributed-locking)); and an acquisition or an unlock that fails (a cancellation
+  included) discards the connection instead of returning a session that may
+  hold the lock to the pool. An acquisition belongs to the task that took it:
+  a tick whose lock ended at `lock_ttl` (or whose session the server ended,
+  logged as `scheduler_advisory_lock_lost`) does not release the lock the next
+  tick of the process took since. The datasource must be PostgreSQL, or the
+  startup fails.
 
 **When to use which:**
 
 - Single instance, no cluster → leave the default `none` (or `memory` if you
   want to prevent in-process overlap of a slow job).
 - Multiple instances and you already run Redis → `redis`.
-- Multiple instances and you already run Postgres (but no Redis) → `postgres`,
-  to avoid standing up new infrastructure just for scheduling.
+- Multiple instances on a relational database (but no Redis) → `database`, to
+  avoid standing up new infrastructure just for scheduling.
 
 ### Cross-Process Coordination (custom)
 
@@ -711,9 +809,44 @@ class NotificationService:
         await self.email_client.send(to, subject, body)
 ```
 
-Under the hood, `@async_method` sets `__pyfly_async__ = True` on the function.
-The framework picks this up and routes the call through the configured
-`TaskExecutorPort`.
+Under the hood, `@async_method` sets `__pyfly_async__ = True` on the function,
+and the application context replaces the bean's method with a dispatcher
+(`pyfly.scheduling.async_methods.dispatching`), Spring `@Async` style:
+
+- **The caller returns at once.** `await notifier.send_email(...)` submits the
+  call through the `TaskScheduler`'s `TaskExecutorPort` and gives back the
+  `asyncio.Task` running it. Await that task when you need the result:
+  `result = await (await service.compute(order))`.
+- **Its own unit of work.** The task starts with the transaction state cleared
+  (`pyfly.data.transaction.detached`): a `@transactional` method opens its own
+  transaction. Its failure never rolls the caller back, a caller that fails
+  after the call does not discard its writes, and the caller's commit does not
+  wait for it.
+- **Uncaught exceptions** go to the `AsyncUncaughtExceptionHandler` bean
+  (`handle_uncaught_exception(error, method, args, kwargs)`), by default
+  `LoggingAsyncUncaughtExceptionHandler`, which logs `async_method_failed` at
+  `ERROR`. A caller that awaits the task gets the exception as well.
+- **Synchronous methods** run in the executor's thread pool
+  (`ThreadPoolTaskExecutor.run_sync`), or through `asyncio.to_thread`.
+- **Shutdown** waits for the calls in flight: they run on the `TaskScheduler`'s
+  executor, which the context stops before any `@pre_destroy`. A call submitted
+  once the scheduler has stopped (by another consumer-phase bean still draining,
+  such as a message listener) is not waited for, and a synchronous method's call
+  fails then with `RuntimeError` when the executor is a `ThreadPoolTaskExecutor`
+  (its pool has shut down, and rejects new work as Spring's does).
+
+```python
+from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler
+
+@component
+class AlertingHandler(AsyncUncaughtExceptionHandler):
+    def handle_uncaught_exception(self, error, method, args, kwargs) -> None:
+        alerts.raise_incident(f"{method.__qualname__} failed: {error}")
+```
+
+Through 26.09.07 `@async_method` awaited coroutine methods inline: the call ran in
+the caller's transaction, blocked the caller for its whole duration, and its
+failure rolled the caller back.
 
 ---
 
@@ -731,9 +864,10 @@ pyfly:
       type: asyncio       # asyncio | thread
       max-workers: 4      # thread-pool size when type=thread
     lock:
-      provider: none      # none | memory | redis | postgres
+      provider: none      # none | memory | redis | database | postgres
       redis:
         url: redis://localhost:6379/0   # used when provider=redis
+      datasource: primary # provider=database/postgres: a datasource of the registry (or url:)
 ```
 
 | Key | Description | Default |
@@ -741,13 +875,17 @@ pyfly:
 | `pyfly.scheduling.enabled` | Convention flag set by the `application`/`data` starters (see [Auto-Configuration](#auto-configuration)) | `true` |
 | `pyfly.scheduling.executor.type` | Executor backend: `asyncio` (in-loop) or `thread` (`ThreadPoolTaskExecutor`) | `asyncio` |
 | `pyfly.scheduling.executor.max-workers` | Thread-pool size when `executor.type=thread` | `4` |
-| `pyfly.scheduling.lock.provider` | Distributed-lock backend: `none` / `memory` / `redis` / `postgres` | `none` |
+| `pyfly.scheduling.lock.provider` | Distributed-lock backend: `none` / `memory` / `redis` / `database` / `postgres` | `none` |
 | `pyfly.scheduling.lock.redis.url` | Redis URL when `lock.provider=redis` | `redis://localhost:6379/0` |
+| `pyfly.scheduling.lock.datasource` | The datasource of the `database`/`postgres` lock (a name in the registry); not together with `lock.url` | the primary |
+| `pyfly.scheduling.lock.url` | The URL of that datasource, resolved through the registry | the primary |
+| `pyfly.scheduling.lock.postgres.advisory` | With `provider=postgres`, PostgreSQL advisory locks instead of the lease table (needs a PostgreSQL datasource) | `false` |
 
 **Requires:** `uv add "pyfly[scheduling]"` (installs `croniter` for cron
 expression parsing). The `redis` lock provider additionally needs
-`redis.asyncio` importable; the `postgres` provider needs a SQLAlchemy
-`AsyncEngine` bean.
+`redis.asyncio` importable; the `database` and `postgres` providers need a
+relational datasource (the primary, or `pyfly.scheduling.lock.datasource` /
+`.url`), and the advisory lock needs it on PostgreSQL.
 
 ### Selecting the Executor
 
@@ -778,7 +916,7 @@ executor, override the `task_scheduler` bean (see
 `pyfly.scheduling.lock.provider` chooses the `distributed_lock` bean used for
 `@scheduled(lock=...)` coordination. See
 [Built-in Lock Providers](#built-in-lock-providers) for the full matrix and
-guidance on `none` / `memory` / `redis` / `postgres`.
+guidance on `none` / `memory` / `redis` / `database` / `postgres`.
 
 ```yaml
 pyfly:
@@ -801,7 +939,7 @@ When `croniter` is installed, PyFly automatically registers a `TaskScheduler` be
 
 | Bean | Type | Description |
 |------|------|-------------|
-| `distributed_lock` | `DistributedLock` | Lock backend for `@scheduled(lock=...)`, selected by `pyfly.scheduling.lock.provider` (`none`/`memory`/`redis`/`postgres`) |
+| `distributed_lock` | `DistributedLock` | Lock backend for `@scheduled(lock=...)`, selected by `pyfly.scheduling.lock.provider` (`none`/`memory`/`redis`/`database`/`postgres`) |
 | `task_scheduler` | `TaskScheduler` | Container-managed scheduler that discovers and runs `@scheduled` methods; uses the executor from `pyfly.scheduling.executor.type` and resolves the `distributed_lock` bean |
 
 With auto-configuration, you no longer need a `SchedulerManager` service. The `ApplicationContext` automatically:
@@ -983,6 +1121,7 @@ import asyncio
 import logging
 from typing import Any, Coroutine, TypeVar
 
+from pyfly.data.transaction import detached
 from pyfly.scheduling import TaskExecutorPort
 
 T = TypeVar("T")
@@ -997,7 +1136,7 @@ class LoggingTaskExecutor:
 
     async def submit(self, coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
         logger.info("Submitting task: %s", coro.__qualname__)
-        task = asyncio.create_task(coro)
+        task = detached(coro)          # outside the submitter's unit of work
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
@@ -1006,9 +1145,16 @@ class LoggingTaskExecutor:
         pass  # Ready after construction
 
     async def stop(self) -> None:
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
+        tasks = list(self._tasks)
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:  # the stop itself was cancelled: cancel and await the tasks
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            self._tasks.clear()
 
 
 # Use it with the scheduler

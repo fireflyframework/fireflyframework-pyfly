@@ -272,7 +272,7 @@ no restart — by issuing a single management request.
 
 ```bash
 curl -X POST http://localhost:8080/actuator/refresh
-# {"refreshed": ["FeatureFlags-singleton", "PricingProperties-singleton"]}
+# {"refreshed": ["__pyfly_bean_myapp.flags.FeatureFlags"]}
 ```
 
 ### What happens on POST /actuator/refresh
@@ -290,10 +290,19 @@ performs the following steps in order (`src/pyfly/context/refresh.py`):
 3. **Resets `@config_properties` singletons.** Their backing instances are cleared so they
    re-`bind()` from the live `Config` (which now reflects the re-read files, env-var
    overrides, and resolved `${...}` placeholders) on next resolution.
-4. **Publishes a `RefreshScopeRefreshedEvent`** on the application event bus.
+4. **Destroys the evicted refresh-scoped instances**, after the swap: their `@pre_destroy` methods
+   run, then the destroy method of a `@bean` product (`@bean(destroy_method=...)`, or the inferred
+   `dispose()`, `aclose()` or `close()`), then `stop()` of a lifecycle bean, so a refresh-scoped bean
+   that owns an engine or a client closes it instead of leaking it.
+5. **Publishes a `RefreshScopeRefreshedEvent`** on the application event bus.
 
-The response is `{"refreshed": [...]}`, listing the cache keys of the evicted
-refresh-scoped beans (an empty list when none are registered).
+The response is `{"refreshed": [...]}`, listing the scope keys of the evicted
+refresh-scoped beans (`__pyfly_bean_<module>.<class>`, plus `#<bean name>` for a named bean; an
+empty list when none are registered).
+
+A singleton that injected a refresh-scoped bean keeps the instance it received unless the bean is
+declared `@refresh_scope(proxy=True)` (a scoped proxy that follows each refresh) or the singleton
+injects `Provider[T]`; see the dependency-injection guide.
 
 ### Picking up file changes in your beans
 
@@ -315,8 +324,8 @@ class PricingProperties:
     base_rate: float = 1.0      # edit pyfly.yaml + POST /actuator/refresh -> re-bound
 
 
+@refresh_scope   # either order works; the refresh scope survives the stereotype
 @component
-@refresh_scope
 class FeatureFlags:
     new_checkout: bool = Value("${features.new-checkout:false}")
     # next resolution after refresh re-reads ${features.new-checkout} from the live Config
@@ -1215,9 +1224,10 @@ browser form behavior, and a runnable application.
 | Key | Default | Description |
 |---|---|---|
 | `pyfly.data.enabled` | `false` | Enable the data layer. |
-| `pyfly.data.url` | `"sqlite+aiosqlite:///pyfly.db"` | Database connection URL. |
-| `pyfly.data.echo` | `false` | Echo SQL statements (for debugging). |
-| `pyfly.data.pool-size` | `5` | Connection pool size. |
+| `pyfly.data.relational.url` | — (required) | Database connection URL. There is no default: a relational application without it fails at startup (the `dev` profile falls back to `sqlite+aiosqlite:///./app.db`). |
+| `pyfly.data.relational.echo` | `false` | Echo SQL statements (for debugging); `debug` also logs rows. |
+| `pyfly.data.relational.pool.size` | SQLAlchemy's (5) | Connection pool size; see [Datasource Registry](data-relational.md#configuration-reference) for every key. |
+| `pyfly.data.url`, `pyfly.data.echo`, `pyfly.data.pool-size` | — | Deprecated aliases of the three keys above, honored with a warning when those are absent. |
 
 ### Cache Defaults
 
@@ -1388,8 +1398,8 @@ pyfly:
     url: "sqlite+aiosqlite:///pyfly.db"
     echo: false
     pool-size: 5
-    relational:
-      ddl-auto: "create"
+    # relational.ddl-auto is not set: create on an embedded database (SQLite), none on a database server
+    # or beside startup migrations (pyfly.data.relational.migrations.enabled)
   cache:
     enabled: false
     provider: "memory"

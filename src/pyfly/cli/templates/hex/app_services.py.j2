@@ -40,10 +40,13 @@ class TodoService(CreateTodoUseCase, GetTodoUseCase, ListTodosUseCase, DeleteTod
 
     @staticmethod
     def _to_domain(entity: TodoEntity) -> Todo:
-        return Todo(id=str(entity.id), title=entity.title, description=entity.description, completed=entity.completed)
+        return Todo(
+            id=str(entity.id), title=entity.title, description=entity.description or "", completed=entity.completed
+        )
 
     async def create(self, title: str, description: str) -> Todo:
-        saved = await self._repository.save(TodoEntity(title=title, description=description))
+        # An empty description is stored as NULL (Oracle stores '' as NULL anyway).
+        saved = await self._repository.save(TodoEntity(title=title, description=description or None))
         return self._to_domain(saved)
 
     async def get(self, todo_id: str) -> Todo:
@@ -63,7 +66,7 @@ class TodoService(CreateTodoUseCase, GetTodoUseCase, ListTodosUseCase, DeleteTod
         return self._to_domain(await self._repository.save(entity))
 
     async def delete(self, todo_id: str) -> None:
-        await self._repository.delete(self._entity_id(todo_id))
+        await self._repository.delete_by_id(self._entity_id(todo_id))
 {% elif has_mongodb %}
 
     def __init__(self, repository: TodoDocumentRepository) -> None:
@@ -94,7 +97,7 @@ class TodoService(CreateTodoUseCase, GetTodoUseCase, ListTodosUseCase, DeleteTod
         return self._to_domain(await self._repository.save(doc))
 
     async def delete(self, todo_id: str) -> None:
-        await self._repository.delete(todo_id)
+        await self._repository.delete_by_id(todo_id)
 {% else %}
 
     def __init__(self, repository: TodoRepositoryPort) -> None:

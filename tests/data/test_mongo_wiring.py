@@ -15,6 +15,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 from pyfly.container.exceptions import NoSuchBeanError
@@ -59,8 +63,14 @@ class TestDocumentAutoConfiguration:
 
         conditions = getattr(DocumentAutoConfiguration, "__pyfly_conditions__", [])
         types = {c["type"] for c in conditions}
-        assert "on_class" in types
-        assert "on_property" in types
+        assert types == {"on_class"}  # active with Beanie: the wiring check runs even when the layer is off
+        client_conditions = getattr(DocumentAutoConfiguration.mongo_client, "__pyfly_conditions__", [])
+        assert {
+            "type": "on_property",
+            "key": "pyfly.data.document.enabled",
+            "having_value": "true",
+            "match_if_missing": False,
+        } in client_conditions
 
     def test_context_registers_motor_and_pp(self) -> None:
         """Auto-configuration registers pymongo AsyncMongoClient + post-processor in the container."""
@@ -153,39 +163,120 @@ class TestBeanieInitializer:
         assert hasattr(initializer, "start")
         assert hasattr(initializer, "stop")
 
-    @pytest.mark.asyncio
-    async def test_discovers_document_models_from_repositories(self) -> None:
-        """BeanieInitializer discovers document models via MongoRepository._entity_type."""
-        from unittest.mock import AsyncMock, patch
+    def test_discovers_every_document_the_repositories_and_links_reach(self) -> None:
+        """C035: any Beanie document (not only BaseDocument subclasses), the documents their Link fields name, and
+        the configured models, so none fails at first use with CollectionWasNotInitialized."""
+        from beanie import BackLink, Document, Link
+        from pymongo import AsyncMongoClient
 
         from pyfly.container.container import Container
         from pyfly.data.document.mongodb.document import BaseDocument
         from pyfly.data.document.mongodb.initializer import BeanieInitializer
         from pyfly.data.document.mongodb.repository import MongoRepository
 
+        class DiscoveryAuthor(Document):
+            name: str
+
+        class DiscoveryTag(BaseDocument):
+            label: str
+
+        class DiscoveryBook(Document):
+            title: str
+            author: Link[DiscoveryAuthor] | None = None
+            tags: list[Link[DiscoveryTag]] = []
+
+        class DiscoveryShelf(Document):
+            books: list[BackLink[DiscoveryBook]] = []
+
         class DiscoveryDoc(BaseDocument):
             name: str
 
-            class Settings:
-                name = "discovery_docs"
+        class DiscoveryBookRepo(MongoRepository[DiscoveryBook, str]):
+            pass
 
         class DiscoveryDocRepo(MongoRepository[DiscoveryDoc, str]):
             pass
 
         container = Container()
+        container.register(DiscoveryBookRepo)
         container.register(DiscoveryDocRepo)
-
-        from mongomock_motor import AsyncMongoMockClient
-
-        client = AsyncMongoMockClient()
-        config = Config({"pyfly": {"data": {"document": {"database": "testdb"}}}})
+        config = Config(
+            {
+                "pyfly": {
+                    "data": {
+                        "document": {
+                            "database": "testdb",
+                            "models": ["tests.data.test_mongo_wiring.ConfiguredDocument"],
+                        }
+                    }
+                }
+            }
+        )
+        client: AsyncMongoClient[dict[str, object]] = AsyncMongoClient("mongodb://127.0.0.1:1", connect=False)
         initializer = BeanieInitializer(motor_client=client, config=config, container=container)
+        found = initializer.discover()
+        assert set(found) == {
+            DiscoveryBook,
+            DiscoveryAuthor,
+            DiscoveryTag,
+            DiscoveryDoc,
+            ConfiguredDocument,
+        }
+        assert DiscoveryShelf not in found  # nothing names it
 
-        with patch("beanie.init_beanie", new_callable=AsyncMock) as mock_init:
-            await initializer.start()
-            mock_init.assert_called_once()
-            call_kwargs = mock_init.call_args
-            models = call_kwargs.kwargs.get("document_models") or call_kwargs[1].get("document_models")
-            assert DiscoveryDoc in models
+    def test_a_configured_model_that_is_not_a_document_fails(self) -> None:
+        from pymongo import AsyncMongoClient
 
-        client.close()
+        from pyfly.container.container import Container
+        from pyfly.data.document.mongodb.initializer import BeanieInitializer
+
+        config = Config({"pyfly": {"data": {"document": {"models": ["tests.data.test_mongo_wiring.Config"]}}}})
+        client: AsyncMongoClient[dict[str, object]] = AsyncMongoClient("mongodb://127.0.0.1:1", connect=False)
+        initializer = BeanieInitializer(motor_client=client, config=config, container=Container())
+        with pytest.raises(ValueError, match="neither a Beanie document class nor a module"):
+            initializer.discover()
+
+
+try:
+    from beanie import Document as _Document
+
+    class ConfiguredDocument(_Document):
+        """A document named only by pyfly.data.document.models."""
+
+        name: str
+except ImportError:  # pragma: no cover
+    pass
+
+
+def test_the_replica_set_container_raises_the_open_file_limit() -> None:
+    """A suite that gives every test a database of its own exhausted mongod's default 1024 open files, and
+    WiredTiger aborted the server; the replica-set fixture runs it with MongoDB's recommended limit."""
+    pytest.importorskip("testcontainers")
+    from pyfly.testing.testcontainers import mongodb_replica_set_container
+
+    container = mongodb_replica_set_container()
+    (ulimit,) = container.get_wrapped_container()._kwargs["ulimits"]
+    assert (ulimit.name, ulimit.soft, ulimit.hard) == ("nofile", 64000, 64000)
+
+
+def test_the_transaction_manager_translates_mongo_errors_without_the_repository_module() -> None:
+    """A unit of work's commit failure is translated to the kernel's exceptions by the translator the Mongo
+    module registers: importing the transaction manager registers it, whether or not the repository module
+    (which also imports it) was ever loaded. Checked in a fresh interpreter that cannot load the repository."""
+    script = textwrap.dedent(
+        """
+        import sys
+
+        sys.modules["pyfly.data.document.mongodb.repository"] = None  # the repository cannot be imported
+        import pyfly.data.document.mongodb.transaction_manager  # noqa: F401
+        from pymongo.errors import OperationFailure
+
+        from pyfly.data.exception_translation import translate_exception
+
+        error = OperationFailure("E11000 duplicate key error collection: t.c index: email_1", code=11000)
+        print(type(translate_exception(error)).__name__)
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "DuplicateKeyException"

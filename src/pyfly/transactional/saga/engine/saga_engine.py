@@ -11,15 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Saga engine — main orchestrator coordinating execution, compensation, persistence, and events."""
+"""Saga engine — main orchestrator coordinating execution, compensation, persistence, and events.
+
+When the saga fails, or its caller cancels it, the engine compensates every step whose work committed: the
+completed steps, and the steps that failed, timed out or were cancelled after a unit of work of theirs
+committed (:pyattr:`~pyfly.transactional.saga.core.context.SagaContext.committed_steps`, see
+:mod:`~pyfly.transactional.saga.engine.execution_orchestrator`). Compensation runs in a task of its own with
+the transaction state cleared, to completion even when the caller is cancelled meanwhile; a cancelled saga
+then re-raises ``CancelledError`` once it is compensated and its final state is recorded.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from pyfly.data.transaction import detached
+from pyfly.data.transaction.template import run_shielded
 from pyfly.transactional.saga.core.context import SagaContext
 from pyfly.transactional.saga.core.result import SagaResult, StepOutcome
 from pyfly.transactional.saga.engine.compensator import SagaCompensator
@@ -83,6 +94,8 @@ class SagaEngine:
 
         Raises:
             ValueError: If saga_name is not registered.
+            asyncio.CancelledError: The caller cancelled the saga. Its steps have all ended, the ones that
+                committed are compensated, and ``on_completed`` / ``mark_completed`` recorded the failure.
         """
         # Fall back to the configured global policy when not overridden (#170).
         if compensation_policy is None:
@@ -104,7 +117,6 @@ class SagaEngine:
         started_at = datetime.now(UTC)
         success = False
         error: Exception | None = None
-        completed_step_ids: list[str] = []
 
         # 3. Emit on_start event.
         if self._events_port is not None:
@@ -125,32 +137,80 @@ class SagaEngine:
                 }
             )
 
+        cancelled = False
+        cancellation: asyncio.CancelledError | None = None  # re-raised as is: a cancel scope knows its own
         try:
-            # 5a. Execute via orchestrator.
-            completed_step_ids = await self._execution_orchestrator.execute(
-                saga_def,
-                ctx,
-                step_input=input_data,
-            )
-            success = True
+            try:
+                # 5a. Execute via orchestrator.
+                await self._execution_orchestrator.execute(
+                    saga_def,
+                    ctx,
+                    step_input=input_data,
+                )
+                success = True
+            except asyncio.CancelledError as exc:
+                # The caller cancelled the saga (a timeout, a disconnect, shutdown). Every step task has ended:
+                # undo the steps that committed, then let the cancellation propagate.
+                cancelled = True
+                cancellation = exc
+                logger.debug(
+                    "Saga '%s' (correlation_id=%s) cancelled. Running compensation.",
+                    saga_name,
+                    ctx.correlation_id,
+                )
+            except Exception as exc:
+                error = exc
+                logger.debug(
+                    "Saga '%s' (correlation_id=%s) failed: %s. Running compensation.",
+                    saga_name,
+                    ctx.correlation_id,
+                    exc,
+                )
+            if not success:
+                # 6a. Compensate on failure: every step that committed, the ones that failed or were cancelled
+                # after committing included, newest first.
+                cancelled |= await self._compensate(compensation_policy, saga_name, saga_def, ctx)
+        finally:
+            # 7. Emit on_completed and persist the final state, to completion even when cancelled.
+            _result, finish_error, finish_cancelled = await run_shielded(self._finish(saga_name, ctx, success))
+            cancelled |= finish_cancelled
+            if finish_error is not None and not cancelled:
+                raise finish_error
+        if cancellation is not None:
+            raise cancellation
+        if cancelled:
+            raise asyncio.CancelledError
 
-        except Exception as exc:
-            # 6a. Compensate on failure.
-            error = exc
-            logger.debug(
-                "Saga '%s' (correlation_id=%s) failed: %s. Running compensation.",
-                saga_name,
-                ctx.correlation_id,
-                exc,
-            )
-            # Derive completed step IDs from the context since the
-            # orchestrator raised before returning a value.
-            completed_step_ids = [step_id for step_id, status in ctx.step_statuses.items() if status == StepStatus.DONE]
+        # 8. Build and return SagaResult.
+        return self._build_result(
+            saga_name=saga_name,
+            saga_def=saga_def,
+            ctx=ctx,
+            started_at=started_at,
+            success=success,
+            error=error,
+        )
+
+    async def _compensate(
+        self,
+        policy: CompensationPolicy,
+        saga_name: str,
+        saga_def: SagaDefinition,
+        ctx: SagaContext,
+    ) -> bool:
+        """Compensate every step that committed; returns whether the caller was cancelled meanwhile.
+
+        The compensations run to completion whatever happens to the calling task (a cancellation is reported,
+        and re-raised once they ran), in a task of their own with the transaction state cleared: each
+        compensation is a unit of work of its own, as the step it undoes was, never part of the caller's.
+        """
+
+        async def compensate() -> None:
             try:
                 await self._compensator.compensate(
-                    policy=compensation_policy,
+                    policy=policy,
                     saga_name=saga_name,
-                    completed_step_ids=completed_step_ids,
+                    completed_step_ids=ctx.steps_to_compensate(),
                     saga_def=saga_def,
                     ctx=ctx,
                     topology_layers=ctx.topology_layers,
@@ -163,31 +223,15 @@ class SagaEngine:
                     comp_exc,
                 )
 
-        finally:
-            # 7a. Emit on_completed event.
-            if self._events_port is not None:
-                await self._events_port.on_completed(
-                    saga_name,
-                    ctx.correlation_id,
-                    success,
-                )
+        _result, _error, cancelled = await run_shielded(detached(compensate(), name=f"saga-compensation-{saga_name}"))
+        return cancelled
 
-            # 7b. Persist final state.
-            if self._persistence_port is not None:
-                await self._persistence_port.mark_completed(
-                    ctx.correlation_id,
-                    success,
-                )
-
-        # 8. Build and return SagaResult.
-        return self._build_result(
-            saga_name=saga_name,
-            saga_def=saga_def,
-            ctx=ctx,
-            started_at=started_at,
-            success=success,
-            error=error,
-        )
+    async def _finish(self, saga_name: str, ctx: SagaContext, success: bool) -> None:
+        """Emit ``on_completed`` and persist the final state."""
+        if self._events_port is not None:
+            await self._events_port.on_completed(saga_name, ctx.correlation_id, success)
+        if self._persistence_port is not None:
+            await self._persistence_port.mark_completed(ctx.correlation_id, success)
 
     @staticmethod
     def _build_result(

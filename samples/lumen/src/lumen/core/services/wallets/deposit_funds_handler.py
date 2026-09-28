@@ -8,7 +8,10 @@ the ``balance >= 0`` invariant), persists the new state, then drains and
 publishes the pending events.
 
 Runs inside ``@transactional()`` so the load-mutate-save sequence is one
-committed unit of work over a single session.
+committed unit of work over a single session. The row is read with a
+pessimistic lock (``LockMode.PESSIMISTIC_WRITE``), as the withdrawal does,
+so a concurrent deposit or withdrawal of the same wallet waits instead of
+overwriting this one's balance.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from lumen.models.entities.v1.money import Money
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -45,7 +48,7 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 
     @transactional()
     async def do_handle(self, command: DepositFunds) -> int:  # type: ignore[override]
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE)
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 

@@ -15,16 +15,29 @@
 
 from __future__ import annotations
 
+import uuid
+from pathlib import Path
+from typing import Generic, TypeVar
 from uuid import UUID
 
 import pytest
 from sqlalchemy import String
+from sqlalchemy.dialects import mssql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.pool import NullPool
 
+from pyfly.container.stereotypes import repository
+from pyfly.context.application_context import ApplicationContext
+from pyfly.core.config import Config
 from pyfly.data.pageable import Pageable, Sort
+from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity, SoftDeleteMixin
 from pyfly.data.relational.sqlalchemy.soft_delete import SoftDeleteRepository
+from tests.support.contract_models import ContractSoftItem
+
+E = TypeVar("E")
+K = TypeVar("K")
 
 
 class SoftOrder(BaseEntity, SoftDeleteMixin):
@@ -286,3 +299,80 @@ class TestSoftDeletePaginatedExcludesDeleted:
 
         names = {o.name async for o in repo.stream_all(Sort.by("name"))}
         assert names == {"b"}
+
+
+class SoftItems(SoftDeleteRepository[ContractSoftItem, uuid.UUID]):
+    """The documented form (C052)."""
+
+
+class TenantScoped(SoftDeleteRepository[E, K]):
+    """An intermediate generic base, as applications write them."""
+
+
+class TenantItems(TenantScoped[ContractSoftItem, uuid.UUID]):
+    pass
+
+
+class KeyFirst(SoftDeleteRepository[E, K], Generic[K, E]):
+    """A generic base that declares its parameters in the other order."""
+
+
+class KeyFirstItems(KeyFirst[uuid.UUID, ContractSoftItem]):
+    pass
+
+
+# ---------------------------------------------------------------------------------------------------------
+# WP03-04 (C052): the entity type through generic bases
+# ---------------------------------------------------------------------------------------------------------
+
+
+def test_the_entity_type_is_resolved_through_generic_bases() -> None:
+    for repository_class in (SoftItems, TenantItems, KeyFirstItems):
+        assert repository_class._entity_type is ContractSoftItem, repository_class
+        assert repository_class._id_type is uuid.UUID, repository_class
+        assert repository_class()._model is ContractSoftItem
+    with pytest.raises(TypeError, match="requires either a concrete entity type"):
+        TenantScoped()
+
+
+async def test_the_documented_soft_delete_repository_is_a_bean(tmp_path: Path) -> None:
+    url = f"sqlite+aiosqlite:///{tmp_path / 'beans.db'}"
+    engine = create_async_engine(url, poolclass=NullPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all, tables=[ContractSoftItem.__table__])
+    await engine.dispose()
+
+    @repository
+    class BeanItems(SoftDeleteRepository[ContractSoftItem, uuid.UUID]):
+        pass
+
+    relational = {"enabled": "true", "url": url, "ddl-auto": "none"}
+    ctx = ApplicationContext(Config({"pyfly": {"data": {"relational": relational}}}))
+    ctx.register_bean(RelationalAutoConfiguration)
+    ctx.register_bean(BeanItems)
+    await ctx.start()
+    try:
+        items = ctx.get_bean(BeanItems)
+        saved = await items.save(ContractSoftItem(label="bean"))
+        await items.delete_by_id(saved.id)
+        assert await items.count() == 0
+    finally:
+        await ctx.stop()
+
+
+@pytest.mark.parametrize(("name", "limit"), [("sqlite", 32766), ("mssql", 2100)])
+def test_a_soft_delete_update_stays_within_the_statement_parameter_limit(name: str, limit: int) -> None:
+    """The id chunks leave room for the stamps the UPDATE sets beside them: SQLite and SQL Server count every
+    parameter of a statement, the IN list's and the SET clause's together."""
+    dialect = {"sqlite": sqlite.dialect(), "mssql": mssql.dialect()}[name]
+    items = SoftItems()
+    identities = [(uuid.uuid4(),) for _ in range(40_000)]
+    stamps = {"deleted_at": None, "updated_at": None, "updated_by": "bob"}
+    statements = [
+        items._soft_delete_update([criterion], stamps)
+        for criterion in items._soft_delete_criteria(dialect, identities, stamps)
+    ]
+    assert len(statements) > 1
+    for statement in statements:
+        compiled = statement.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+        assert len(compiled.positiontup or compiled.params) <= limit

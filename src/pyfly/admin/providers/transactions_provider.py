@@ -114,15 +114,23 @@ class TransactionsProvider:
         return tccs
 
     async def _get_in_flight_count(self) -> int:
+        """The in-flight executions of the persistence port the saga and TCC engines use: the configured
+        provider's port, or the application's own; the legacy in-memory adapter bean only when it is the
+        only port."""
         try:
             from pyfly.transactional.shared.persistence.memory import (
                 InMemoryPersistenceAdapter,
             )
+            from pyfly.transactional.shared.ports.outbound import TransactionalPersistencePort
 
-            for _cls, reg in self._context.container._registrations.items():
-                if reg.instance is not None and isinstance(reg.instance, InMemoryPersistenceAdapter):
-                    in_flight = await reg.instance.get_in_flight()
-                    return len(in_flight)
+            ports = [
+                reg.instance
+                for reg in self._context.container._registrations.values()
+                if reg.instance is not None and isinstance(reg.instance, TransactionalPersistencePort)
+            ]
+            ports.sort(key=lambda port: type(port) is InMemoryPersistenceAdapter)
+            if ports:
+                return len(await ports[0].get_in_flight())
         except ImportError:
             pass
         return 0

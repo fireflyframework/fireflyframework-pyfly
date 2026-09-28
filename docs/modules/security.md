@@ -16,6 +16,7 @@ The PyFly security module is a full Spring-Security-style stack for async Python
   - [Permission Checking](#permission-checking)
   - [Anonymous Context](#anonymous-context)
   - [Full API Reference](#securitycontext-api-reference)
+  - [SecurityContextHolder](#securitycontextholder)
 - [JWT Authentication](#jwt-authentication)
   - [JWTService](#jwtservice)
   - [Encoding Tokens](#encoding-tokens)
@@ -233,6 +234,33 @@ The `anonymous()` class method creates a context with all defaults, representing
 | `has_any_role(roles)`      | `bool`      | `True` if the user has any of the given roles    |
 | `has_permission(permission)` | `bool`    | `True` if the user has the specified permission  |
 | `anonymous()` (classmethod)| `SecurityContext` | Create an anonymous (unauthenticated) context |
+
+### SecurityContextHolder
+
+`pyfly.security.SecurityContextHolder` (Spring's `SecurityContextHolder`) answers "who is doing this?" for
+code that is not handed the request: services, auditing (`AuditorAware`), background work.
+`SecurityContextHolder.get_context()` returns, in this order:
+
+1. a context set on the holder for the running task (`SecurityContextHolder.using(ctx)`,
+   `set_context`/`reset_context`, or `pyfly.data.auditing.run_as(...)`);
+2. inside an HTTP request, the context the security filters established (`request.state.security_context`),
+   read live, whichever filter authenticated the request: a bearer token, HTTP Basic, X.509, or the session
+   a form login, OAuth2 login or switch-user stored (restored by `OAuth2SessionSecurityFilter`);
+3. `RequestContext.current().security_context`, which also wins over an anonymous
+   `request.state.security_context` (what `SecurityFilter` sets when it authenticated nobody) when it holds
+   an authenticated principal.
+
+```python
+from pyfly.security import SecurityContext, SecurityContextHolder
+
+user_id = SecurityContextHolder.get_authenticated_user_id()    # None when anonymous
+
+with SecurityContextHolder.using(SecurityContext(user_id="system:reindex")):
+    await reindexer.run()                                      # tasks started here inherit it
+```
+
+`OAuth2SessionSecurityFilter` also copies the session's principal into `RequestContext`, as the token
+filters do, so `@pre_authorize` sees a session-authenticated user.
 
 ---
 
@@ -1207,7 +1235,7 @@ await users.load_user_by_username("nobody")  # -> None
 
 #### SqlUserDetailsService
 
-`SqlUserDetailsService` is a durable, table-backed `UserDetailsService` for HTTP Basic / form login, backed by any SQLAlchemy `AsyncEngine`. It is hexagonal: the engine is supplied lazily via an `engine_factory` callable (the composition root injects it), and SQLAlchemy is never imported at module scope. The table is created lazily and idempotently on first use, with columns `username` (PK), `password_hash`, `roles` (JSON), `permissions` (JSON), and `enabled` (int). It works on PostgreSQL and SQLite via an `ON CONFLICT` upsert.
+`SqlUserDetailsService` is a durable, table-backed `UserDetailsService` for HTTP Basic / form login, on any relational backend SQLAlchemy supports (PostgreSQL, MySQL, MariaDB, SQLite). It is hexagonal: the datasource is supplied through `engine_factory` (an `AsyncEngine`, a registry `DataSource`, a datasource name, or a callable returning one, resolved on first use), and SQLAlchemy is never imported at module scope. The users live in the framework table `pyfly_users` (`pyfly.data.relational.framework_schema.users`, or the table you name), with columns `username` (PK, `VARCHAR(255)`, matched exactly on every backend: a binary collation on MySQL and MariaDB, so `Alice` and `alice` are two users there too), `password_hash`, `roles` (JSON), `permissions` (JSON), and `enabled` (int); `start()` (or the first use) creates it idempotently, and with `create_table=False` it is only checked. `save()` is the dialect's upsert. Every operation runs through `infrastructure_unit()`: a login lookup outside a transaction is a single autocommit statement on PostgreSQL, and a `save()` inside a unit of work on the store's datasource commits or rolls back with it.
 
 ```python
 from pyfly.container import configuration, bean
@@ -1445,7 +1473,7 @@ class X509Config:
 
 ### Logout
 
-`LogoutFilter` handles a POST to the logout URL — independent of OAuth2 — by invalidating the HTTP session, clearing the security context to anonymous, and deleting configured cookies. It runs at `HIGHEST_PRECEDENCE + 235` (after form login). With `use_redirect=True` it returns a `302` to the success URL; otherwise it returns `204 No Content`.
+`LogoutFilter` handles a POST to the logout URL — independent of OAuth2 — by invalidating the HTTP session, clearing the security context to anonymous, and deleting configured cookies. It runs at `HIGHEST_PRECEDENCE + 235` (after form login). With `use_redirect=True` it returns a `302` to the success URL; otherwise it returns `204 No Content`. Given a session concurrency controller (`concurrency=`; the auto-configuration passes the `SessionConcurrencyController` bean when `pyfly.session.concurrency.enabled=true`), it also deregisters the session, as the OAuth2 login handler's logout does, so the per-principal cap stops counting it at once. The session is invalidated first: a deregistration that fails (the registry down) is logged as `session_deregistration_failed` and never undoes the logout.
 
 Enable config-driven logout (requires `starlette`):
 
@@ -1519,6 +1547,8 @@ class SwitchUserConfig:
 ```
 
 An impersonated request can be recognised with `security_context.has_role("PREVIOUS_ADMINISTRATOR")`, and the original principal read from `security_context.attributes["switch_user_original"]`.
+
+The switch and the exit put the context they establish on `request.state.security_context` and on the current `RequestContext`, as the token, HTTP Basic, X.509 and session filters do, so method security and the CQRS query cache see the impersonated (or restored) principal within the same request; on later requests `OAuth2SessionSecurityFilter` restores it from the session.
 
 **Source:** `src/pyfly/web/adapters/starlette/filters/switch_user_filter.py`
 

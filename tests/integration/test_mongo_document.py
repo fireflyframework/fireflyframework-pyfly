@@ -1,0 +1,174 @@
+# Copyright 2026 Firefly Software Foundation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for BaseDocument and AggregateDocument as models (Beanie builds a document only once it is bound to
+a database: a replica set of the test's own).
+
+The audit hooks and the timestamp round trip are proven on a real replica set in
+``tests/integration/test_mongo_context.py``; the domain events of aggregate documents in
+``tests/integration/test_mongo_domain_events.py``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+
+import pytest
+
+from pyfly.data.document.mongodb.document import AggregateDocument, BaseDocument
+from pyfly.domain.domain_event import DomainEvent
+from tests.support.mongo import beanie_database
+
+# ---------------------------------------------------------------------------
+# Test document subclass
+# ---------------------------------------------------------------------------
+
+
+class UserDocument(BaseDocument):
+    name: str
+    email: str = ""
+
+    class Settings:
+        name = "users"
+
+
+class OrderPlaced(DomainEvent):
+    pass
+
+
+class OrderDocument(AggregateDocument):
+    status: str = "NEW"
+
+    class Settings:
+        name = "orders"
+
+
+@pytest.fixture(autouse=True)
+async def init_db(mongo_rs_url: str) -> AsyncIterator[None]:
+    """Bind the documents to a database of the test's own on the MongoDB replica set."""
+    async with beanie_database(mongo_rs_url, [UserDocument, OrderDocument]):
+        yield
+
+
+# ===========================================================================
+# Tests
+# ===========================================================================
+
+
+class TestBaseDocument:
+    """BaseDocument audit fields and Pydantic behaviour."""
+
+    def test_subclass_has_audit_fields(self):
+        """BaseDocument subclass has created_at, updated_at, created_by, updated_by."""
+        fields = set(UserDocument.model_fields)
+        assert "created_at" in fields
+        assert "updated_at" in fields
+        assert "created_by" in fields
+        assert "updated_by" in fields
+
+    def test_default_audit_timestamps_set(self):
+        """Audit timestamps are set by default."""
+        doc = UserDocument(name="Alice")
+        assert isinstance(doc.created_at, datetime)
+        assert isinstance(doc.updated_at, datetime)
+
+    def test_default_audit_by_fields_none(self):
+        """created_by and updated_by default to None."""
+        doc = UserDocument(name="Alice")
+        assert doc.created_by is None
+        assert doc.updated_by is None
+
+    def test_audit_by_fields_can_be_set(self):
+        """Audit by fields accept string values."""
+        doc = UserDocument(name="Alice", created_by="admin", updated_by="admin")
+        assert doc.created_by == "admin"
+        assert doc.updated_by == "admin"
+
+    def test_pydantic_model_dump(self):
+        """Pydantic serialisation works."""
+        doc = UserDocument(name="Alice", email="alice@example.com")
+        data = doc.model_dump(exclude={"id", "revision_id"})
+        assert data["name"] == "Alice"
+        assert data["email"] == "alice@example.com"
+        assert "created_at" in data
+        assert "updated_at" in data
+
+    def test_pydantic_model_validate(self):
+        """Pydantic deserialisation works."""
+        now = datetime.now(UTC)
+        data = {
+            "name": "Bob",
+            "email": "bob@example.com",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+        doc = UserDocument.model_validate(data)
+        assert doc.name == "Bob"
+        assert doc.email == "bob@example.com"
+
+    def test_settings_collection_name(self):
+        """Subclass Settings.name configures the collection."""
+        assert UserDocument.Settings.name == "users"
+
+    def test_inherits_from_beanie_document(self):
+        """BaseDocument is a Beanie Document."""
+        from beanie import Document
+
+        assert issubclass(BaseDocument, Document)
+        assert issubclass(UserDocument, Document)
+
+    def test_subclass_custom_fields(self):
+        """Subclass custom fields are accessible."""
+        doc = UserDocument(name="Charlie", email="charlie@example.com")
+        assert doc.name == "Charlie"
+        assert doc.email == "charlie@example.com"
+
+    def test_timestamps_are_aware_utc(self):
+        """A naive timestamp is taken as UTC, an aware one converted to UTC (the Mongo timestamp contract)."""
+        naive = UserDocument(name="n", created_at=datetime(2026, 1, 1, 12, 0), updated_at=datetime(2026, 1, 1, 12, 0))
+        assert naive.created_at == datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        from datetime import timedelta, timezone
+
+        madrid = timezone(timedelta(hours=2))
+        aware = UserDocument(name="a", created_at=datetime(2026, 7, 1, 14, 0, tzinfo=madrid))
+        assert aware.created_at == datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+        assert aware.created_at.tzinfo is UTC
+        assert UserDocument(name="d").created_at.tzinfo is UTC
+
+    def test_audit_hooks_are_public_event_actions(self):
+        """Beanie runs only public event actions: the audit hooks must not start with an underscore."""
+        hooks = [name for name in dir(BaseDocument) if name.startswith("pyfly_audit_")]
+        assert sorted(hooks) == [
+            "pyfly_audit_insert",
+            "pyfly_audit_replace",
+            "pyfly_audit_save",
+            "pyfly_audit_save_changes",
+            "pyfly_audit_update",
+        ]
+        assert all(getattr(getattr(BaseDocument, hook), "has_action", False) for hook in hooks)
+
+
+class TestAggregateDocument:
+    def test_it_queues_and_drains_its_events(self):
+        order = OrderDocument()
+        event = OrderPlaced()
+        order.raise_event(event)
+        assert order.pending_events() == [event]
+        assert order.clear_events() == [event]
+        assert order.pending_events() == []
+
+    def test_its_events_are_not_persisted_fields(self):
+        order = OrderDocument()
+        order.raise_event(OrderPlaced())
+        assert "_pending_events" not in order.model_dump()

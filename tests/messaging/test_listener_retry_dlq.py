@@ -11,13 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""@message_listener retry + dead-letter routing (v26.06.47)."""
+"""@message_listener retry + dead-letter routing (v26.06.47).
+
+On the in-memory broker the handler is retried in process and dead-lettered by republishing. On a broker
+with a listener container (Kafka, RabbitMQ), ``wrap_listener`` only hands the listener's settings to the
+container, which retries and dead-letters each delivery outside its unit of work (26.09.08).
+"""
 
 from __future__ import annotations
 
 import pytest
 
 from pyfly.messaging.error_handling import wrap_listener
+from pyfly.messaging.listener_container import LinearBackOff, ListenerEndpoint, ListenerOptions, listener_options
 from pyfly.messaging.types import Message
 
 
@@ -85,3 +91,46 @@ async def test_exhausted_retries_without_dlq_reraises() -> None:
     wrapped = wrap_listener(handler, _FakeBroker(), retries=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="boom"):
         await wrapped(_msg())
+
+
+@pytest.mark.asyncio
+async def test_none_settings_keep_the_in_process_defaults() -> None:
+    async def handler(_m: Message) -> None: ...
+
+    assert wrap_listener(handler, _FakeBroker(), retries=None, retry_delay=None) is handler  # type: ignore[arg-type]
+
+
+class _ContainerBroker(_FakeBroker):
+    manages_listener_errors = True
+
+
+@pytest.mark.asyncio
+async def test_a_container_broker_gets_the_settings_not_an_in_process_retry() -> None:
+    calls = {"n": 0}
+
+    async def handler(_m: Message) -> None:
+        calls["n"] += 1
+        raise ValueError("boom")
+
+    wrapped = wrap_listener(
+        handler,
+        _ContainerBroker(),  # type: ignore[arg-type]
+        retries=2,
+        retry_delay=0.5,
+        dead_letter_topic="orders.DLT",
+    )
+    assert isinstance(wrapped, ListenerEndpoint)
+    assert listener_options(wrapped) == ListenerOptions(
+        max_attempts=3, backoff=LinearBackOff(0.5), dead_letter="orders.DLT"
+    )
+    with pytest.raises(ValueError, match="boom"):
+        await wrapped(_msg())  # the container retries: the wrapper calls the handler once
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_container_broker_keeps_its_own_policy_for_unset_settings() -> None:
+    async def handler(_m: Message) -> None: ...
+
+    wrapped = wrap_listener(handler, _ContainerBroker(), retries=None, retry_delay=None)  # type: ignore[arg-type]
+    assert listener_options(wrapped) == ListenerOptions()

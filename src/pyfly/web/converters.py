@@ -113,6 +113,11 @@ class TimeoutExceptionConverter:
 class SQLAlchemyIntegrityExceptionConverter:
     """Converts ``sqlalchemy.exc.IntegrityError`` to a PyFly 409 Conflict exception.
 
+    The result is the persistence layer's translation (:mod:`pyfly.data.exception_translation`): a
+    :class:`~pyfly.kernel.exceptions.DataIntegrityException` (a ``ConflictException``;
+    ``DuplicateKeyException`` for a unique key) whose message and context name the violated constraint, and
+    never the SQL statement or its bound values, which are logged at ``DEBUG`` server-side instead.
+
     Lazy-imports SQLAlchemy so this converter is a silent no-op when the library
     is not installed (``can_handle`` will always return ``False``).
     """
@@ -126,12 +131,34 @@ class SQLAlchemyIntegrityExceptionConverter:
             return False
 
     def convert(self, exc: Exception) -> PyFlyException:
-        from pyfly.kernel.exceptions import ConflictException  # noqa: PLC0415
+        from pyfly.data.exception_translation import integrity_violation, translate_exception  # noqa: PLC0415
 
-        return ConflictException(
-            f"Data integrity constraint violated: {exc}",
-            code="INTEGRITY_ERROR",
-        )
+        translated = translate_exception(exc)
+        if isinstance(translated, PyFlyException):
+            return translated
+        generic = integrity_violation(None, None)
+        generic.__cause__ = exc
+        return generic
+
+
+class PersistenceExceptionConverter:
+    """Converts every persistence exception the data layer translates (an optimistic-locking
+    ``StaleDataError``, a backend's integrity error; :mod:`pyfly.data.exception_translation`) to its kernel
+    exception, a 409. Repositories and units of work raise the kernel exceptions themselves; this catches
+    one that reached the web layer untranslated (code that used a session directly)."""
+
+    def can_handle(self, exc: Exception) -> bool:
+        from pyfly.data.exception_translation import is_translatable  # noqa: PLC0415
+
+        return is_translatable(exc)
+
+    def convert(self, exc: Exception) -> PyFlyException:
+        from pyfly.data.exception_translation import translate_exception  # noqa: PLC0415
+
+        translated = translate_exception(exc)
+        if translated is exc or not isinstance(translated, PyFlyException):
+            raise TypeError(f"{type(exc).__name__} is not a persistence exception")
+        return translated
 
 
 class HttpxExceptionConverter:
@@ -204,7 +231,7 @@ def default_exception_converters() -> list[ExceptionConverter]:
     """The built-in converter chain consulted for non-PyFly exceptions.
 
     Mirrors Spring's registered ``*ExceptionConverter`` chain (validation, JSON,
-    timeout). Users can contribute additional converters as beans implementing
+    timeout, persistence). Users can contribute additional converters as beans implementing
     :class:`ExceptionConverter`; they are appended via
     :func:`build_exception_converter_service`.
     """
@@ -213,6 +240,7 @@ def default_exception_converters() -> list[ExceptionConverter]:
         JSONExceptionConverter(),
         TimeoutExceptionConverter(),
         SQLAlchemyIntegrityExceptionConverter(),
+        PersistenceExceptionConverter(),
         HttpxExceptionConverter(),
         CircuitBreakerExceptionConverter(),
     ]

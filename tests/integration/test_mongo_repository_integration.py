@@ -13,7 +13,8 @@
 # limitations under the License.
 """Integration tests: MongoRepository against a real MongoDB (pymongo AsyncMongoClient/Beanie).
 
-These tests exercise behaviour that mongomock cannot fully replicate:
+These tests exercise the repository on a standalone server (no transactions: every call runs in a short unit
+without one):
   - Real pymongo async I/O with actual network round-trips
   - ``$regex`` filter queries executed by a live MongoDB
   - ``save_all`` + ``find_all_by_id`` batch operations
@@ -125,7 +126,6 @@ async def test_mongo_repository_full(mongo_url: str) -> None:
         assert scores == sorted(scores, reverse=True)
 
         # --- 4. MongoDB-specific $regex filter (real-Mongo path) -------------
-        # mongomock does not handle all regex edge-cases accurately
         await repo.save(Article(title="Python Tutorial", author="carol"))
         await repo.save(Article(title="Python Advanced Tips", author="carol"))
         await repo.save(Article(title="JavaScript Basics", author="carol"))

@@ -18,8 +18,8 @@ samples/lumen/
 │   │   ├── dtos/v1/        # OpenWalletRequest, DepositRequest, WalletDto, BalanceDto
 │   │   └── enums/v1/       # Currency
 │   ├── models/             # Domain + persistence layer
-│   │   ├── entities/v1/    # Money value object, Wallet aggregate + events
-│   │   └── repositories/   # Port + InMemoryWalletRepository
+│   │   ├── entities/v1/    # Money value object, Wallet aggregate + events, WalletEntity row
+│   │   └── repositories/   # WalletRepository (framework Repository on SQLite)
 │   ├── core/               # Application core
 │   │   ├── services/wallets/   # Commands, queries, handlers
 │   │   └── mappers/        # Aggregate -> DTO mapping
@@ -45,9 +45,20 @@ services import to call this one.
   (`WalletOpened`, `FundsDeposited`, `FundsWithdrawn`) on every state
   change. `Money` is a `ValueObject` with structural equality and exact
   integer arithmetic.
-- **Hexagonal repository** — the core depends on the `WalletRepository`
-  *port*; `InMemoryWalletRepository` is the in-memory *adapter*
-  (`@repository`).
+- **A Spring-Data-style repository** — `WalletRepository` extends the
+  framework's `Repository[WalletEntity, str]` over SQLite: inherited CRUD,
+  a derived query (`find_by_owner_id`) and a `Specification` query
+  (`find_rich`). Every call joins the unit of work of the
+  `@transactional` command handler that makes it, or runs in a short unit
+  of its own.
+- **The invariant under concurrency** — the aggregate can only check the
+  balance it was loaded with, so two requests that race could both see
+  enough funds. The deposit and withdrawal handlers read the wallet with a
+  pessimistic lock (`find_by_id(..., lock=LockMode.PESSIMISTIC_WRITE)`), and
+  the money-transfer saga, whose steps run outside a caller's transaction,
+  changes balances with one guarded `UPDATE` (`WalletRepository.debit` /
+  `credit`). Two withdrawals of 60 from a wallet holding 100 never both
+  succeed (`tests/test_concurrent_balance_changes.py`).
 - **CQRS** — write intents (`OpenWallet`, `DepositFunds`,
   `WithdrawFunds`) and read intents (`GetWallet`, `GetBalance`) flow
   through the command/query bus to their `@command_handler` /
@@ -73,9 +84,18 @@ wallet.
 
 ```bash
 cd samples/lumen
-uv sync --extra dev               # framework (local v26.6.60) + pytest
-uv run pytest -q                  # 17 tests, all green
+uv sync --extra dev               # the framework from this checkout + pytest
+uv run pytest -q                  # all green, on SQLite
 uv run pyfly run --server uvicorn # serve on :8080 (uvicorn comes with pyfly[web])
+```
+
+The concurrency tests also run on PostgreSQL when `LUMEN_TEST_POSTGRES_URL`
+names a server they may create databases on (each test gets a database of
+its own, dropped afterwards):
+
+```bash
+LUMEN_TEST_POSTGRES_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres \
+  uv run --extra dev --with asyncpg pytest tests/test_concurrent_balance_changes.py
 ```
 
 `pyfly run` discovers `lumen.main:app` (the ASGI entry point) and serves

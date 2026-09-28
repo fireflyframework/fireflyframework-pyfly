@@ -26,11 +26,12 @@ import pytest
 
 from pyfly.cache.adapters.memory import InMemoryCache
 from pyfly.cqrs.cache.adapter import CQRS_CACHE_PREFIX, QueryCacheAdapter
+from pyfly.cqrs.cache.decorators import cacheable
 from pyfly.cqrs.command.registry import HandlerRegistry
 from pyfly.cqrs.decorators import query_handler
 from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
-from pyfly.cqrs.types import Query
+from pyfly.cqrs.types import Query, QueryCacheScope
 
 # ---------------------------------------------------------------------------
 # Test query / handler fixtures
@@ -57,6 +58,7 @@ class GetProductNoKeyQuery(Query[dict]):
         return None
 
 
+@cacheable(scope=QueryCacheScope.GLOBAL)  # a product is the same for every caller
 @query_handler(cacheable=True, cache_ttl=300)
 class GetProductHandler(QueryHandler[GetProductQuery, dict]):
     def __init__(self) -> None:

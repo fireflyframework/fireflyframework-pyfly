@@ -16,7 +16,6 @@ import pytest
 
 from pyfly.eventsourcing.aggregate import AggregateRoot
 from pyfly.eventsourcing.event import DomainEvent, StoredEventEnvelope
-from pyfly.eventsourcing.outbox import TransactionalOutbox
 from pyfly.eventsourcing.projection import FunctionProjection, ProjectionRunner
 from pyfly.eventsourcing.repository import EventSourcedRepository
 from pyfly.eventsourcing.snapshot import InMemorySnapshotStore
@@ -107,23 +106,6 @@ class TestSnapshotStore:
         await store.save(snap)
         loaded = await store.load("o")
         assert loaded is not None and loaded.sequence == 10
-
-
-class TestOutbox:
-    @pytest.mark.asyncio
-    async def test_outbox_publishes(self) -> None:
-        published: list[StoredEventEnvelope] = []
-
-        async def publish(env: StoredEventEnvelope) -> None:
-            published.append(env)
-
-        outbox = TransactionalOutbox(publish=publish, poll_interval_s=0.05)
-        record = await outbox.enqueue(StoredEventEnvelope.of("o", "Order", 0, OrderPlaced()))
-        await outbox.start()
-        await asyncio.sleep(0.2)
-        await outbox.stop()
-        assert record.delivered
-        assert len(published) == 1
 
 
 class TestProjection:

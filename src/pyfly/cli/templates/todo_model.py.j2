@@ -3,7 +3,7 @@
 from pydantic import BaseModel, Field
 {% if has_data %}
 
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, Identity, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pyfly.data.relational.sqlalchemy import Base
@@ -31,9 +31,11 @@ class TodoResponse(BaseModel):
 class TodoEntity(Base):
     __tablename__ = "todos"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # Identity(): an identity column on every backend (Oracle has no implicit autoincrement).
+    id: Mapped[int] = mapped_column(Identity(), primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
-    description: Mapped[str] = mapped_column(String(1000), default="")
+    # Optional text is nullable: Oracle stores an empty string as NULL.
+    description: Mapped[str | None] = mapped_column(String(1000), default=None)
     completed: Mapped[bool] = mapped_column(Boolean, default=False)
 {% endif %}
 {% if has_mongodb %}

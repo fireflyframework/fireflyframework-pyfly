@@ -480,6 +480,21 @@ aggregator.add_indicator("payment-gateway", PaymentGatewayHealthIndicator())
 |-------------|-------------------|------------------------------------|
 | `name`      | `str`             | Unique name for this indicator     |
 | `indicator` | `HealthIndicator` | Object implementing the protocol   |
+| `groups`    | `set[ProbeGroup] \| None` | Probe groups; `None` uses the indicator's own `probe_groups` attribute, and an indicator without one joins both probes |
+
+An indicator can declare its probe groups on its class, as the database indicator does, which is
+readiness-only:
+
+```python
+class DatabaseHealthIndicator:
+    probe_groups = frozenset({ProbeGroup.READINESS})
+
+    async def health(self) -> HealthStatus: ...
+```
+
+The bean scan (`install_health_indicators`) honors that attribute. It skips an indicator instance that
+is already registered under another name, so an explicit `add_indicator("db", indicator, groups=...)`
+made before the scan is kept.
 
 ### check()
 
@@ -1002,13 +1017,18 @@ The refresh endpoint mirrors Spring Cloud's `POST /actuator/refresh`. It first c
 `Config.reload_from_sources()` to **re-read the configuration files/profiles** (the exact merge
 `from_sources` performed), then triggers a context refresh — evicting all refresh-scoped beans and
 resetting `@config_properties` beans so they re-bind against the freshly-reloaded `Config` (which
-also re-reads environment variables and `${...}` placeholders) on next resolution.
-A `RefreshScopeRefreshedEvent` is published, and the response lists the cache keys
-of the beans that were refreshed:
+also re-reads environment variables and `${...}` placeholders) on next resolution. The evicted
+refresh-scoped instances are destroyed (their `@pre_destroy` runs, then the destroy method of a
+`@bean` product, inferred as `dispose()`/`aclose()`/`close()` when none is declared, then `stop()`
+of a lifecycle bean, so one that owns an engine disposes its pool). A `RefreshScopeRefreshedEvent`
+is published, and the response lists the scope
+keys of the refresh-scoped beans that were evicted (`__pyfly_bean_<module>.<class>`, followed by
+`#<bean name>` for a named bean; through 26.09.07 a key was `__pyfly_bean_<class>`, without the module
+or the name, and two beans of one class shared it):
 
 ```json
 {
-    "refreshed": ["FeatureFlags-singleton", "PricingProperties-singleton"]
+    "refreshed": ["__pyfly_bean_myapp.flags.FeatureFlags", "__pyfly_bean_myapp.reporting.ReportingDatabase#reporting_database"]
 }
 ```
 
@@ -1043,7 +1063,7 @@ The config key is `pyfly.management.endpoints.web.exposure.include` (a CSV strin
 ```bash
 # Reload configuration at runtime (no restart)
 curl -X POST http://localhost:8080/actuator/refresh
-# {"refreshed": ["FeatureFlags-singleton"]}
+# {"refreshed": ["__pyfly_bean_myapp.flags.FeatureFlags"]}
 ```
 
 **Source:** `src/pyfly/actuator/endpoints/refresh_endpoint.py`,

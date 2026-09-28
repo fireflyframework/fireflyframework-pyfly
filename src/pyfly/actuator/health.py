@@ -102,13 +102,23 @@ class HealthAggregator:
         indicator: HealthIndicator,
         groups: set[ProbeGroup] | None = None,
     ) -> None:
-        """Register a named health indicator with optional probe group membership."""
+        """Register a named health indicator with optional probe group membership.
+
+        Without *groups*, the indicator's own ``probe_groups`` attribute decides (the database
+        indicator declares ``{READINESS}``); an indicator that declares none takes part in both probes.
+        """
+        if groups is None:
+            groups = getattr(indicator, "probe_groups", None)
         self._indicators[name] = indicator
         self._groups[name] = set(groups) if groups else set()
 
     def has_indicator(self, name: str) -> bool:
         """Whether an indicator is registered under *name*."""
         return name in self._indicators
+
+    def has_indicator_instance(self, indicator: object) -> bool:
+        """Whether *indicator* itself is registered, under any name."""
+        return any(existing is indicator for existing in self._indicators.values())
 
     async def check(self) -> HealthResult:
         """Run all indicators and return an aggregated health result.
