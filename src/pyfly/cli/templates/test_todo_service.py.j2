@@ -58,9 +58,10 @@ class TestTodoService:
 """Tests for the todo service (async; fast unit tests with a mocked repository).
 
 These need no running MongoDB: the repository is an ``AsyncMock`` and document
-construction is stubbed. For a full integration test, install ``mongomock-motor``
-(or use a real Mongo), call ``init_beanie(...)`` with ``TodoDocument``, and drive
-``TodoDocumentRepository`` directly.
+construction is stubbed. For a full integration test, start a real MongoDB
+replica set (``pyfly.testing.mongodb_replica_set_container()``, with the
+``testcontainers`` extra), call ``init_beanie(...)`` with ``TodoDocument``, and
+drive ``TodoDocumentRepository`` directly; transactions need a replica set.
 """
 
 from types import SimpleNamespace

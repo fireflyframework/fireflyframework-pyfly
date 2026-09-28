@@ -133,7 +133,7 @@ FEATURE_DETAILS: dict[str, dict[str, str]] = {
     },
     "data-document": {
         "short": "Data Document — Document databases (Beanie ODM)",
-        "adds": "MongoRepository[T, ID], BaseDocument, Beanie, Motor async driver, RepositoryPort",
+        "adds": "MongoRepository[T, ID], BaseDocument, Beanie, PyMongo async driver, RepositoryPort",
     },
     "eda": {
         "short": "Event-driven architecture, in-memory event bus",
@@ -194,7 +194,7 @@ FEATURE_TIPS: dict[str, list[str]] = {
     ],
     "data-document": [
         "Configure MongoDB URI in pyfly.yaml under pyfly.data.document.uri",
-        "Documents use Beanie ODM (Pydantic models + Motor async driver)",
+        "Documents use Beanie ODM (Pydantic models + the PyMongo async driver)",
     ],
     "eda": [
         "Events use in-memory bus by default — switch to Kafka for production",
