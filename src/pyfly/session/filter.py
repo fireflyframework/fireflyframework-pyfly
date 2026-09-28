@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -29,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_COOKIE_NAME = "PYFLY_SESSION"
 _DEFAULT_TTL = 1800  # 30 minutes
+
+
+def _report_abandoned_deletion(task: asyncio.Task[None]) -> None:
+    """Log the failure of a session deletion whose request was cancelled (nobody awaits it any more)."""
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("session_delete_failed", exc_info=task.exception())
 
 
 class SessionFilter(OncePerRequestFilter):
@@ -50,10 +57,15 @@ class SessionFilter(OncePerRequestFilter):
     ran, the change is dropped, the session counts as invalidated, and the response sets no session
     cookie at all: the request neither brings the session back nor sends its cookie again, and it
     does not clear the cookie either (another request of the same browser, a login in another tab,
-    may have set a new one meanwhile). A new or rotated id is inserted with ``save``. A store without
-    ``replace`` gets every change through ``save``, an insert-or-replace, and cannot tell a revoked
-    session from a live one: the filter logs ``session_store_without_replace`` (a WARNING) when it is
-    built on one.
+    may have set a new one meanwhile). A new or rotated id is inserted with ``save`` and the old id
+    deleted. A store without ``replace`` gets every change through ``save``, an insert-or-replace,
+    and cannot tell a revoked session from a live one: the filter logs ``session_store_without_replace``
+    (a WARNING) when it is built on one.
+
+    **Deletions run to their end.** The deletion of an invalidated session (a logout) and of a rotated
+    session's old id runs in a task of its own, shielded from the request's cancellation: a
+    level-triggered cancel scope, as anyio's, cancels every await of the request's cleanup too, and a
+    logout cancelled that way left the session live.
 
     ``request.state.persist_session`` saves the session at once (a coroutine function taking no
     arguments): the OAuth2 login handler saves the session it has just logged in before it registers
@@ -74,8 +86,8 @@ class SessionFilter(OncePerRequestFilter):
     ) -> None:
         self._store = store
         # Writes a session only while the store holds it; None for a store that cannot.
-        self._replace = store.replace if isinstance(store, ConditionalSessionStore) else None
-        if self._replace is None:
+        self._conditional = store if isinstance(store, ConditionalSessionStore) else None
+        if self._conditional is None:
             # Such a store cannot keep a logout or an eviction final (see the class documentation).
             logger.warning("session_store_without_replace", extra={"store": type(store).__name__})
         self._cookie_name = cookie_name
@@ -148,19 +160,21 @@ class SessionFilter(OncePerRequestFilter):
         session is left unmodified until its next change. ``False`` when the write-back of a session the store
         was known to hold found it gone (revoked while the request ran): the session is then invalidated, and
         nothing was written."""
-        # If the id was rotated (e.g. on login), drop the entry the store holds the session under, so a
-        # fixed/stale id can no longer resolve to this session (anti-fixation), however many rotations came
-        # before this persist.
-        if session.stored_id is not None and session.stored_id != session.id:
-            await self._store.delete(session.stored_id)
+        stored = session.stored_id
+        # The id the store holds the session under, when a rotation moved the session away from it (however
+        # many rotations came before this persist): it must stop resolving to the session (anti-fixation).
+        stale = stored if stored is not None and stored != session.id else None
 
         if session.invalidated:
-            await self._store.delete(session.id)
+            await self._delete_shielded([session_id for session_id in (stale, session.id) if session_id is not None])
             return True
         if not session.modified:
             return True
-        if self._replace is not None and session.stored_id == session.id:
-            if not await self._replace(session.id, session.get_data(), self._ttl):
+        if stale is not None:
+            await self._delete_shielded([stale])
+        conditional = self._conditional
+        if conditional is not None and stale is None and stored is not None:
+            if not await conditional.replace(session.id, session.get_data(), self._ttl):
                 # Logged out, evicted or expired while this request ran: never bring it back.
                 logger.debug("session_ended_during_request")
                 session.invalidate()
@@ -169,6 +183,28 @@ class SessionFilter(OncePerRequestFilter):
             await self._store.save(session.id, session.get_data(), self._ttl)
         session.mark_persisted()
         return True
+
+    async def _delete_shielded(self, session_ids: list[str]) -> None:
+        """Delete *session_ids* from the store in a task of its own that no cancellation of the request stops.
+
+        A logout, or a login refused or failed, invalidates the session and relies on this deletion to end it;
+        a rotation relies on it to retire the old id. When the request is cancelled (the client went away), a
+        level-triggered cancel scope, as anyio's, cancels every later await of the request too, this one
+        included: shielded, the deletion runs to its end even so. It runs outside any unit of work the request
+        has bound (:func:`~pyfly.data.transaction.detached`).
+        """
+        from pyfly.data.transaction import detached
+
+        async def delete_all() -> None:
+            for session_id in session_ids:
+                await self._store.delete(session_id)
+
+        task = detached(delete_all(), name="session-delete")
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(_report_abandoned_deletion)
+            raise
 
     @staticmethod
     def _is_secure_request(request: Any) -> bool:

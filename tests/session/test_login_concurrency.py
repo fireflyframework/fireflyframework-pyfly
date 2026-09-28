@@ -29,6 +29,7 @@ import asyncio
 import logging
 from typing import Any
 
+import anyio
 import pytest
 from starlette.responses import Response
 
@@ -189,6 +190,55 @@ async def test_a_logout_survives_a_registry_outage(via: str, caplog: pytest.LogC
         await logins.a_logout_survives_a_registry_outage(logins.Replica(store, controller), via, break_registry)
 
     assert "session_deregistration_failed" in caplog.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["logout", "logout-filter"])
+async def test_a_cancelled_logout_still_ends_the_session(via: str) -> None:
+    store = _YieldingStore()
+    registry = InMemorySessionRegistry()
+    controller = SessionConcurrencyController(registry, ConcurrencyControlPolicy(max_sessions=1), session_store=store)
+
+    await logins.a_cancelled_logout_still_ends_the_session(logins.Replica(store, controller), via, registry)
+
+
+class _HangingRegistry(InMemorySessionRegistry):
+    """A registry whose capped registration never answers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def register_limited(
+        self, principal: str, session_id: str, created_at: float, *, max_sessions: int, evict_oldest: bool
+    ) -> SessionRegistration:
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_a_login_cancelled_while_registering_leaves_no_session_behind() -> None:
+    """The login saved the session and was cancelled while registering it, by a level-triggered cancel scope:
+    the session filter's deletion of the invalidated session was cancelled too, and the logged-in session, never
+    registered, stayed in the store."""
+    store = _YieldingStore()
+    registry = _HangingRegistry()
+    controller = SessionConcurrencyController(registry, ConcurrencyControlPolicy(max_sessions=1), session_store=store)
+    replica = logins.Replica(store, controller)
+    request = logins.callback_request(await logins.start_login(store))
+
+    async with anyio.create_task_group() as group:
+
+        async def cancel_once_registering() -> None:
+            await registry.entered.wait()
+            group.cancel_scope.cancel()
+
+        group.start_soon(cancel_once_registering)
+        group.start_soon(logins.run_callback, replica, request)
+
+    assert request.state.session.invalidated
+    assert await logins._gone(store, request.state.session.id)
 
 
 @pytest.mark.asyncio

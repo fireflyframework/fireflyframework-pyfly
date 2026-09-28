@@ -90,7 +90,7 @@ from pyfly.session import HttpSession
 | `remove_attribute(name)` | Remove an attribute if present |
 | `get_attribute_names()` | List of all user-set attribute names (excludes internal `_*` keys) |
 | `invalidate()` | Mark the session for deletion; filter will delete cookie and store entry |
-| `mark_persisted()` | Record that the store holds the session as it is now, under its current id: `modified` is `False` until the next change and `stored_id` is the current id (the filter calls it after each save; `previous_id` is kept) |
+| `mark_persisted()` | Record that the store holds the session as it is now, under its current id: `modified` is `False` until the next change, `stored_id` is the current id (the filter calls it after each save; `previous_id` is kept) |
 | `get_data()` | Raw session dict (includes internal metadata) |
 
 ### `SessionStore` protocol
@@ -216,6 +216,12 @@ tab, rotating the session) may have set a new one meanwhile. A new or rotated id
 the entry the store held the session under (`stored_id`) is deleted, however many rotations came before, so
 no earlier id resolves to the session. With a custom store that has no `replace`, every change goes through
 `save`, which brings such a session back.
+
+**Deletions run to their end.** The deletion of an invalidated session (a logout, a refused or failed login)
+and of a rotated session's old id runs in a task of its own, shielded from the request's cancellation: a
+level-triggered cancel scope, as anyio's, cancels every await of the request's cleanup too, and a logout
+cancelled that way (the client went away) left the session live. A deletion that fails after its request was
+cancelled is logged as `session_delete_failed`.
 
 `request.state.persist_session` (a coroutine function taking no arguments) saves the session at once. Every
 save leaves the session unmodified (`mark_persisted()`), so the persist that runs when the handler returns

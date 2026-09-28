@@ -33,6 +33,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -330,4 +331,49 @@ async def a_logout_survives_a_registry_outage(
 
     assert response.status_code == 302, f"{via}: the logout failed"
     assert not await replica.store.exists(s1), f"{via}: the logged-out session is still in the store"
+    assert await authenticated_as(replica, s1) is None, f"{via}: the logged-out session still authenticates"
+
+
+async def _gone(store: SessionStore, session_id: str, *, within: float = 5.0) -> bool:
+    """Whether the store stops holding *session_id* within *within* seconds (a deletion running in a task of its
+    own may finish just after the request that started it)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within
+    while await store.exists(session_id):
+        if loop.time() > deadline:
+            return False
+        await asyncio.sleep(0.01)
+    return True
+
+
+async def a_cancelled_logout_still_ends_the_session(replica: Replica, via: str, registry: Any) -> None:
+    """The logout request is cancelled while it deregisters the session (the client went away). A
+    level-triggered cancel scope, as anyio's (Starlette's), cancels every later await of the request too, the
+    session filter's cleanup included: the deletion of the logged-out session was cancelled with it, and the
+    session stayed live. It must end all the same: gone from the store, and a later request with its cookie
+    anonymous."""
+    first = await login(replica, await start_login(replica.store))
+    assert first.status == 302
+    s1 = first.session_id
+    entered = asyncio.Event()
+
+    async def hanging(principal: str, session_id: str) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    original = registry.deregister
+    registry.deregister = hanging
+    try:
+        async with anyio.create_task_group() as group:
+
+            async def cancel_once_deregistering() -> None:
+                await entered.wait()
+                group.cancel_scope.cancel()
+
+            group.start_soon(cancel_once_deregistering)
+            group.start_soon(logout, replica, s1, via)
+    finally:
+        registry.deregister = original
+
+    assert await _gone(replica.store, s1), f"{via}: the logged-out session is still in the store"
     assert await authenticated_as(replica, s1) is None, f"{via}: the logged-out session still authenticates"

@@ -154,6 +154,25 @@ async def test_a_revoked_session_stays_revoked(redis_client: Any, revocation: st
         await redis_client.delete(f"{registry.key_prefix}{principal}")
 
 
+def _redis_replica(redis_client: Any, principal: str) -> tuple[Any, RedisSessionRegistry]:
+    registry = _registries(redis_client)[0]
+    store = RedisSessionStore(redis_client)
+    policy = ConcurrencyControlPolicy(max_sessions=1, strategy="evict-oldest")
+    controller = SessionConcurrencyController(registry, policy, session_store=store)
+    return logins.Replica(store, controller, principal=principal), registry
+
+
+@requires_docker
+@pytest.mark.parametrize("via", ["logout", "logout-filter"])
+async def test_a_cancelled_logout_still_ends_the_session(redis_client: Any, via: str) -> None:
+    principal = f"alice-{uuid.uuid4().hex[:8]}"
+    replica, registry = _redis_replica(redis_client, principal)
+    try:
+        await logins.a_cancelled_logout_still_ends_the_session(replica, via, registry)
+    finally:
+        await redis_client.delete(f"{registry.key_prefix}{principal}")
+
+
 @requires_docker
 async def test_register_limited_evicts_the_oldest(redis_client: Any) -> None:
     registry = _registries(redis_client)[0]

@@ -186,6 +186,14 @@ async def test_a_logout_survives_a_registry_outage(relational_backend: Relationa
         await logins.a_logout_survives_a_registry_outage(replica, via, break_registry)
 
 
+@pytest.mark.parametrize("via", ["logout", "logout-filter"])
+async def test_a_cancelled_logout_still_ends_the_session(relational_backend: RelationalBackend, via: str) -> None:
+    async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
+        replica = logins.Replica(store, _controller(store, registry, max_sessions=1))
+
+        await logins.a_cancelled_logout_still_ends_the_session(replica, via, registry)
+
+
 async def test_one_login_at_a_time_through_the_login_flow_keeps_the_latest_sessions(
     relational_backend: RelationalBackend,
 ) -> None:
