@@ -92,7 +92,7 @@ from beanie.odm.utils.dump import get_dict, get_top_level_nones
 from beanie.odm.utils.parsing import parse_obj
 from pymongo import InsertOne, UpdateOne
 from pymongo.asynchronous.client_session import AsyncClientSession
-from pymongo.errors import BulkWriteError
+from pymongo.errors import BulkWriteError, WriteConcernError
 
 from pyfly.container.types import NoAutowire
 from pyfly.data.document.mongodb import exception_translation as _translation  # noqa: F401 — registers it
@@ -892,17 +892,22 @@ class MongoRepository(Generic[T, ID]):
         revision-aware ``findAndModify`` upsert of a stored document).
 
         A save whose write fails, or whose transaction rolls back, gives the document back the id, revision and
-        saved state it had, so saving it again retries the same write (a new document is inserted again)."""
+        saved state it had, so saving it again retries the same write (a new document is inserted again). A write
+        the server applied, whose write concern alone failed (``WriteConcernError``), is stored: the new document
+        keeps the id and revision it was inserted with."""
         document: Any = entity
         unit = self._writable_unit()
         settings = self._model.get_settings()  # type: ignore[attr-defined]
         new = self._is_new(document)
         (state,) = _snapshots((document,))
+        fields: dict[str, Any] = {}
+        sent = False
         try:
             await _validate(document)
             if new:
                 fields = await self._before_insert(document, settings)
                 async with unit.operation():
+                    sent = True
                     result = await self._collection().insert_one(fields, session=unit.resource)
             else:
                 await _run_actions(document, EventTypes.SAVE, ActionDirections.BEFORE)
@@ -915,9 +920,15 @@ class MongoRepository(Generic[T, ID]):
                     if nones:
                         changes.append({"$unset": dict.fromkeys(nones, "")})
                 async with unit.operation():
+                    sent = True
                     # Beanie's update of a stored document (its revision check and state), without its actions.
                     await document.update(*changes, session=unit.resource, upsert=True, skip_actions=_SKIP_ACTIONS)
-        except BaseException:
+        except BaseException as error:
+            if sent and isinstance(error, WriteConcernError):
+                # Applied, and only its acknowledgment failed (outside a transaction: in one, the commit reports it).
+                if new:
+                    self._stored(document, True, fields)
+                raise
             state.restore()
             raise
         _written(unit, (state,))
@@ -933,7 +944,7 @@ class MongoRepository(Generic[T, ID]):
         return entity
 
     def _stored(self, entity: Any, new: bool, document: dict[str, Any]) -> None:
-        """Record that ``save_all`` wrote *entity* (from its operation's *document*): the id the driver gave a new
+        """Record that the server stored *entity* (from the *document* its write sent): the id the driver gave a new
         one, and its saved state."""
         if new and entity.id is None and ID_FIELD in document:
             entity.id = _as_id(self._model, document[ID_FIELD])

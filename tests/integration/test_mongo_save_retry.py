@@ -24,12 +24,15 @@ conflict) or of a fixed ``DuplicateKeyException`` saves them, instead of raising
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 import pytest
-from beanie import Document, Insert, Save, after_event, before_event
-from pymongo import IndexModel
+from beanie import Document, Insert, Save, after_event, before_event, init_beanie
+from beanie.odm.fields import PydanticObjectId
+from pymongo import AsyncMongoClient, IndexModel, WriteConcern
+from pymongo.errors import WriteConcernError
 
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
@@ -323,6 +326,40 @@ async def test_a_save_that_failed_before_its_write_leaves_a_later_write_of_anoth
     await repository.save(item)
     assert await _stored_codes(db) == {"b": 3}
     assert await db.database["rt_docs"].count_documents({}) == 1
+
+
+class RtUnacknowledged(Document):
+    code: str
+
+    class Settings:
+        name = "rt_unacknowledged"
+        use_revision = True
+
+
+async def test_a_new_document_whose_write_concern_fails_keeps_the_id_it_was_stored_with(mongo_rs_url: str) -> None:
+    """``w: 2`` on the one-member replica set: the insert is applied, and only its acknowledgment by a second member
+    fails (``WriteConcernError``, not translated: nothing is wrong with the data). The document keeps the id and
+    revision it was stored with, so saving it again updates it instead of inserting it a second time."""
+    client: AsyncMongoClient[Any] = AsyncMongoClient(mongo_rs_url)
+    name = f"pyfly_t_{uuid.uuid4().hex[:12]}"
+    try:
+        unacknowledged = client.get_database(name, write_concern=WriteConcern(w=2, wtimeout=500))
+        await init_beanie(database=unacknowledged, document_models=[RtUnacknowledged])
+        repository: MongoRepository[RtUnacknowledged, str] = MongoRepository(RtUnacknowledged)
+        document = RtUnacknowledged(code="order-1")
+        with pytest.raises(WriteConcernError):
+            await repository.save(document)
+        rows = await client[name]["rt_unacknowledged"].find({}).to_list()
+        assert [row["_id"] for row in rows] == [document.id]
+        stored = await RtUnacknowledged.get(PydanticObjectId(document.id))
+        assert stored is not None and stored.revision_id == document.revision_id
+
+        with pytest.raises(WriteConcernError):
+            await repository.save(document)
+        assert await client[name]["rt_unacknowledged"].count_documents({}) == 1
+    finally:
+        await client.drop_database(name)
+        await client.close()
 
 
 async def test_without_a_transaction_the_documents_written_before_a_failure_stay_saved(mongo_url: str) -> None:

@@ -32,6 +32,12 @@ transaction (``NoSuchTransaction``, 251)
 
 The translated exception is raised from the driver's; its message names the index, never the duplicated
 value (``dup key: { email: ... }`` may be personal data).
+
+A write concern failure (pymongo's ``WriteConcernError``, ``WTimeoutError``: the server applied the write, and
+the members the write concern asks for did not acknowledge it in time) is not translated, as the relational
+translator leaves a connection failure: nothing is wrong with the data, no kernel exception means "applied, not
+acknowledged", and a rule that names the driver's exception keeps working. The repository keeps a new document
+that such a write stored with the id and revision it was stored with.
 """
 
 from __future__ import annotations
