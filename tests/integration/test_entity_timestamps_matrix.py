@@ -403,16 +403,16 @@ def _pyfly(project: Path, *args: str) -> None:
 
 
 def _configure(project: Path, url: str) -> None:
-    """What a project does after ``pyfly db init``: point ``alembic.ini`` at its database, and import its
-    models in ``env.py`` so that autogenerate sees their tables."""
+    """What a project does after ``pyfly db init``: point ``alembic.ini`` at its database, and name the module
+    of its models (pyfly.data.relational.migrations.models), which env.py imports so that autogenerate sees
+    their tables."""
     ini = project / "alembic.ini"
     configured = re.sub(r"(?m)^sqlalchemy\.url = .*$", f"sqlalchemy.url = {url.replace('%', '%%')}", ini.read_text())
     assert configured != ini.read_text()
     ini.write_text(configured)
-    env = project / "alembic" / "env.py"
-    anchor = "target_metadata = Base.metadata\n"
-    assert anchor in env.read_text()
-    env.write_text(env.read_text().replace(anchor, f"import models  # noqa: E402, F401\n\n{anchor}"))
+    (project / "pyfly.yaml").write_text(
+        "pyfly:\n  data:\n    relational:\n      migrations:\n        models: [models]\n"
+    )
 
 
 def _upgrade_body(revision: Path) -> str:

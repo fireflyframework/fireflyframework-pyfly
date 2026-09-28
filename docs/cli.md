@@ -811,13 +811,28 @@ pyfly db init
 
 1. Creates an `alembic/` directory with Alembic's standard structure
 2. Creates `alembic.ini` configuration file
-3. **Overwrites `alembic/env.py`** with a PyFly-customized template that includes:
-   - `async_engine_from_config` for async database support (asyncpg, aiosqlite)
-   - `Base.metadata` from `pyfly.data.relational.sqlalchemy` as the target metadata for autogeneration
-   - The `render_item` hook of `pyfly.data.relational.sqlalchemy.types`, so a revision that renders a
-     `UtcDateTime` column (every `BaseEntity` table) imports its module
+3. **Overwrites `alembic/env.py`** with a PyFly-customized template that:
+   - imports the modules that declare your entities: `pyfly.data.relational.migrations.models` from
+     `pyfly.yaml`, or else the project's package, which `init` detects and writes into `MODEL_PACKAGES` (every
+     module under it except the application's entry point, which is never imported); a src-layout project that
+     is not installed gets its `src` directory on `sys.path` only when the package cannot be imported otherwise.
+     Startup migrations import the same modules: when one of them needs what the runtime image lacks (tests
+     inside the package, a worker's optional dependency), the start fails with `MigrationError`, so list only
+     the entity modules in `pyfly.data.relational.migrations.models`
+   - lists `Base.metadata` and the framework's own tables (`framework_metadata`: `pyfly_locks`,
+     `pyfly_orchestration_state`, ...) as `target_metadata`, so autogenerate never proposes dropping either
+   - runs on the application's primary datasource: `pyfly.data.relational.url` from `pyfly.yaml`, with the
+     active profiles (`PYFLY_PROFILES_ACTIVE`) and the environment, built as the application builds it (connect
+     arguments, SQLite setup); `sqlalchemy.url` in `alembic.ini` is used only when `pyfly.yaml` names no URL
+   - runs the migrations in one transaction under the schema lock that lets one instance at a time change the
+     schema; on SQLite with foreign keys off for batch rebuilds and a `PRAGMA foreign_key_check` before the commit
+   - passes the `render_item` hook of `pyfly.data.relational.sqlalchemy.types`, so a revision that renders a
+     `UtcDateTime` column (every `BaseEntity` table) or a framework column type imports its module
      ([Migrations](modules/data-relational.md#utcdatetime-one-instant-on-every-backend))
-   - Support for both offline (SQL script) and online (async connection) migration modes
+   - takes the connection the startup migrations hand over, and leaves the application's logging alone
+   - supports both offline (SQL script) and online (async connection) migration modes
+
+See [The Alembic Environment of pyfly db](modules/data-relational.md#the-alembic-environment-of-pyfly-db).
 
 **Error handling:** If an `alembic/` directory already exists, the command exits with an error rather than overwriting.
 
@@ -844,8 +859,11 @@ pyfly db migrate -m "add order status column"
 ```
 
 This runs Alembic's `revision --autogenerate`, which:
-1. Compares your current `Base.metadata` (all entity models) with the database
+1. Compares your entity models (the modules `env.py` imports) and the framework's tables with the database
 2. Generates upgrade/downgrade functions in a new version file under `alembic/versions/`
+
+When `env.py` imports no model while the revision would drop the database's tables, the command stops with an
+error and writes no revision: list your entity modules in `pyfly.data.relational.migrations.models`.
 
 **Prerequisites:** `alembic.ini` must exist (run `pyfly db init` first).
 
@@ -1054,7 +1072,7 @@ pyfly:
         revision: head           # target revision (default: head)
 ```
 
-When enabled, the app runs `alembic upgrade <revision>` against the same datasource (`pyfly.data.relational.url`) during startup. If `alembic.ini` is not found, the migration step is skipped with a warning suggesting you run `pyfly db init` — startup is not aborted. See [Data Relational — Run Migrations on Startup](modules/data-relational.md#run-migrations-on-startup-flyway-style) for the full configuration reference.
+When enabled, the app runs `alembic upgrade <revision>` against the same datasource (`pyfly.data.relational.url`) during startup, on a connection of its own engine, before any other bean starts; the application's logging is left as it is, and instances that start together migrate one at a time. `ddl-auto` then defaults to `none` (`validate` checks the models against the migrated schema; `create` beside migrations fails the startup). If `alembic.ini` is not found, the migration step is skipped with a warning suggesting you run `pyfly db init` — startup is not aborted, and since `ddl-auto` is `none` beside migrations, the application starts without its schema. See [Data Relational — Run Migrations on Startup](modules/data-relational.md#run-migrations-on-startup-flyway-style) for the full configuration reference.
 
 ---
 
@@ -1396,7 +1414,9 @@ pyfly db migrate -m "initial schema"
 # 6. Apply the migration
 pyfly db upgrade
 
-# 7. Start developing with auto-reload
+# 7. Start developing with auto-reload. Once migrations own the schema, set
+#    pyfly.data.relational.migrations.enabled: true (ddl-auto is then none) or ddl-auto: validate,
+#    so create_all never supplies a table a migration forgot.
 pyfly run --reload
 
 # 8. As you add/modify entities, generate new migrations

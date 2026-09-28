@@ -507,17 +507,68 @@ class TestUserController:
 
 ### @DataTest
 
-Marks a test class as a data-layer test. Use this for testing repositories with in-memory backends.
+Makes a test class a data-layer slice, Spring Boot's `@DataJpaTest`: every test of the class runs in a started
+data slice (`data_slice`) with the beans you list, and **every unit of work of the test rolls back when it
+ends**. PyFly's pytest plugin (installed with PyFly as the `pyfly` pytest11 entry point) builds the slice and
+hands it to the test as the `data_context` fixture:
 
 ```python
+from pyfly.context.application_context import ApplicationContext
 from pyfly.testing import DataTest
 
 
-@DataTest
+@DataTest(beans=[UserRepository, UserService])
 class TestUserRepository:
-    async def test_save_and_find(self):
-        # ... test repository operations
+    async def test_save_and_find(self, data_context: ApplicationContext) -> None:
+        users = data_context.get_bean(UserRepository)
+        await users.save(User(email="a@example.com"))
+        assert await users.find_by_email("a@example.com") is not None
+
+    async def test_starts_empty(self, data_context: ApplicationContext) -> None:
+        # The row of the test above was rolled back.
+        assert await data_context.get_bean(UserRepository).count() == 0
 ```
+
+Options (all keyword arguments; `@DataTest` also works bare):
+
+| Option | Default | Description |
+|---|---|---|
+| `beans` | `()` | The slice's beans (repositories, services, DAOs). |
+| `config` | the `pyfly_data_config` fixture's | The slice's `Config`. |
+| `overrides` | `{}` | Collaborators to replace, as in `data_slice`. |
+| `rollback` | `True` | Roll the test's units of work back when it ends. |
+| `datasources` | the default datasource | The datasources that roll back. |
+
+**The database.** By default each test gets a SQLite file in its `tmp_path` with the relational layer enabled
+(`create` builds the tables). Point every data test at a real database by overriding the `pyfly_data_config`
+fixture in `conftest.py`; the rollback keeps the tests apart on the shared database:
+
+```python
+# conftest.py
+import pytest
+
+from pyfly.testing import postgres_container, pyfly_config
+
+
+@pytest.fixture(scope="session")
+def postgres():
+    with postgres_container() as container:
+        yield container
+
+
+@pytest.fixture
+def pyfly_data_config(postgres):
+    return pyfly_config(postgres, base={"pyfly.data.relational.ddl-auto": "create"})
+```
+
+A single test function takes the marker instead: `@pytest.mark.data_test(beans=[UserRepository])`, then
+requests `data_context`. The slice starts in an asynchronous fixture: run the tests with pytest-asyncio
+(`asyncio_mode = "auto"`, as projects from `pyfly new` do). `data_context` binds the rollback transaction in
+the context the test runs in, so the rollback holds whether or not the runner carries an async fixture's
+context variables over to the test (pytest-asyncio 0.23 does not).
+
+What rolls back is described under [Rolling back a test's units of work](#rolling-back-a-tests-units-of-work).
+Until 26.09.08 `@DataTest` only marked the class.
 
 ### @ServiceTest
 
@@ -557,11 +608,11 @@ get_test_slice(PlainTest)    # None
 
 | Decorator | Slice Value | Purpose |
 |---|---|---|
-| `@WebTest` | `"web"` | Controllers and filters |
-| `@DataTest` | `"data"` | Repositories and queries |
-| `@ServiceTest` | `"service"` | Services and business logic |
+| `@WebTest` | `"web"` | Controllers and filters (marks the class; build the slice with `web_slice`) |
+| `@DataTest` | `"data"` | Repositories and queries (a data slice per test, rolled back) |
+| `@ServiceTest` | `"service"` | Services and business logic (marks the class; build the slice with `service_slice`) |
 
-**Source:** `src/pyfly/testing/slices.py`
+**Source:** `src/pyfly/testing/slices.py` · `src/pyfly/testing/pytest_plugin.py`
 
 ### Functional Slices (web_slice / service_slice / data_slice)
 
@@ -582,7 +633,7 @@ from pyfly.testing import web_slice, service_slice, data_slice, slice_context
 |---|---|---|
 | `web_slice(*controllers, config=None, overrides=None)` | `(context, client)` | Controllers + a `PyFlyTestClient` |
 | `service_slice(*beans, config=None, overrides=None)` | `context` | Services and business logic |
-| `data_slice(*beans, config=None, overrides=None)` | `context` | Repositories and queries |
+| `data_slice(*beans, config=None, overrides=None, rollback=False, datasources=None)` | `context` | Repositories and queries |
 | `slice_context(*beans, config=None, overrides=None)` | `context` | Generic minimal context |
 
 `service_slice` and `data_slice` are intent-named aliases of `slice_context`. Each
@@ -698,7 +749,77 @@ async def test_missing_collaborator_fails_loudly():
             pass
 ```
 
-**Source:** `src/pyfly/testing/slice_context.py`
+A data slice checks its repositories too: a relational repository needs `pyfly.data.relational.enabled=true`
+(a document repository `pyfly.data.document.enabled=true`), without which its derived and `@query` methods are
+never compiled and each stub answered `None` without touching the database; the slice refuses to build and names
+the flag. A slice that fails its checks is stopped before the error propagates, so it leaves no pool open.
+
+#### Rolling back a test's units of work
+
+`data_slice(..., rollback=True)` (and `@DataTest`) run every unit of work of the test in one transaction per
+datasource that rolls back when the slice exits, so tests that share a database do not see each other's rows:
+
+```python
+async def test_register():
+    async with await data_slice(UserRepository, UserService, config=config, rollback=True) as ctx:
+        await ctx.get_bean(UserService).register("a@example.com")
+        assert await ctx.get_bean(UserRepository).count() == 1
+    # nothing was committed
+```
+
+The same helper works around any started context: `async with RollbackTransaction(ctx): ...` (code that runs
+in another context than the task that entered it, such as a test body run by another runner, takes part inside
+`with rollback.taking_part(): ...`). While it runs,
+each covered datasource holds one connection with a transaction open, and the datasource's transaction manager
+runs every unit of work of the test as a savepoint of that transaction: repository calls, `@transactional`
+services, `SessionProvider` units and the framework stores all take part. Each unit still completes on its own
+(its savepoint is released or rolled back, its after-commit callbacks run), so a failing unit leaves the
+test's earlier writes in place, on PostgreSQL too, and so does a cancelled one. A read that ends well releases
+its savepoint (in production it rolls back, which undoes nothing), so what a loop writes while it reads a stream
+(`stream_all()` outside a transaction, a save per row) stays, as in production. What differs from production,
+by construction:
+
+- every unit of a datasource runs on one connection, so the units must nest: tasks that each open a unit of
+  their own and run at the same time (`asyncio.gather` of `@transactional` calls or of repository calls, a
+  background task started during the test) cannot share it. A unit that starts while another task's unit is
+  open there is refused with `IllegalTransactionStateError`, and the test goes on; run such work one after
+  another. A task that waits for the units of tasks it started is fine; one that writes on through its own unit
+  while such a unit is open writes inside that unit's savepoint, so when that unit rolls back, the writing
+  unit is marked rollback-only and its commit fails with `UnexpectedRollbackError` (caused by an
+  `IllegalTransactionStateError` that says why) instead of losing the write;
+- a stream (`stream_all()`, `session.stream()`) reads its rows when its statement runs, not through a
+  server-side cursor: a cursor left open on the shared connection would hang the other units' statements on
+  MySQL and MariaDB, and on SQLite the scan would see the rows the test writes meanwhile. It holds the rows
+  of its statement's start, as in production;
+- `REQUIRES_NEW` gets a savepoint too, and so does every unit that starts while `NOT_SUPPORTED` suspends one
+  (a repository call's auto unit, a new `@transactional` unit): the enclosing unit's rollback undoes them,
+  where in production they commit on their own;
+- a cancellation that lands while a unit's statement runs (`anyio.move_on_after`, `asyncio.wait_for`, the
+  unit's own `@transactional(timeout=...)`) lets the statement run to its end, and is raised when it returns:
+  the test sees the cancellation, `TimeoutError` or `TransactionTimedOutError`, the unit rolls back to its
+  savepoint as it rolls back in production, and the test goes on, later by the rest of the statement (on
+  PostgreSQL a unit's `timeout=` still cancels its statement on the server). Interrupting the statement would
+  lose the test's connection, and the test's transaction with it. That covers the unit's statements through its
+  session, its savepoints and the statements of the after-begin customizers; a statement that runs past the
+  unit's session (one on the connection `session.connection()` returns, a lazy load through `awaitable_attrs`)
+  is not covered: once a cancellation cuts one short, every later unit of the test fails with
+  `IllegalTransactionStateError` naming the unit the connection was lost in;
+- a unit's isolation level, read-only hint and SQLite `BEGIN IMMEDIATE` are the test transaction's (a
+  read-only unit still refuses ORM writes), and what a unit sets with `SET LOCAL` lasts until the test ends
+  unless the unit rolls back. The test transaction is a real one on an application's own engine too: on a
+  plain SQLite engine (without PyFly's `BEGIN` handling) the test's connection sends its `BEGIN` itself, and
+  an engine that runs in `AUTOCOMMIT` gets the database's default isolation level for the test;
+- DDL inside the test commits on MySQL and MariaDB, and a session the code opens itself outside every unit
+  commits for real, as does a unit of `@transactional(manager=...)` naming a manager instance of its own
+  (the test replaces the managers of the context's `TransactionManagerRegistry` only);
+- the context's background work started before the test runs on its own connections and commits.
+
+Only relational datasources roll back. Use a SQLite **file** (`tmp_path`) or a server for data tests, never
+`sqlite:///:memory:` for transaction semantics: an in-memory database lives on one connection that every
+session shares, so one session sees another's uncommitted writes. `:memory:` suits single-session unit tests
+only.
+
+**Source:** `src/pyfly/testing/slice_context.py` · `src/pyfly/testing/rollback.py`
 
 ---
 
@@ -961,17 +1082,20 @@ single started container, and raises `ValueError` for an unmapped container type
 
 | Container | Config keys produced |
 |---|---|
-| Postgres | `pyfly.data.relational.url` (rewritten to the `postgresql+asyncpg://` async driver) |
-| MySQL | `pyfly.data.relational.url` (rewritten to `mysql+asyncmy://`; `mysql+aiomysql://` when only aiomysql is installed) |
-| MariaDB (`mariadb_container()`) | `pyfly.data.relational.url` (rewritten to `mariadb+asyncmy://`, or `mariadb+aiomysql://` as above) |
+| Postgres | `pyfly.data.relational.url` (rewritten to the `postgresql+asyncpg://` async driver) and `pyfly.data.relational.enabled` |
+| MySQL | `pyfly.data.relational.url` (rewritten to `mysql+asyncmy://`; `mysql+aiomysql://` when only aiomysql is installed) and `pyfly.data.relational.enabled` |
+| MariaDB (`mariadb_container()`) | `pyfly.data.relational.url` (rewritten to `mariadb+asyncmy://`, or `mariadb+aiomysql://` as above) and `pyfly.data.relational.enabled` |
 | Redis | `pyfly.cache.redis.url` **and** `pyfly.session.redis.url` (both `redis://host:port/0`) |
-| MongoDB, standalone or replica set | `pyfly.data.document.uri` |
+| MongoDB, standalone or replica set | `pyfly.data.document.uri` and `pyfly.data.document.enabled` |
 | Kafka | `pyfly.eda.kafka.bootstrap-servers` |
 | RabbitMQ | `pyfly.eda.rabbitmq.url` **and** `pyfly.messaging.rabbitmq.url` |
 
 The Postgres/MySQL/MariaDB mappings deliberately swap the container's sync driver URL for pyfly's
 async driver, so the resulting URL is ready to hand to the reactive data layer. The MySQL driver
-is asyncmy, which `pip install 'pyfly[mysql]'` installs.
+is asyncmy, which `pip install 'pyfly[mysql]'` installs. A database container also enables its data
+layer: with the URL alone the repositories were never wired, and their derived queries answered `None`
+without touching the database. A database server's schema strategy defaults to `none`: set
+`pyfly.data.relational.ddl-auto` (`create`) in `base` when the test needs the tables of its models.
 
 **`pyfly_config(*containers, base=None)`** is the one-call setup for an integration
 `ApplicationContext`: it merges `pyfly_config_for(...)` for every started container (plus an
@@ -984,7 +1108,7 @@ with postgres_container() as pg, redis_container() as redis:
     config = pyfly_config(
         pg,
         redis,
-        base={"pyfly.data.enabled": True},
+        base={"pyfly.data.relational.ddl-auto": "create"},
     )
     config.get("pyfly.data.relational.url")  # postgresql+asyncpg://...
     config.get("pyfly.cache.redis.url")      # redis://127.0.0.1:.../0
@@ -1040,7 +1164,7 @@ async def test_orders_persist_against_real_infra():
             pg,
             redis,
             base={
-                "pyfly.data.enabled": True,
+                "pyfly.data.relational.ddl-auto": "create",
                 "pyfly.cache.enabled": True,
                 "pyfly.cache.provider": "redis",
             },

@@ -98,9 +98,10 @@ def apply_convention_to_operations(metadata: MetaData | None = None) -> MetaData
     """Opt a migration environment in: Alembic operations name the unnamed constraints of revisions with
     :data:`~pyfly.data.relational.sqlalchemy.entity.NAMING_CONVENTION` too, as the models name theirs.
 
-    Call it in ``env.py`` on the ``target_metadata`` (default: ``Base.metadata``), and only for a history
-    whose revisions were all first applied under the convention: one that starts on 26.09.08 or later, or
-    that renamed its constraints with :func:`rename_constraints_to_convention` and never replays the
+    Call it in ``env.py`` on the ``target_metadata`` (default: ``Base.metadata``, the first ``MetaData`` of the
+    ``target_metadata`` that ``pyfly db init`` writes, which passes the convention on to it), and only for a
+    history whose revisions were all first applied under the convention: one that starts on 26.09.08 or
+    later, or that renamed its constraints with :func:`rename_constraints_to_convention` and never replays the
     revisions before it on a fresh database. Returns *metadata*.
     """
     if metadata is None:

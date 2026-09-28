@@ -23,12 +23,14 @@ Two auto-configurations live here:
   relational repositories are disabled. It also exposes the
   :class:`~pyfly.data.transaction.registry.TransactionManagerRegistry` (one SQLAlchemy transaction manager
   per datasource), installed while the context runs, so ``@transactional`` and repositories find their
-  transaction manager by datasource name.
+  transaction manager by datasource name, and the :class:`RepositoryWiringCheck`, which fails the start on a
+  relational repository whose derived or ``@query`` stubs no repository post-processor compiled.
 - :class:`RelationalAutoConfiguration` (``pyfly.data.relational.enabled=true``) keeps the beans an
   application injects (``async_engine``, ``async_session_factory``, ``routing_session_factory``,
   ``named_data_sources``, ``async_session``, ``engine_lifecycle``, ``db_health_indicator``,
   ``query_metrics``) with their names and types. Each is now a view over the registry (the
-  ``DataSourceRegistry`` bean). It adds the ``session_provider`` bean, and the
+  ``DataSourceRegistry`` bean); ``engine_lifecycle`` applies the schema strategy (``ddl-auto``) through a
+  :class:`~pyfly.data.relational.schema.SchemaInitializer`. It adds the ``session_provider`` bean, and the
   ``primary_transaction_manager`` bean, which serves the ``primary`` datasource's units on the primary
   ``async_sessionmaker`` bean: an application's singleton session factory, engine or registry bean replaces
   the primary for ``@transactional``, repositories, ``SessionProvider``, the ``AsyncSession`` bean and
@@ -53,6 +55,8 @@ try:
     )
 
     from pyfly.data.relational.datasource_registry import PRIMARY, DataSourceRegistry, datasource_of
+    from pyfly.data.relational.schema import SCHEMA_PHASE, SchemaInitializer
+    from pyfly.data.relational.sqlalchemy.repository import Repository
     from pyfly.data.relational.sqlalchemy.session import ScopedAsyncSession, SessionProvider
     from pyfly.data.relational.sqlalchemy.transaction_manager import (
         SqlAlchemyTransactionManager,
@@ -64,12 +68,16 @@ except ImportError:
     AsyncEngine = object  # type: ignore[misc,assignment]
     AsyncSession = object  # type: ignore[misc,assignment]
     DataSourceRegistry = object  # type: ignore[misc,assignment]
+    SCHEMA_PHASE = 0
+    SchemaInitializer = object  # type: ignore[misc,assignment]
+    Repository = object  # type: ignore[misc,assignment]
     SessionProvider = object  # type: ignore[misc,assignment]
     SqlAlchemyTransactionManager = object  # type: ignore[misc,assignment]
 
 from pyfly.config.properties.data import RelationalProperties
 from pyfly.container.bean import bean
-from pyfly.container.exceptions import NoSuchBeanError, NoUniqueBeanError
+from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError, NoUniqueBeanError
+from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
 from pyfly.container.provider import Provider
 from pyfly.container.types import Scope, ScopeSpec, scope_name
 from pyfly.context.conditions import (
@@ -252,63 +260,75 @@ class EngineLifecycle:
     Implements ``start()`` / ``stop()`` so the ``ApplicationContext``
     auto-discovers it as an infrastructure adapter.
 
-    On ``start()``, applies the ``ddl-auto`` schema strategy:
+    The schema strategy (``ddl-auto``) is its :class:`~pyfly.data.relational.schema.SchemaInitializer`
+    (*schema*, or one built for *engine* and *ddl_auto*): ``start()`` validates the schema or creates the
+    missing tables, under the schema lock that lets one instance at a time change it:
 
-    * ``create`` — create tables that don't exist (safe, idempotent)
+    * ``create`` — create tables that don't exist (existing tables are never altered)
     * ``create-drop`` — create on start, drop on shutdown
+    * ``validate`` — fail the start when a table or column of the models is missing
     * ``none`` — skip DDL (for Alembic-managed databases)
 
-    ``stop()`` closes the session it was given and, when *dispose_engine* is true (a standalone
-    engine), disposes the engine; a connection still in use is closed when it is returned (the hook is
-    installed when the lifecycle is built). A registry engine is left to the registry, which disposes
-    every engine once when the context stops.
+    Without *ddl_auto* the strategy is ``create`` on an embedded database (SQLite) and ``none`` on a
+    database server; an unknown value raises ``ValueError``. The lifecycle starts in
+    :data:`~pyfly.data.relational.schema.SCHEMA_PHASE`, right after the startup migrations and before every
+    other lifecycle bean, and stops after all of them.
+
+    ``stop()`` closes the session it was given, drops the schema for ``create-drop`` (bounded by the drop
+    timeout, logged when it fails) and, when *dispose_engine* is true (a standalone engine), disposes the
+    engine even when the drop failed; a connection still in use is closed when it is returned (the hook is
+    installed when the lifecycle is built). A registry engine is left to the registry, which disposes every
+    engine once when the context stops.
     """
 
-    _VALID_DDL_MODES = {"none", "create", "create-drop"}
+    #: Right after the startup migrations; stopped after every other lifecycle bean.
+    phase = SCHEMA_PHASE
 
     def __init__(
         self,
         engine: AsyncEngine,
         session: AsyncSession,
         *,
-        ddl_auto: str = "create",
+        ddl_auto: str | None = None,
         dispose_engine: bool = True,
+        schema: SchemaInitializer | None = None,
     ) -> None:
         self._engine = engine
         self._session = session
-        self._ddl_auto = ddl_auto if ddl_auto in self._VALID_DDL_MODES else "create"
+        self._schema = schema if schema is not None else SchemaInitializer(engine, ddl_auto=ddl_auto)
         self._dispose_engine = dispose_engine
         if dispose_engine:
             # Now, not at stop: installed then, it added pool listeners while a connect could be running.
             close_connections_on_return(engine)
 
-    async def start(self) -> None:
-        """Apply DDL strategy — create tables from Base.metadata when configured."""
-        if self._ddl_auto in ("create", "create-drop"):
-            from pyfly.data.relational.sqlalchemy.entity import Base
+    @property
+    def ddl_auto(self) -> str:
+        """The effective schema strategy: ``none``, ``validate``, ``create`` or ``create-drop``."""
+        return self._schema.ddl_auto
 
-            _logger.info("Initializing database schema (ddl-auto=%s)", self._ddl_auto)
-            async with self._engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            _logger.info("Database schema initialized (%d tables)", len(Base.metadata.tables))
+    @property
+    def schema(self) -> SchemaInitializer:
+        """The schema strategy this lifecycle applies."""
+        return self._schema
+
+    async def start(self) -> None:
+        """Apply the schema strategy."""
+        await self._schema.start()
 
     async def stop(self) -> None:
-        """Drop the schema for ``create-drop``, close the shared session, dispose a standalone engine."""
-        if self._ddl_auto == "create-drop":
-            from pyfly.data.relational.sqlalchemy.entity import Base
-
-            _logger.info("Dropping database schema (ddl-auto=create-drop)")
-            async with self._engine.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-
+        """Close the shared session, drop the schema for ``create-drop``, dispose a standalone engine."""
         try:
+            # First: a connection the session still held would keep locks the drop waits for.
             await self._session.close()
         except Exception:
             _logger.debug("session_close_failed", exc_info=True)
-        if self._dispose_engine:
-            # A connection still in use (a probe in flight) is closed when it is returned: the hook was
-            # installed when this lifecycle was built.
-            await self._engine.dispose()
+        try:
+            await self._schema.stop()
+        finally:
+            if self._dispose_engine:
+                # A connection still in use (a probe in flight) is closed when it is returned: the hook was
+                # installed when this lifecycle was built.
+                await self._engine.dispose()
 
 
 class DataSourceRegistryLifecycle:
@@ -492,6 +512,66 @@ class DataSourceSpiRegistrar:
             )
 
 
+@order(HIGHEST_PRECEDENCE + 200)
+class RepositoryWiringCheck:
+    """``BeanPostProcessor`` that fails the start on a relational repository whose query stubs were never compiled.
+
+    The repository post-processor (the one of :class:`RelationalAutoConfiguration`, with
+    ``pyfly.data.relational.enabled``, or one registered by hand) replaces a repository's derived
+    (``find_by_*``, ``count_by_*``, ``exists_by_*``, ``delete_by_*``) and ``@query`` stubs with compiled queries.
+    Without it the stubs keep their ``...`` bodies and answer ``None`` (``exists_by_*`` a falsy ``None``), with or
+    without a database. The inherited CRUD methods need no compiling: a repository no post-processor bound to the
+    context's transaction managers finds them when it is called. A repository that got a session of its own
+    (manual mode) is left alone. It runs right after the repository post-processors, before the AOP one.
+    """
+
+    def before_init(self, bean: Any, bean_name: str) -> Any:
+        """Pass through."""
+        return bean
+
+    def after_init(self, bean: Any, bean_name: str) -> Any:
+        """Refuse *bean* when it is a relational repository with a derived or ``@query`` stub no post-processor
+        compiled."""
+        if isinstance(bean, Repository) and bean._manual_session is None:
+            stubs = _uncompiled_query_methods(bean)
+            if stubs:
+                raise BeanCreationException(
+                    subsystem="data",
+                    provider=type(bean).__name__,
+                    reason=(
+                        f"{type(bean).__name__} ({bean_name}) is a relational repository whose query methods "
+                        f"({', '.join(stubs)}) no repository post-processor compiled: they would answer None "
+                        "without touching the database. The relational data layer is not enabled: set "
+                        "pyfly.data.relational.enabled=true (with pyfly.data.relational.url)."
+                    ),
+                )
+        return bean
+
+
+def _uncompiled_query_methods(bean: Any) -> list[str]:
+    """The derived and ``@query`` stubs of *bean*'s class that no repository post-processor replaced on *bean*.
+
+    It looks where the post-processor does (``BaseRepositoryPostProcessor.after_init``): the public methods the
+    repository's class defines, a compiled one being bound on the instance."""
+    from pyfly.data.post_processor import DERIVED_PREFIXES, BaseRepositoryPostProcessor
+
+    cls = type(bean)
+    inherited = set(dir(Repository))
+    compiled = vars(bean)
+    stubs: list[str] = []
+    for name in vars(cls):
+        if name.startswith("_") or name in compiled:
+            continue
+        method = getattr(cls, name, None)
+        if method is None or not callable(method):
+            continue
+        if hasattr(method, "__pyfly_query__") or (
+            name not in inherited and name.startswith(DERIVED_PREFIXES) and BaseRepositoryPostProcessor._is_stub(method)
+        ):
+            stubs.append(name)
+    return stubs
+
+
 @auto_configuration
 @conditional_on_class("sqlalchemy")
 class DataSourceAutoConfiguration:
@@ -517,6 +597,13 @@ class DataSourceAutoConfiguration:
     def datasource_spi_registrar(self, datasource_registry: DataSourceRegistry) -> DataSourceSpiRegistrar:
         """Registers ``AfterBeginCustomizer`` and ``DataSourceCredentialsProvider`` beans."""
         return DataSourceSpiRegistrar(datasource_registry)
+
+    @bean
+    @conditional_on_missing_bean(RepositoryWiringCheck)
+    def repository_wiring_check(self) -> RepositoryWiringCheck:
+        """Fails the start on a relational repository whose query stubs were never compiled
+        (:class:`RepositoryWiringCheck`). An application's own ``RepositoryWiringCheck`` bean replaces it."""
+        return RepositoryWiringCheck()
 
     @bean
     def transaction_manager_registry(
@@ -691,18 +778,26 @@ class RelationalAutoConfiguration:
     def engine_lifecycle(
         self, async_engine: AsyncEngine, async_session: AsyncSession, config: Config
     ) -> EngineLifecycle:
-        """Lifecycle bean — creates tables on startup based on ``ddl-auto`` config.
+        """Lifecycle bean — applies the schema strategy (``pyfly.data.relational.ddl-auto``) on startup.
+
+        The strategy is resolved against the primary engine's database (``create`` on an embedded database,
+        ``none`` on a server or beside startup migrations, when it is not configured); an invalid value
+        fails the start here. ``pyfly.data.relational.schema.lock-timeout`` and ``drop-timeout`` bound the
+        wait for another instance's schema changes and the ``create-drop`` teardown.
 
         The engine itself is disposed by the registry, after this lifecycle has stopped.
         """
         datasource = datasource_of(async_engine)
         registry = datasource.registry if datasource is not None else None
-        ddl_auto = (
-            registry.properties.ddl_auto
-            if registry is not None
-            else str(config.get("pyfly.data.relational.ddl-auto", "create"))
+        properties = registry.properties if registry is not None else RelationalProperties.from_config(config)
+        schema = SchemaInitializer(
+            async_engine,
+            ddl_auto=config.get("pyfly.data.relational.ddl-auto"),
+            migrations=properties.migrations.enabled,
+            lock_timeout=properties.schema.lock_timeout,
+            drop_timeout=properties.schema.drop_timeout,
         )
-        return EngineLifecycle(async_engine, async_session, ddl_auto=ddl_auto, dispose_engine=registry is None)
+        return EngineLifecycle(async_engine, async_session, schema=schema, dispose_engine=registry is None)
 
     @bean
     def repository_post_processor(
@@ -766,19 +861,41 @@ class RelationalAutoConfiguration:
 
 
 @auto_configuration
-@conditional_on_property("pyfly.data.relational.migrations.enabled", having_value="true")
+@conditional_on_class("sqlalchemy")
+@conditional_on_property("pyfly.data.relational.migrations.enabled")
 class MigrationAutoConfiguration:
     """Applies Alembic migrations on startup (Spring Boot Flyway-style auto-migrate).
 
     Opt-in via ``pyfly.data.relational.migrations.enabled=true``; reuses the project's
-    Alembic environment (``pyfly db init``). Migrates the same datasource as the app.
+    Alembic environment (``pyfly db init``). Migrates the same datasource as the app, before the
+    schema strategy of ``ddl-auto`` and every other lifecycle bean runs. The flag is the boolean the
+    schema strategy reads (``true``/``yes``/``on``/``1``, ``false``/``no``/``off``/``0``): a flag
+    that stops the strategy from creating the tables always starts the migrations.
     """
 
     @bean
-    def migration_runner(self, config: Config) -> MigrationRunner:
-        # The same URL the primary engine uses (the legacy pyfly.data.url alias included).
+    def migration_runner(
+        self,
+        config: Config,
+        async_engine: AsyncEngine | None = None,
+        datasource_registry: DataSourceRegistry | None = None,
+    ) -> MigrationRunner | None:
+        """The runner of the startup migrations, on the application's primary engine (an application's singleton
+        ``AsyncEngine`` bean, or the registry's primary), under the schema lock
+        (``pyfly.data.relational.schema.lock-timeout``). Without a primary it migrates ``alembic.ini``'s URL.
+        ``None`` (no runner) when the flag is set but switched off (``no``, ``off``, ``0``)."""
+        properties = RelationalProperties.from_config(config)
+        if not properties.migrations.enabled:
+            return None
+        engine = async_engine
+        if engine is None and properties.url:
+            engine = _datasources(datasource_registry, config).primary.engine
         return MigrationRunner(
-            url=RelationalProperties.from_config(config).url or "",
-            config_path=str(config.get("pyfly.data.relational.migrations.config", "alembic.ini")),
-            revision=str(config.get("pyfly.data.relational.migrations.revision", "head")),
+            # The same URL the primary engine uses (the legacy pyfly.data.url alias included).
+            url=properties.url or "",
+            config_path=properties.migrations.config,
+            revision=properties.migrations.revision,
+            engine=engine,
+            config=config,
+            lock_timeout=properties.schema.lock_timeout,
         )

@@ -322,7 +322,9 @@ def _history(root: Path, revisions: list[str], *, env_suffix: str = "") -> Alemb
     versions.mkdir(parents=True)
     env = _ENV_PY_TEMPLATE
     if env_suffix:
-        env = env.replace("target_metadata = Base.metadata\n", f"target_metadata = Base.metadata\n{env_suffix}\n")
+        anchor = "target_metadata = migration_metadata(config, default_models=MODEL_PACKAGES)\n"
+        assert anchor in env
+        env = env.replace(anchor, f"{anchor}{env_suffix}\n")
     (root / "env.py").write_text(env)
     previous: str | None = None
     for number, body in enumerate(revisions, start=1):
@@ -398,7 +400,7 @@ async def test_a_legacy_history_replays_on_a_fresh_database(
 _OPT_IN = """
 from pyfly.data.relational.sqlalchemy.naming import apply_convention_to_operations
 
-apply_convention_to_operations(target_metadata)
+apply_convention_to_operations(target_metadata)  # Base.metadata, the first of target_metadata
 """
 
 

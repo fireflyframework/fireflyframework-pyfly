@@ -80,7 +80,9 @@ class TestVendorIsolation:
                 "and 'cache/auto_configuration' not in l "
                 "and 'web/converters' not in l "
                 # The statement counter is the SQL-engine test utility; it imports SQLAlchemy lazily.
-                "and '/testing/statement_counter' not in l]; "
+                "and '/testing/statement_counter' not in l "
+                # So does the rollback transaction of data tests (for type checking only).
+                "and '/testing/rollback' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],

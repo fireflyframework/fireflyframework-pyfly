@@ -262,26 +262,14 @@ class TestEngineLifecycleDdlNone:
         finally:
             await lifecycle.stop()
 
-    @pytest.mark.asyncio
-    async def test_invalid_ddl_auto_treated_as_create(self) -> None:
-        """An unknown ddl-auto value falls back to 'create' per the implementation."""
+    def test_invalid_ddl_auto_is_refused(self) -> None:
+        """An unknown ddl-auto value fails when the lifecycle is built (it used to become 'create' silently)."""
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         session: AsyncSession = session_factory()
 
-        lifecycle = EngineLifecycle(engine, session, ddl_auto="bogus_value")
-        # "bogus_value" is not in _VALID_DDL_MODES so it falls back to "create"
-        assert lifecycle._ddl_auto == "create"
-        try:
-            await lifecycle.start()
-
-            async with engine.connect() as conn:
-                result = await conn.execute(text("SELECT 1 FROM canary_lifecycle_test LIMIT 1"))
-                assert result is not None
-        finally:
-            async with engine.begin() as conn:
-                await conn.run_sync(lambda c: _Canary.__table__.drop(c, checkfirst=True))
-            await lifecycle.stop()
+        with pytest.raises(ValueError, match="ddl-auto must be one of none, validate, create, create-drop"):
+            EngineLifecycle(engine, session, ddl_auto="bogus_value")
 
 
 # ---------------------------------------------------------------------------

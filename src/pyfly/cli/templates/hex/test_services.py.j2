@@ -1,3 +1,115 @@
+{% if has_data %}
+"""Tests for application services: a data slice on a SQLite file whose units of work roll back after each test.
+
+``@DataTest`` builds the slice with PyFly's pytest plugin (the ``data_context`` fixture). Point the
+``pyfly_data_config`` fixture at a database container in ``conftest.py`` to run them on your production
+database.
+"""
+
+import pytest
+
+from pyfly.context.application_context import ApplicationContext
+from pyfly.kernel.exceptions import ResourceNotFoundException
+from pyfly.testing import DataTest
+
+from {{ package_name }}.application.services import TodoService
+from {{ package_name }}.infrastructure.adapters.persistence import TodoRepository
+
+
+@DataTest(beans=[TodoRepository, TodoService])
+class TestTodoService:
+    async def test_create_todo(self, data_context: ApplicationContext) -> None:
+        todo = await data_context.get_bean(TodoService).create("Buy groceries", "Milk and eggs")
+        assert todo.title == "Buy groceries"
+        assert todo.description == "Milk and eggs"
+        assert todo.id
+
+    async def test_list_todos(self, data_context: ApplicationContext) -> None:
+        service = data_context.get_bean(TodoService)
+        await service.create("Task A", "")
+        await service.create("Task B", "")
+        assert len(await service.list_all()) == 2  # only this test's rows: its units of work roll back when it ends
+
+    async def test_get_todo(self, data_context: ApplicationContext) -> None:
+        service = data_context.get_bean(TodoService)
+        created = await service.create("Buy groceries", "")
+        found = await service.get(created.id)
+        assert found.title == "Buy groceries"
+
+    async def test_toggle_complete(self, data_context: ApplicationContext) -> None:
+        service = data_context.get_bean(TodoService)
+        created = await service.create("Buy groceries", "")
+        assert created.completed is False
+        toggled = await service.toggle_complete(created.id)
+        assert toggled.completed is True
+
+    async def test_delete_todo(self, data_context: ApplicationContext) -> None:
+        service = data_context.get_bean(TodoService)
+        created = await service.create("Buy groceries", "")
+        await service.delete(created.id)
+        assert len(await service.list_all()) == 0
+        with pytest.raises(ResourceNotFoundException):
+            await service.get(created.id)
+{% elif has_mongodb %}
+"""Tests for application services (fast unit tests with a mocked repository).
+
+These need no running MongoDB: the repository is an ``AsyncMock`` and document construction is stubbed.
+"""
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+import {{ package_name }}.application.services as services_module
+from {{ package_name }}.application.services import TodoService
+
+_ID = "65f0c0ffee1234567890abcd"
+
+
+def _doc(title: str, description: str = "", *, completed: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(id=_ID, title=title, description=description, completed=completed)
+
+
+@pytest.fixture
+def repository() -> AsyncMock:
+    return AsyncMock()
+
+
+@pytest.fixture
+def service(repository: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> TodoService:
+    # Stub document construction: no Beanie initialization / MongoDB needed for these unit tests.
+    monkeypatch.setattr(services_module, "TodoDocument", lambda **kw: SimpleNamespace(id=None, **kw))
+    return TodoService(repository)
+
+
+class TestTodoService:
+    async def test_create_todo(self, service: TodoService, repository: AsyncMock) -> None:
+        repository.save.return_value = _doc("Buy groceries", "Milk and eggs")
+        todo = await service.create("Buy groceries", "Milk and eggs")
+        assert todo.title == "Buy groceries"
+        assert todo.id == _ID
+        repository.save.assert_awaited_once()
+
+    async def test_list_todos(self, service: TodoService, repository: AsyncMock) -> None:
+        repository.find_all.return_value = [_doc("Task A"), _doc("Task B")]
+        assert len(await service.list_all()) == 2
+
+    async def test_get_todo(self, service: TodoService, repository: AsyncMock) -> None:
+        repository.find_by_id.return_value = _doc("Buy groceries")
+        found = await service.get(_ID)
+        assert found.title == "Buy groceries"
+
+    async def test_toggle_complete(self, service: TodoService, repository: AsyncMock) -> None:
+        repository.find_by_id.return_value = _doc("Buy groceries", completed=False)
+        repository.save.return_value = _doc("Buy groceries", completed=True)
+        toggled = await service.toggle_complete(_ID)
+        assert toggled.completed is True
+
+    async def test_delete_todo(self, service: TodoService, repository: AsyncMock) -> None:
+        await service.delete(_ID)
+        repository.delete_by_id.assert_awaited_once_with(_ID)
+{% else %}
 """Tests for application services."""
 
 from {{ package_name }}.application.services import TodoService
@@ -34,3 +146,4 @@ class TestTodoService:
         created = await self.service.create("Buy groceries", "")
         await self.service.delete(created.id)
         assert len(await self.service.list_all()) == 0
+{% endif %}

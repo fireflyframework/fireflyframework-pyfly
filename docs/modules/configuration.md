@@ -1398,8 +1398,8 @@ pyfly:
     url: "sqlite+aiosqlite:///pyfly.db"
     echo: false
     pool-size: 5
-    relational:
-      ddl-auto: "create"
+    # relational.ddl-auto is not set: create on an embedded database (SQLite), none on a database server
+    # or beside startup migrations (pyfly.data.relational.migrations.enabled)
   cache:
     enabled: false
     provider: "memory"
