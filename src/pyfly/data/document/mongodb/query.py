@@ -162,8 +162,11 @@ class MongoQueryExecutor:
         self,
         method: Callable[..., Any],
         entity: type[T],
-    ) -> MongoAnnotatedQuery:
+    ) -> Callable[..., Coroutine[Any, Any, Any]]:
         """Compile a ``@query``-decorated method into an executable query.
+
+        A find filter is built by :meth:`_compile_find` and a pipeline by :meth:`_compile_aggregate`, the hooks
+        an executor subclass overrides.
 
         Args:
             method: The decorated method (must have ``__pyfly_query__``).
@@ -171,7 +174,8 @@ class MongoQueryExecutor:
 
         Returns:
             A :class:`MongoAnnotatedQuery` that returns ``list[entity]`` for a find filter (a JSON object) and
-            ``list[dict]`` for an aggregation pipeline (a JSON array).
+            ``list[dict]`` for an aggregation pipeline (a JSON array); a hook a subclass overrides may return a
+            coroutine callable of its own, called as ``await compiled(Model, **kwargs)``.
 
         Raises:
             AttributeError: If *method* was not decorated with ``@query``.
@@ -181,7 +185,10 @@ class MongoQueryExecutor:
             raise AttributeError(f"{method} is not decorated with @query (missing __pyfly_query__)")
 
         query_string: str = method.__pyfly_query__
-        return MongoAnnotatedQuery(json.loads(query_string.strip()))
+        stripped = query_string.strip()
+        if isinstance(json.loads(stripped), list):
+            return self._compile_aggregate(stripped)
+        return self._compile_find(stripped)
 
     def _compile_find(self, query_string: str) -> Callable[..., Coroutine[Any, Any, Any]]:
         """A find filter as a query (see :class:`MongoAnnotatedQuery`)."""

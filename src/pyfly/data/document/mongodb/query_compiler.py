@@ -39,7 +39,7 @@ What each prefix runs, in the repository's unit of work (its session):
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any, TypeVar, cast
 
@@ -311,7 +311,7 @@ def build_clause(
     if op == "between":
         return {field_name: {"$gte": value(), "$lte": value(1)}}, arg_idx + 2
     if op == "in":
-        return {field_name: {"$in": ids(value())}}, arg_idx + 1
+        return {field_name: criteria.in_values(ids(value()))}, arg_idx + 1
     if op == "not_in":
         return {field_name: criteria.not_in_values(ids(value()))}, arg_idx + 1
     if op == "is_null":
@@ -401,8 +401,3 @@ class MongoQueryMethodCompiler:
             (order.field_name, pymongo.ASCENDING if order.direction == "asc" else pymongo.DESCENDING)
             for order in parsed.order_clauses
         ]
-
-
-CompiledQuery = Callable[..., Coroutine[Any, Any, Any]]
-"""What :meth:`MongoQueryMethodCompiler.compile` returns, as the compiler port describes it: a coroutine
-callable (a :class:`MongoDerivedQuery`)."""

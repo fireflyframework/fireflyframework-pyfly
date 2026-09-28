@@ -17,10 +17,13 @@ the shared decorator. Its execution is proven on a real replica set in
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
+from typing import Any
+
 import pytest
 
 from pyfly.data.document.mongodb.document import BaseDocument
-from pyfly.data.document.mongodb.query import MongoQueryExecutor, _substitute_params
+from pyfly.data.document.mongodb.query import MongoAnnotatedQuery, MongoQueryExecutor, _substitute_params
 from pyfly.data.query import query
 
 # ---------------------------------------------------------------------------
@@ -150,6 +153,37 @@ class TestMongoQueryExecutor:
 
         compiled = executor.compile_query_method(agg_method, QDItem)
         assert callable(compiled)
+
+    def test_compile_builds_through_the_hooks_a_subclass_overrides(self) -> None:
+        """2e. compile_query_method builds a find filter with _compile_find and a pipeline with
+        _compile_aggregate, so an executor subclass that overrides one of them compiles its queries."""
+        calls: list[tuple[str, str]] = []
+
+        class RecordingExecutor(MongoQueryExecutor):
+            def _compile_find(self, query_string: str) -> Callable[..., Coroutine[Any, Any, Any]]:
+                calls.append(("find", query_string))
+                return super()._compile_find(query_string)
+
+            def _compile_aggregate(self, query_string: str) -> Callable[..., Coroutine[Any, Any, Any]]:
+                calls.append(("aggregate", query_string))
+                return super()._compile_aggregate(query_string)
+
+        @query(' {"role": ":role"} ')
+        async def find_method(self: object, role: str) -> list[QDItem]: ...
+
+        @query('[{"$match": {"role": ":role"}}, {"$out": "copies"}]')
+        async def copy_method(self: object, role: str) -> list[dict]: ...
+
+        executor = RecordingExecutor()
+        found = executor.compile_query_method(find_method, QDItem)
+        copied = executor.compile_query_method(copy_method, QDItem)
+
+        assert calls == [
+            ("find", '{"role": ":role"}'),
+            ("aggregate", '[{"$match": {"role": ":role"}}, {"$out": "copies"}]'),
+        ]
+        assert isinstance(found, MongoAnnotatedQuery) and found.reads and not found.is_pipeline
+        assert isinstance(copied, MongoAnnotatedQuery) and not copied.reads and copied.is_pipeline
 
 
 # ===========================================================================

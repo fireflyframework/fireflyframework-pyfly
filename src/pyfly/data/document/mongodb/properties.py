@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import functools
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from beanie import Document, PydanticObjectId
@@ -128,11 +128,6 @@ def _id_adapter(annotation: Any) -> TypeAdapter[Any]:
         return _cached_adapter(annotation)
     except TypeError:  # an annotation that cannot be hashed (metadata that is not hashable)
         return TypeAdapter(annotation)
-
-
-def coerce_ids(entity: type, values: Iterable[Any]) -> list[Any]:
-    """Each of *values* converted with :func:`coerce_id`."""
-    return [coerce_id(entity, value) for value in values]
 
 
 def new_id(entity: type) -> Any:

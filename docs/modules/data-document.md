@@ -654,7 +654,7 @@ The `MongoQueryExecutor` is used by the `MongoRepositoryBeanPostProcessor` to co
 
 1. **Validation:** Checks that the method has a `__pyfly_query__` attribute (set by the `@query` decorator).
 2. **JSON parsing:** Parses the query string once at compile time to validate it and detect whether it is a find filter (JSON object) or an aggregation pipeline (JSON array).
-3. **Template compilation:** Stores the parsed template in a `MongoAnnotatedQuery`, which substitutes the parameters at execution time and runs the query in the repository's unit of work.
+3. **Template compilation:** `_compile_find` (a filter) or `_compile_aggregate` (a pipeline), the hooks an executor subclass overrides, stores the parsed template in a `MongoAnnotatedQuery`, which substitutes the parameters at execution time and runs the query in the repository's unit of work.
 
 ```python
 from pyfly.data.document.mongodb.query import MongoQueryExecutor

@@ -139,7 +139,7 @@ class MongoFilterOperator:
     @staticmethod
     def in_list(field: str, values: list[Any]) -> MongoSpecification[Any]:
         """Value is in list (an empty list matches nothing)."""
-        return _where(field, lambda path, root: {"$in": _id_values(path, root, criteria.listed(values))})
+        return _where(field, lambda path, root: criteria.in_values(_id_values(path, root, criteria.listed(values))))
 
     @staticmethod
     def is_null(field: str) -> MongoSpecification[Any]:
