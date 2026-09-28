@@ -565,7 +565,9 @@ destination left out of `forward.destinations` goes straight to the broker after
 once outside one): at most once, and lost if the process dies in between. The group stays registered when
 `outbox.enabled` is turned off, and every other writer of the same tables (an outbox bus) keeps owing it its
 events: remove it (`await SqlOutboxStore("primary").unregister("pyfly.forward:kafka")`) when you switch the layer
-off for good (on MongoDB, `await MongoOutboxStore("document").unregister("pyfly.forward:kafka")`).
+off for good (on MongoDB, `await MongoOutboxStore("document", database="shop").unregister("pyfly.forward:kafka")`,
+with the database of `pyfly.data.document.database`: without `database=` the store takes the one the client's URI
+names, else `pyfly`).
 
 The broker's bus builds the envelope it sends when the forwarder publishes: its `timestamp` is the instant of the
 forward, not of the publish in the unit (the event's id is kept, in `x-pyfly-event-id`). With the in-process bus
@@ -694,8 +696,9 @@ await publisher.start()
 
 `DatabaseEventBus(store=MongoOutboxStore(...))` is the `database` bus on it, and `TransactionalOutbox(publish,
 store=MongoOutboxStore(...))` the event-sourcing outbox. The `postgres` provider is the SQL store on PostgreSQL:
-`pyfly.eda.outbox.store: mongo` raises there. `pyfly.eda.outbox.notify` does not apply (the relays poll, and a
-publish in the same process wakes them after its commit).
+`pyfly.eda.outbox.store: mongo` raises there. The LISTEN/NOTIFY wake-ups are PostgreSQL's: the relays poll, and a
+publish in the same process wakes them after its commit; `pyfly.eda.outbox.notify: true` makes the `database` bus
+fail to start on the Mongo store.
 
 ### Postgres: what privileges a serving process actually needs
 

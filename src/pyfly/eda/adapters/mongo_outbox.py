@@ -75,8 +75,9 @@ own. Several writes that belong together (an append, a registration, an unregist
 letters, a retention batch) join only a unit that runs a transaction, and otherwise run in a transaction of their
 own (one MongoDB aborts for a write conflict with a concurrent transaction is run again, a few times). The work of
 one command, which MongoDB applies to each document atomically (a claim, a completion, an extension, a release, a
-plain settle), and a read join any unit, or run in one of their own without a transaction. Such a unit reports a
-failure after its first command as an unknown outcome, never as a rollback: a write may have stood.
+plain settle), and a read join any unit, or run in one of their own without a transaction. A writing unit of its
+own without a transaction reports a failure after its first command as an unknown outcome, never as a rollback: a
+write may have stood.
 
 **Sharing.** The store does not own its client: the application's document client belongs to the context that
 built it (:data:`~pyfly.data.document.mongodb.initializer.BINDINGS` closes it when the last context using it
@@ -251,10 +252,11 @@ class MongoOutboxStore:
     :class:`~pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager`, or an ``AsyncMongoClient`` (the
     client's manager, :meth:`MongoTransactionManager.for_client
     <pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager.for_client>`). The store reads and writes
-    with that manager's client and never closes it. *database* is the database of the collections (by default the
-    one the client's URI names, else ``pyfly``), and *collections* their names (the ``pyfly_outbox_*`` ones by
-    default). With *create_indexes* false, :meth:`start` only checks the indexes. *clock* gives the current UTC
-    instant (by default the system's, to the millisecond).
+    with that manager's client and never closes it. *database* is the database of the collections: by default the
+    one the client's URI names, else ``pyfly``, which is not read from ``pyfly.data.document.database`` (pass that
+    one, as the auto-configuration does, when the URI names none). *collections* are their names (the
+    ``pyfly_outbox_*`` ones by default). With *create_indexes* false, :meth:`start` only checks the indexes.
+    *clock* gives the current UTC instant (by default the system's, to the millisecond).
     """
 
     def __init__(
@@ -421,7 +423,9 @@ class MongoOutboxStore:
             return
         async with AutoUnit(manager, read_only=read_only, autocommit=True if single else None) as unit:
             if not read_only and not in_transaction(unit):
-                # Each command stands as it runs: a failure after one is an unknown outcome, not a rollback.
+                # Each command stands as it runs: a failure after one is an unknown outcome, not a rollback. The unit
+                # counts its reads as operations too, so a claim that fails on its first read, having written
+                # nothing, is reported unknown as well: conservative, as a SQL autocommit unit's statements are.
                 unit.autocommit = True
             yield unit
 

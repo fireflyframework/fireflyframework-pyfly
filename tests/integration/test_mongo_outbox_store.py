@@ -23,8 +23,8 @@
 - in a unit that runs no transaction (a single-command repository write outside ``@transactional``) the store
   runs its writes in a transaction of its own: an append that fails leaves no event without its deliveries;
 - a single-command unit of the store's own that fails after its write reports an unknown outcome;
-- a standalone server is refused, a read-only unit refuses an append, the indexes are created (or checked), and
-  the consumers that share a store each stop it without closing the client.
+- a standalone server is refused, a read-only unit refuses an append, the indexes are created (or checked), the
+  consumers that share a store each stop it without closing the client, and the database bus refuses ``notify``.
 """
 
 from __future__ import annotations
@@ -564,3 +564,12 @@ async def test_the_consumers_sharing_a_store_each_stop_it_and_the_client_stays_o
     await store.append(_event("after the stops"))
     assert [p.envelope.payload for p in await store.pending("g")] == [{"n": "after the stops"}]
     assert (await mongo.client.admin.command("ping"))["ok"] == 1.0
+
+
+async def test_the_database_bus_on_the_mongo_store_refuses_notify(mongo: Mongo) -> None:
+    """The LISTEN/NOTIFY wake-ups are PostgreSQL's: asked for on the Mongo store, the bus fails to start (and leaves
+    nothing running) rather than poll while the configuration says it is woken."""
+    bus = DatabaseEventBus(store=mongo.store(), group="billing", notify=True)
+    with pytest.raises(ValueError, match="notify=True needs a SQL outbox store on PostgreSQL"):
+        await bus.start()
+    await bus.stop()
