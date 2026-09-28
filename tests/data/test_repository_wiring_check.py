@@ -64,6 +64,21 @@ class PlainMemberRepository(Repository[_WiredMember, int]):
     """No derived or ``@query`` stub: only the inherited CRUD methods, which need no compiling."""
 
 
+class _MemberQueries(Repository[_WiredMember, int]):
+    """An application's intermediate base: the post-processor compiles its stubs for every repository that
+    extends it (it walks the repository class's MRO)."""
+
+    async def exists_by_email(self, email: str) -> bool: ...
+
+    @query("SELECT count(*) FROM wp11_wired_member", native=True)
+    async def count_everyone(self) -> int: ...
+
+
+@repository
+class InheritedMemberRepository(_MemberQueries):
+    """Declares nothing itself: its derived and ``@query`` stubs are its base's."""
+
+
 def _config(tmp_path: Path, **relational: str) -> Config:
     url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
     return Config({"pyfly": {"data": {"relational": {"url": url, **relational}}}})
@@ -111,6 +126,30 @@ async def test_a_query_stub_without_the_relational_layer_fails_the_start(tmp_pat
     with pytest.raises(BeanCreationException, match=r"count_everyone.*pyfly\.data\.relational\.enabled=true"):
         await context.start()
     await context.stop()
+
+
+async def test_stubs_inherited_from_an_application_base_fail_the_start_when_uncompiled(tmp_path: Path) -> None:
+    """The check looks where the post-processor does: the stubs a repository inherits from a base of the
+    application's are compiled for it, so they must be compiled for the start to go on."""
+    context = ApplicationContext(_config(tmp_path))
+    context.register_bean(InheritedMemberRepository)
+    with pytest.raises(BeanCreationException, match=r"exists_by_email, count_everyone"):
+        await context.start()
+    await context.stop()
+
+
+async def test_stubs_inherited_from_an_application_base_are_compiled_and_answer(tmp_path: Path) -> None:
+    await _create_table(tmp_path)
+    context = ApplicationContext(_config(tmp_path, enabled="true"))
+    context.register_bean(InheritedMemberRepository)
+    await context.start()
+    try:
+        members = context.get_bean(InheritedMemberRepository)
+        await members.save(_WiredMember(email="a@example.com"))
+        assert await members.exists_by_email("a@example.com") is True
+        assert await members.count_everyone() == 1
+    finally:
+        await context.stop()
 
 
 async def _create_table(tmp_path: Path) -> None:

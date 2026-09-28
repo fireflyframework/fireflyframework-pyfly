@@ -552,24 +552,21 @@ def _uncompiled_query_methods(bean: Any) -> list[str]:
     """The derived and ``@query`` stubs of *bean*'s class that no repository post-processor replaced on *bean*.
 
     It looks where the post-processor does (``BaseRepositoryPostProcessor.after_init``): the public methods the
-    repository's class defines, a compiled one being bound on the instance."""
-    from pyfly.data.post_processor import DERIVED_PREFIXES, BaseRepositoryPostProcessor
+    repository's class declares or inherits from the application's own bases (``declared_methods``, which skips
+    the framework's repository classes), a compiled one being bound on the instance."""
+    from pyfly.data.post_processor import declared_methods, is_derived_query_name, is_stub
 
-    cls = type(bean)
     inherited = set(dir(Repository))
     compiled = vars(bean)
-    stubs: list[str] = []
-    for name in vars(cls):
-        if name.startswith("_") or name in compiled:
-            continue
-        method = getattr(cls, name, None)
-        if method is None or not callable(method):
-            continue
-        if hasattr(method, "__pyfly_query__") or (
-            name not in inherited and name.startswith(DERIVED_PREFIXES) and BaseRepositoryPostProcessor._is_stub(method)
-        ):
-            stubs.append(name)
-    return stubs
+    return [
+        name
+        for name, method in declared_methods(type(bean), Repository)
+        if name not in compiled
+        and (
+            hasattr(method, "__pyfly_query__")
+            or (name not in inherited and is_derived_query_name(name) and is_stub(method))
+        )
+    ]
 
 
 @auto_configuration
