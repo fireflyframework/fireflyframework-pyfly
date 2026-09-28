@@ -51,8 +51,8 @@ Spring Data semantics, at the fewest round trips:
   validation, event actions and state management for each document, as ``save`` does (C039).
 - The ids and revisions both make on the client are the documents' only once they are stored: a call that fails
   gives the documents it did not write the id, revision and saved state they had, and so does a rollback of the
-  transaction they were written in (after the call returned too), so saving the same objects again retries the
-  same writes.
+  transaction they were written in (after the call returned too, before the unit's after-rollback callbacks), so
+  saving the same objects again retries the same writes. A write whose write concern alone failed is stored.
 - Ids are converted to the document's id type in every ``_id`` filter (C038): ``MongoRepository[Doc, str]``
   finds an ``ObjectId`` document by its string. An id the type cannot hold matches nothing.
 - Sort orders, ``find_all(**filters)`` keys and derived queries name Python fields; ``id`` is stored as
