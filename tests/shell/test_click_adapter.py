@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import click
 import pytest
 
 from pyfly.shell.adapters.click_adapter import ClickShellAdapter
@@ -383,3 +384,62 @@ class TestApplicationLoop:
 
         monkeypatch.setattr(builtins, "input", interrupted)
         await ClickShellAdapter().run_interactive()  # returns instead of raising
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raised", "expected"),
+        [
+            (SystemExit(3), (3, "")),
+            (click.exceptions.Exit(4), (4, "")),
+            (click.ClickException("bad input"), (1, "bad input")),
+            (click.UsageError("missing --id"), (2, "missing --id")),
+        ],
+        ids=["SystemExit", "click-Exit", "ClickException", "UsageError"],
+    )
+    async def test_an_async_command_that_exits_on_purpose_returns_its_exit_code(
+        self, raised: BaseException, expected: tuple[int, str]
+    ) -> None:
+        """As a synchronous command's: the exit code it chose, never an exception out of ``run()``."""
+        adapter = ClickShellAdapter()
+
+        async def leave() -> str:
+            raise raised
+
+        adapter.register_command("leave", leave)
+        assert await adapter.ainvoke(["leave"]) == expected
+        assert await adapter.run(["leave"]) == expected[0]
+
+    def test_an_async_command_that_exits_on_purpose_without_a_loop_returns_its_exit_code(self) -> None:
+        adapter = ClickShellAdapter()
+
+        async def leave() -> str:
+            raise SystemExit(3)
+
+        adapter.register_command("leave", leave)
+        assert adapter.invoke(["leave"]) == (3, "")
+
+    @pytest.mark.asyncio
+    async def test_a_command_that_exits_on_purpose_does_not_end_the_repl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import builtins
+
+        adapter = ClickShellAdapter()
+        ran: list[str] = []
+
+        async def leave() -> str:
+            raise SystemExit(3)
+
+        async def note(word: str) -> None:
+            ran.append(word)
+
+        adapter.register_command("leave", leave)
+        adapter.register_command("note", note, params=[ShellParam(name="word", param_type=str, is_option=False)])
+        lines = ["leave", "note after"]
+
+        def typed(prompt: str = "") -> str:
+            if not lines:
+                raise EOFError
+            return lines.pop(0)
+
+        monkeypatch.setattr(builtins, "input", typed)
+        await adapter.run_interactive()
+        assert ran == ["after"]

@@ -25,7 +25,9 @@ the Mongo client were created on:
   and orchestration recovery while the operator thinks, and an interrupted session never blocks the process
   exit waiting for a line.
 - A command's output is printed; a failing command's message goes to stderr, its traceback to the log, and
-  ``run()`` returns its exit code.
+  ``run()`` returns its exit code: 1, or the one a command that ends on purpose chose (``SystemExit``,
+  Click's ``Exit``, a ``ClickException`` such as ``UsageError``), async commands included. Such an exit ends
+  the command, never the REPL nor the application.
 
 The synchronous :meth:`ClickShellAdapter.invoke` is for loop-less use (a script, a sync test): it runs an async
 command with ``asyncio.run()``, and refuses one while a loop is running (use :meth:`ClickShellAdapter.ainvoke`
@@ -94,6 +96,28 @@ def _build_click_param(sp: ShellParam) -> click.Parameter:
         kwargs_arg["default"] = sp.default
         kwargs_arg["required"] = False
     return click.Argument([sp.name], **kwargs_arg)
+
+
+def _deliberate_exit(error: BaseException) -> tuple[int, str] | None:
+    """The ``(exit_code, message)`` of a command that ended on purpose (``SystemExit``, Click's ``Exit``, a
+    ``ClickException`` such as ``UsageError``); ``None`` when *error* is a failure."""
+    if isinstance(error, SystemExit):
+        return (error.code if isinstance(error.code, int) else 1), ""
+    if isinstance(error, click.exceptions.Exit):
+        return error.exit_code, ""
+    if isinstance(error, click.ClickException):
+        return error.exit_code, error.format_message()
+    return None
+
+
+def _outcome(error: BaseException, args: list[str]) -> tuple[int, str]:
+    """``(exit_code, message)`` for a command that raised *error*: its own exit code when it ended on purpose,
+    else 1 with its traceback logged."""
+    deliberate = _deliberate_exit(error)
+    if deliberate is not None:
+        return deliberate
+    logger.error("shell_command_failed", extra={"command": args[:1]}, exc_info=error)
+    return 1, str(error)
 
 
 async def _read_line(prompt: str) -> str:
@@ -185,7 +209,11 @@ class ClickShellAdapter:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return self._settle(lambda: asyncio.run(pending))
+            try:
+                result = asyncio.run(pending)
+            except (SystemExit, Exception) as exc:  # noqa: BLE001 — a failing command is reported, never propagated
+                return _outcome(exc, args)
+            return 0, result if isinstance(result, str) else ""
         pending.close()
         raise RuntimeError(
             "ClickShellAdapter.invoke() cannot run an async command while an event loop is running: the command "
@@ -197,16 +225,16 @@ class ClickShellAdapter:
         """Invoke the Click group with *args* on the running loop, returning ``(exit_code, output)``.
 
         An async command is awaited here, on the application's loop. A command that raises returns exit code 1
-        and its message; its traceback is logged.
+        and its message, its traceback logged; one that ends on purpose (``SystemExit``, Click's ``Exit``, a
+        ``ClickException``) returns the exit code it chose, as a synchronous command does.
         """
         exit_code, output, pending = self._dispatch(args)
         if pending is None:
             return exit_code, output
         try:
             result = await pending
-        except Exception as exc:  # noqa: BLE001 — a failing command is reported, never propagated
-            logger.error("shell_command_failed", extra={"command": args[:1]}, exc_info=True)
-            return 1, str(exc)
+        except (SystemExit, Exception) as exc:  # noqa: BLE001 — a failing command is reported, never propagated
+            return _outcome(exc, args)
         return 0, result if isinstance(result, str) else ""
 
     def _dispatch(self, args: list[str]) -> tuple[int, str, Any]:
@@ -222,25 +250,14 @@ class ClickShellAdapter:
         except SystemExit as exc:
             code = exc.code if isinstance(exc.code, int) else 1
             return code, buf.getvalue(), None
-        except click.exceptions.UsageError as exc:
-            return 2, str(exc), None
-        except Exception as exc:
-            logger.error("shell_command_failed", extra={"command": args[:1]}, exc_info=True)
-            return 1, str(exc), None
+        except Exception as exc:  # noqa: BLE001 — a failing command is reported, never propagated
+            code, message = _outcome(exc, args)
+            return code, message, None
         if inspect.iscoroutine(result):
             return 0, "", result
         if isinstance(result, str):
             buf.write(result)
         return 0, buf.getvalue(), None
-
-    @staticmethod
-    def _settle(run: Callable[[], Any]) -> tuple[int, str]:
-        try:
-            result = run()
-        except Exception as exc:  # noqa: BLE001 — a failing command is reported, never propagated
-            logger.error("shell_command_failed", exc_info=True)
-            return 1, str(exc)
-        return 0, result if isinstance(result, str) else ""
 
     async def run(self, args: list[str] | None = None) -> int:
         """Run one command on the running loop, print its output (a failure's message to stderr), and
