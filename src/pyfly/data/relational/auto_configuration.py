@@ -599,9 +599,10 @@ class DataSourceAutoConfiguration:
         return DataSourceSpiRegistrar(datasource_registry)
 
     @bean
+    @conditional_on_missing_bean(RepositoryWiringCheck)
     def repository_wiring_check(self) -> RepositoryWiringCheck:
         """Fails the start on a relational repository whose query stubs were never compiled
-        (:class:`RepositoryWiringCheck`)."""
+        (:class:`RepositoryWiringCheck`). An application's own ``RepositoryWiringCheck`` bean replaces it."""
         return RepositoryWiringCheck()
 
     @bean

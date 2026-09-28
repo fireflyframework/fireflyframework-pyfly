@@ -23,17 +23,20 @@ did not bind to the context's transaction managers finds them when it is called.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import Integer, String
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.container.bean import bean
 from pyfly.container.exceptions import BeanCreationException
-from pyfly.container.stereotypes import repository
+from pyfly.container.stereotypes import configuration, repository
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.data.query import query
+from pyfly.data.relational.auto_configuration import RepositoryWiringCheck
 from pyfly.data.relational.sqlalchemy import Base, Repository
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
 
@@ -150,5 +153,31 @@ async def test_a_repository_without_query_stubs_needs_no_compiling(tmp_path: Pat
         members = context.get_bean(PlainMemberRepository)
         await members.save(_WiredMember(email="a@example.com"))
         assert await members.count() == 1
+    finally:
+        await context.stop()
+
+
+class _LenientWiringCheck(RepositoryWiringCheck):
+    """An application's own check, which lets every repository through."""
+
+    def after_init(self, bean: Any, bean_name: str) -> Any:
+        return bean
+
+
+@configuration
+class _ApplicationWiringCheck:
+    @bean
+    def lenient_wiring_check(self) -> RepositoryWiringCheck:
+        return _LenientWiringCheck()
+
+
+async def test_an_application_wiring_check_replaces_the_auto_configured_one(tmp_path: Path) -> None:
+    """The check is an auto-configured bean like the other data beans: an application's own replaces it."""
+    context = ApplicationContext(_config(tmp_path))
+    context.register_bean(_ApplicationWiringCheck)
+    context.register_bean(WiredMemberRepository)
+    await context.start()
+    try:
+        assert [type(check) for check in context.get_beans_of_type(RepositoryWiringCheck)] == [_LenientWiringCheck]
     finally:
         await context.stop()
