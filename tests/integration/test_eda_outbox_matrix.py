@@ -41,7 +41,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from pyfly.data.relational.sqlalchemy.entity import Base
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.transaction import TransactionTemplate, detached
-from pyfly.eda.adapters.database import DatabaseEventBus
+from pyfly.eda.adapters.database import BusState, DatabaseEventBus
 from pyfly.eda.outbox import Outbox, OutboxRelay, OutboxTables, Retention
 from pyfly.eda.types import ErrorStrategy, EventEnvelope
 from pyfly.messaging.listener_container import FixedBackOff, RetryPolicy
@@ -510,6 +510,67 @@ async def test_a_stop_that_cancels_a_delivery_gives_it_back(relational_backend: 
 
     pending = await bus.outbox.pending("slow")
     assert [(p.attempts, p.available_at <= bus.outbox.now()) for p in pending] == [(0, True)]
+
+
+async def test_a_handler_that_raises_cancelled_error_fails_its_delivery_and_the_relay_goes_on(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A handler raises ``CancelledError`` of its own (it awaited a future or a task someone else cancelled) while
+    the relay's task was not cancelled. The relay took it for its own cancellation: its task ended for good, the
+    bus still reported UP, nothing more was delivered in the process, and ``stop()`` raised ``CancelledError`` into
+    the context's shutdown. It is now the delivery's failure: attempted again, then dead-lettered, and the relay
+    goes on."""
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="cancelling", poll_interval=0.05, retry=_retry(2))
+    handled: list[str] = []
+
+    async def handler(envelope: EventEnvelope) -> None:
+        if envelope.event_type == "first":
+            future = asyncio.get_running_loop().create_future()
+            future.cancel()  # a client call whose request another task cancelled
+            await future
+        handled.append(envelope.event_type)
+
+    bus.subscribe("*", handler)
+    await bus.start()
+    try:
+        await bus.publish("d", "first", {"n": 1})
+        await bus.publish("d", "second", {"n": 2})
+        await _wait_until(lambda: handled == ["second"] and bus.relay.counters.dead_lettered == 1)
+        assert (await bus.health_status()).status == "UP"
+    finally:
+        await bus.stop()  # returns: no CancelledError leaks into the shutdown
+
+    dead = await bus.outbox.dead_letters("cancelling")
+    assert [(entry.event.event_type, entry.error_type, entry.attempts) for entry in dead] == [
+        ("first", "CancelledError", 2)
+    ]
+    assert bus.relay.counters.failed_rounds == 0
+    assert await bus.outbox.pending("cancelling") == []
+
+
+async def test_a_relay_whose_task_ended_under_a_running_bus_reports_down_and_stops_quietly(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A relay task that ends while its bus runs (cancelled by something other than ``stop()``) delivers nothing
+    more: the bus reports DOWN, and its ``stop()`` logs the end rather than raising it into the shutdown."""
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="ended", poll_interval=0.05)
+    bus.subscribe("*", Recorder())
+    await bus.start()
+    try:
+        assert (await bus.health_status()).status == "UP"
+        task = next(task for task in asyncio.all_tasks() if task.get_name() == "eda ended")
+        task.cancel()  # not a stop
+        await asyncio.wait({task})
+
+        health = await bus.health_status()
+        assert health.status == "DOWN"
+        assert health.details["reason"] == "the relay's task ended"
+        assert bus.relay.alive is False
+    finally:
+        await bus.stop()
+    assert bus.state is BusState.STOPPED
 
 
 async def test_the_sql_dead_letter_store_keeps_entries_durably(relational_backend: RelationalBackend) -> None:

@@ -354,9 +354,16 @@ def _utc(value: Any) -> datetime | None:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _chunks(ids: Sequence[int]) -> Iterable[list[int]]:
-    for start in range(0, len(ids), _IN_LIST_CHUNK):
-        yield list(ids[start : start + _IN_LIST_CHUNK])
+def _chunks(ids: Sequence[int], size: int = _IN_LIST_CHUNK) -> Iterable[list[int]]:
+    for start in range(0, len(ids), size):
+        yield list(ids[start : start + size])
+
+
+def _cancel_requested() -> bool:
+    """Whether the running task was asked to cancel (a stop), as opposed to a ``CancelledError`` a handler or a
+    hook raised on its own (it awaited a future or a task someone else cancelled), which is a failure."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _by_claim(deliveries: Iterable[Delivery]) -> dict[tuple[str, str], list[Delivery]]:
@@ -1380,29 +1387,76 @@ class OutboxRelay:
             self._wake.set()
             self._registered = False
             self._task = detached(self._run(), name=self._name)
+            self._task.add_done_callback(self._ended)
             self._state = RelayState.RUNNING
 
     async def stop(self) -> None:
         """Stop the relay: the delivery in flight finishes (for the listener shutdown timeout, then it is
-        cancelled), and the deliveries it had claimed and not started are given back. Idempotent."""
+        cancelled), and the deliveries it had claimed and not started are given back. Idempotent.
+
+        It raises nothing of the relay's task: a task that had ended already (cancelled by something other than
+        a stop, or failed) is logged. When the stop itself is cancelled, the relay's task is cancelled with it
+        (nothing is left running) and the cancellation is raised."""
         async with self._lock:
             task = self._task
             if self._state is not RelayState.RUNNING or task is None:
                 self._state = RelayState.STOPPED if self._state is not RelayState.NEW else self._state
                 return
+            ended = task.done()
             self._state = RelayState.STOPPING
             self._wake.set()
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=self._settings.shutdown_timeout)
-            except TimeoutError:
+                _done, running = await asyncio.wait({task}, timeout=self._settings.shutdown_timeout)
+                if running:
+                    _logger.warning(
+                        "outbox_relay_stop_timeout",
+                        extra={
+                            "group": self._group,
+                            "relay": self._name,
+                            "timeout": self._settings.shutdown_timeout,
+                            "action": "the delivery in flight is cancelled and given back",
+                        },
+                    )
+                    task.cancel()
+                    await asyncio.wait({task})
+            except asyncio.CancelledError:
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-            except Exception:  # noqa: BLE001 — the loop logs its own failures; stopping goes on
-                _logger.debug("outbox_relay_stop_failed", exc_info=True)
+                raise
             finally:
                 self._task = None
                 self._state = RelayState.STOPPED
+            if ended:
+                return  # logged when it ended (_ended)
+            if not task.cancelled() and task.exception() is not None:
+                _logger.error(
+                    "outbox_relay_failed",
+                    extra={"group": self._group, "relay": self._name},
+                    exc_info=task.exception(),
+                )
+
+    @property
+    def alive(self) -> bool:
+        """Whether the relay's task runs: ``False`` before :meth:`start`, after :meth:`stop`, and when the task
+        ended under a running relay (cancelled by something other than a stop): then nothing is delivered in
+        this process until the relay is started again, and a bus reports ``DOWN``."""
+        return self._task is not None and not self._task.done()
+
+    def _ended(self, task: asyncio.Task[None]) -> None:
+        """The relay's task ended: expected when it stops, a failure while it runs."""
+        if self._state is not RelayState.RUNNING or task is not self._task:
+            return
+        if task.cancelled():
+            cause = "its task was cancelled by something other than a stop"
+            error: BaseException | None = None
+        else:
+            error = task.exception()
+            cause = describe_error(error) if error is not None else "its task returned"
+        self._last_error = f"the relay ended: {cause}"
+        _logger.error(
+            "outbox_relay_ended",
+            extra={"group": self._group, "relay": self._name, "cause": cause},
+            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
+        )
 
     # -- the loop -------------------------------------------------------------------------------------------------
 
@@ -1420,8 +1474,21 @@ class OutboxRelay:
                     await hook()
                 handled = await self.run_once()
                 await self._maybe_prune()
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as cancelled:
+                if _cancel_requested():
+                    raise  # the relay's own task is cancelled: a stop that timed out
+                # A CancelledError nobody asked of this task (a hook or a statement awaited something another
+                # task cancelled): the round failed, and the relay goes on.
+                failures += 1
+                self.counters.failed_rounds += 1
+                self._last_error = describe_error(cancelled)
+                _logger.warning(
+                    "outbox_relay_round_failed",
+                    extra={"group": self._group, "relay": self._name},
+                    exc_info=(type(cancelled), cancelled, cancelled.__traceback__),
+                )
+                await self._wait(min(self._poll_interval, 0.5 * 2 ** min(failures, 6)))
+                continue
             except Exception as error:  # noqa: BLE001 — a failed round is logged and tried again
                 failures += 1
                 self.counters.failed_rounds += 1
@@ -1569,8 +1636,10 @@ class OutboxRelay:
         for subscription in self._matching(delivery):
             try:
                 await self._invoke(subscription, delivery.envelope)
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as cancelled:
+                if _cancel_requested():
+                    raise  # the relay is being stopped: the round gives the delivery back
+                failures.append((subscription, cancelled))  # the handler's own: the delivery failed
             except Exception as error:  # noqa: BLE001 — a handler's failure is the delivery's outcome
                 failures.append((subscription, error))
             else:

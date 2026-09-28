@@ -516,9 +516,10 @@ class DatabaseEventBus:
                 await session.execute(text("SELECT 1"))
 
     async def health_status(self) -> HealthStatus:
-        """``UP`` while the bus runs and its database answers, ``DOWN`` otherwise, with the reason. The details
-        give the state of the wake-up connection (on PostgreSQL): while a lost one is being reopened the bus stays
-        ``UP``, since its relay still delivers at every poll, and the details say it is degraded and since when."""
+        """``UP`` while the bus runs, its relay's task runs and its database answers, ``DOWN`` otherwise, with the
+        reason. The details give the state of the wake-up connection (on PostgreSQL): while a lost one is being
+        reopened the bus stays ``UP``, since its relay still delivers at every poll, and the details say it is
+        degraded and since when."""
         from pyfly.actuator.health import HealthStatus
 
         details: dict[str, Any] = {
@@ -530,6 +531,12 @@ class DatabaseEventBus:
         }
         if self._state is not BusState.RUNNING:
             return HealthStatus(status="DOWN", details={**details, "reason": f"bus {self._state.value}"})
+        if not self._relay.alive:
+            # Nothing is delivered in this process any more (its events wait for another node, or a restart).
+            return HealthStatus(
+                status="DOWN",
+                details={**details, "reason": "the relay's task ended", "error": self._relay.last_error},
+            )
         try:
             await asyncio.wait_for(self.ping(), timeout=2.0)
         except Exception as error:  # noqa: BLE001 — reported, not raised
