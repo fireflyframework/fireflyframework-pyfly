@@ -31,7 +31,10 @@ value while preserving the Python type (int, bool, list, etc.).
 
 The compiled query runs in the repository's unit of work: the unit's ``ClientSession`` goes with the ``find``
 or the ``aggregate``. A find filter and a pipeline without an ``$out`` or ``$merge`` stage are reads (outside a
-transaction they run without one); a pipeline that writes is a write.
+transaction they run without one). A pipeline with an ``$out`` or ``$merge`` stage writes, in one command:
+outside a transaction it runs without one, and inside one it raises
+:class:`~pyfly.data.transaction.errors.IllegalTransactionStateError` before it is sent, because MongoDB cannot run
+either stage in a multi-document transaction.
 """
 
 from __future__ import annotations
@@ -40,6 +43,9 @@ import json
 import logging
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, cast
+
+from pyfly.data.document.mongodb.transaction_manager import in_transaction
+from pyfly.data.transaction.errors import IllegalTransactionStateError
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +92,10 @@ class MongoAnnotatedQuery:
     :meth:`run` executes it on a repository, in the repository's unit of work. Calling the object itself with
     a document class and the keyword arguments (``await query(Model, **kwargs)``, what the compiled callables of
     earlier releases took) runs it through a repository of that class.
+
+    A pipeline with an ``$out`` or ``$merge`` stage is a write of one command (:attr:`reads` is ``False``): a
+    repository operation built on it runs without a transaction outside one (``single=True``), and :meth:`run`
+    refuses it inside a transaction, where MongoDB rejects both stages.
     """
 
     def __init__(self, template: Any) -> None:
@@ -99,13 +109,34 @@ class MongoAnnotatedQuery:
 
     async def run(self, repository: Any, **kwargs: Any) -> Any:
         """Run the query on *repository* (a ``MongoRepository``): the matching documents of a find filter, or
-        the rows (``dict``) of a pipeline."""
+        the rows (``dict``) of a pipeline.
+
+        Raises:
+            IllegalTransactionStateError: The query is a pipeline with an ``$out`` or ``$merge`` stage and the
+                call's unit runs a multi-document transaction (nothing is sent, and the transaction stays
+                usable).
+        """
         document = _substitute_params(self.template, kwargs)
         if self.is_pipeline:
+            if not self.reads:
+                self._check_outside_transaction(repository)
             async with repository._operation(write=not self.reads) as session:
                 cursor = await repository._collection().aggregate(document, session=session)
                 return list(await cursor.to_list(length=None))
         return list(await repository._find(document))
+
+    def _check_outside_transaction(self, repository: Any) -> None:
+        """Refuse a pipeline that writes in a unit that runs a transaction: MongoDB rejects ``$out`` and
+        ``$merge`` there (``OperationNotSupportedInTransaction``) and aborts the whole transaction."""
+        unit = repository._current_unit()
+        if in_transaction(unit):
+            raise IllegalTransactionStateError(
+                f"A pipeline with an $out or $merge stage cannot run in {unit.describe()}: MongoDB runs neither "
+                "stage inside a multi-document transaction. Call it outside @transactional (a repository call "
+                "outside a transaction runs the pipeline as one command, without one), or in a boundary with "
+                "Propagation.NOT_SUPPORTED.",
+                datasource=unit.datasource,
+            )
 
     async def __call__(self, target: Any, **kwargs: Any) -> Any:
         """Run the query on *target*: a ``MongoRepository``, or a document class (through a repository of it)."""
@@ -116,7 +147,8 @@ class MongoAnnotatedQuery:
         async def execute(self_arg: Any) -> Any:
             return await self.run(self_arg, **kwargs)
 
-        return await repository_operation(execute, read=self.reads, atomic=True)(repository)
+        # A pipeline that writes is one command: outside a transaction it runs without one (single=True).
+        return await repository_operation(execute, read=self.reads, atomic=True, single=not self.reads)(repository)
 
 
 class MongoQueryExecutor:

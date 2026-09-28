@@ -46,8 +46,9 @@ class MongoRepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
 
     Every compiled method is a repository operation like the inherited ones: it joins the current unit of
     work or runs in an auto unit (a read unit for ``find_by_``/``count_by_``/``exists_by_`` and filter or
-    aggregation queries that write nothing, a write unit for ``delete_by_`` and pipelines ending in ``$out``
-    or ``$merge``), passes the unit's session to the driver, and raises the kernel's translated persistence
+    aggregation queries that write nothing, a write unit for ``delete_by_``, and a write unit without a
+    transaction for a pipeline with an ``$out`` or ``$merge`` stage, one command that MongoDB refuses inside a
+    transaction), passes the unit's session to the driver, and raises the kernel's translated persistence
     exceptions. With *transaction_managers*, every repository bean resolves its transaction manager from that
     registry (the application context's); a callable is asked for it when the first repository is initialized.
     """
@@ -163,7 +164,9 @@ class MongoRepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         queried.__doc__ = method.function.__doc__
         queried.__module__ = method.function.__module__
         reads = compiled.reads if isinstance(compiled, MongoAnnotatedQuery) else True
-        setattr(bean, attr_name, repository_operation(queried, read=reads, atomic=True).__get__(bean, cls))
+        # A pipeline that writes ($out, $merge) is one command: outside a transaction it runs without one.
+        operation = repository_operation(queried, read=reads, atomic=True, single=not reads)
+        setattr(bean, attr_name, operation.__get__(bean, cls))
         return True
 
 

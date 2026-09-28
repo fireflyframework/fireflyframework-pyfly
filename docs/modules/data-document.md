@@ -618,7 +618,7 @@ class OrderRepository(MongoRepository[OrderDocument, str]):
     async def recent_orders(self, customer_id: str) -> list[dict]: ...
 ```
 
-Aggregation pipeline queries use the underlying pymongo collection directly (via `get_pymongo_collection()`, with the unit's session) and return `list[dict]` rather than document instances. A find filter and a pipeline are reads (outside a transaction they run without one); a pipeline with an `$out` or `$merge` stage is a write.
+Aggregation pipeline queries use the underlying pymongo collection directly (via `get_pymongo_collection()`, with the unit's session) and return `list[dict]` rather than document instances. A find filter and a pipeline are reads (outside a transaction they run without one). A pipeline with an `$out` or `$merge` stage is a write of one command, and MongoDB refuses both stages inside a multi-document transaction: outside a transaction the call runs without one, and inside `@transactional` it raises `IllegalTransactionStateError` before anything is sent (the transaction stays usable). Run such a query outside the transaction, or in a boundary with `Propagation.NOT_SUPPORTED`.
 
 ### Parameter Substitution
 
