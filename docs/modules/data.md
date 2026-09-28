@@ -180,6 +180,7 @@ For hexagonal architecture, your service layer should depend on port protocols r
 ```python
 class CrudRepository(Protocol[T, ID]):
     async def save(self, entity: T) -> T: ...
+    async def save_all(self, entities: list[T]) -> list[T]: ...
     async def find_by_id(self, id: ID) -> T | None: ...
     async def find_all_by_id(self, ids: Iterable[ID]) -> list[T]: ...
     async def find_all(self, **filters: Any) -> list[T]: ...
@@ -203,7 +204,7 @@ RepositoryPort = CrudRepository  # alias
 | `delete(entity)`             | `None`             | Delete the given entity (no-op if not present)       |
 | `delete_by_id(id)`           | `None`             | Delete by primary key (no-op if not found)          |
 | `delete_all_by_id(ids)`      | `None`             | Delete all entities whose IDs are in `ids`          |
-| `delete_all(entities=None)`  | `None`             | Delete the given entities; with no args, truncate all|
+| `delete_all(entities=None)`  | `None`             | Delete the given entities; with no args, every row   |
 | `count()`                    | `int`              | Count all entities                                  |
 | `exists_by_id(id)`           | `bool`             | Check if an entity with this ID exists              |
 
@@ -250,6 +251,7 @@ the repository protocol hierarchy and the target of the `RepositoryPort` alias
 ```python
 class CrudRepository(Protocol[T, ID]):
     async def save(self, entity: T) -> T: ...
+    async def save_all(self, entities: list[T]) -> list[T]: ...
     async def find_by_id(self, id: ID) -> T | None: ...
     async def find_all_by_id(self, ids: Iterable[ID]) -> list[T]: ...
     async def find_all(self) -> list[T]: ...
@@ -261,7 +263,9 @@ class CrudRepository(Protocol[T, ID]):
     async def exists_by_id(self, id: ID) -> bool: ...
 ```
 
-All delete methods return `None`. `delete_all()` with no arguments truncates the whole table/collection.
+All delete methods return `None`. `delete_all()` with no arguments deletes every row or document (not a
+`TRUNCATE`: a relational repository deletes through the ORM, or in one bulk `DELETE` when nothing needs the
+ORM, and a `SoftDeleteRepository` soft-deletes them).
 
 ### ReactiveSortingRepository[T, ID]
 
@@ -1264,10 +1268,17 @@ Some capabilities are **backend-specific** today:
 | Projections | ✅ | ✅ (closed/field-subset) |
 | Soft delete (`SoftDeleteRepository`) | ✅ | ❌ not yet |
 | Optimistic locking (`VersionedMixin` / `@Version`) | ✅ | ✅ Beanie's `use_revision` (a stale write raises `OptimisticLockingFailureException`) |
+| Pessimistic locking (`find_by_id(id, lock=LockMode...)` / `@Lock`) | ✅ `FOR UPDATE`, `FOR SHARE`, `NOWAIT`, `SKIP LOCKED` inside a read-write transaction (not rendered on SQLite, whose write unit holds the database lock) | ❌ |
+| Read-replica routing (`@transactional(read_only=True)`) | ✅ a new read-only unit runs on the replica | ❌ |
 | Auditing auto-population | ✅ `created/updated_at` **and** `created/updated_by` | ✅ `created/updated_at` **and** `created/updated_by` (`BaseDocument`) |
 | `@transactional` — one annotation, both backends (`pyfly.data`) | ✅ all seven propagations (`NESTED` included), isolation, read-only, timeout, additive rollback rules, synchronizations, `datasource=` | ✅ the same unit of work on a replica set, except `NESTED` (no savepoints: `NestedTransactionNotSupportedError`) and isolation levels |
 
-**Not yet implemented on either backend** (so you don't reach for them): streaming/reactive result types; open
+For a write that must not lose a concurrent update, or a check two requests must not both pass (two
+withdrawals of 60 from a balance of 100), choose between a guarded atomic `UPDATE`, a pessimistic lock and
+`VersionedMixin`: [Concurrency Control](data-relational.md#concurrency-control) compares them.
+
+**Not yet implemented on either backend** (so you don't reach for them): streaming return types
+(`AsyncIterator[T]`) for derived and `@query` methods (use `stream_all`); open
 (SpEL) / dynamic / association-traversing projections, and DTO projections of derived queries (a relational
 `@query` builds any class from its rows: `-> list[OrderSummary]` is `OrderSummary(**row)`); the
 derived-query keywords `Distinct` / `Top<N>` / `First` and property paths through relationships (use `@query`
@@ -1346,7 +1357,10 @@ The check is bounded:
 
 The bean checks every datasource of the [datasource registry](data-relational.md#datasource-registry)
 concurrently: the primary, the replicas, the named datasources and the module datasources. It reports
-each one under `details["datasources"]`, and any `DOWN` makes the component `DOWN`.
+each one under `details["datasources"]`, and any `DOWN` makes the component `DOWN`. A registry that holds
+only the checked engine answers with that one check, without `datasources`, and an application `AsyncEngine`
+bean the registry does not own is checked alone. Once the context has stopped, the check answers
+`OUT_OF_SERVICE` without touching the disposed engines.
 
 ```python
 from pyfly.data.relational.health import SqlAlchemyHealthIndicator
@@ -1368,6 +1382,7 @@ status = await indicator.health()
 | Previous check still running (a late check that holds its connection, or two late checks without one) | `"DOWN"` | `database`; `error` = `"TimeoutError"`; `message` = `"previous check still running after ... s"` |
 | Pool exhausted | `"UNKNOWN"` | `database`; `validation` = `"skipped: pool exhausted"` |
 | With a registry | aggregate | `database` (the primary's dialect); `datasources` — one entry per datasource (`primary`, `primary.replica`, named...) |
+| Registry closed (the context stopped) | `"OUT_OF_SERVICE"` | `database`; `reason` = `"datasources closed"` |
 
 Source file: `src/pyfly/data/relational/health.py`
 
@@ -1417,7 +1432,7 @@ Source file: `src/pyfly/data/relational/metrics.py`
 
 | Adapter | Package | Backend | Guide |
 |---------|---------|---------|-------|
-| **SQLAlchemy** | `pyfly.data.relational.sqlalchemy` | PostgreSQL, MySQL, SQLite | [Data Relational Guide](data-relational.md) · [Adapter Reference](../adapters/sqlalchemy.md) |
+| **SQLAlchemy** | `pyfly.data.relational.sqlalchemy` | PostgreSQL, MySQL, MariaDB, SQLite | [Data Relational Guide](data-relational.md) · [Adapter Reference](../adapters/sqlalchemy.md) |
 | **MongoDB** | `pyfly.data.document.mongodb` | MongoDB (Beanie ODM) | [Data Document Guide](data-document.md) · [Adapter Reference](../adapters/mongodb.md) |
 
 Both adapters can coexist in the same project. The CLI supports selecting both `data-relational` (SQL) and `data-document` features together.

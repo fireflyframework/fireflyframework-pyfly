@@ -32,16 +32,21 @@ pyfly:
 ### Minimal Example
 
 ```python
+from uuid import UUID
+
+from sqlalchemy import Float, String
+from sqlalchemy.orm import Mapped, mapped_column
+
 from pyfly.container import repository
-from pyfly.data.relational.sqlalchemy import Repository, BaseEntity
+from pyfly.data.relational.sqlalchemy import BaseEntity, Repository
 
 class OrderEntity(BaseEntity):
     __tablename__ = "orders"
-    name: str
-    total: float
+    name: Mapped[str] = mapped_column(String(255))
+    total: Mapped[float] = mapped_column(Float)
 
 @repository
-class OrderRepository(Repository[OrderEntity, int]):
+class OrderRepository(Repository[OrderEntity, UUID]):   # BaseEntity's key is a UUID
     async def find_by_name(self, name: str) -> list[OrderEntity]: ...
 ```
 
@@ -54,7 +59,7 @@ class OrderRepository(Repository[OrderEntity, int]):
 | `pyfly.data.relational.enabled` | `bool` | `false` | Enable the SQLAlchemy adapter. Without it (and without a `RepositoryBeanPostProcessor` registered by hand) a relational repository with derived or `@query` methods fails the start: they would never be compiled, and each would answer `None` |
 | `pyfly.data.relational.url` | `str` | *(required)* | Database connection URL. Startup fails without it, except in the `dev` profile (`sqlite+aiosqlite:///./app.db`, with a warning) |
 | `pyfly.data.relational.echo` | `bool` or `debug` | `false` | Log all SQL statements (`debug` also logs rows); `"false"` from an env var is `false` |
-| `pyfly.data.relational.ddl-auto` | `str` | `create` on SQLite, `none` otherwise | Schema strategy: `none`, `validate`, `create` or `create-drop`; any other value fails the startup ([Schema Strategy](../modules/data-relational.md#schema-strategy-ddl-auto)) |
+| `pyfly.data.relational.ddl-auto` | `str` | `create` on SQLite; `none` on a database server, and whenever `migrations.enabled` | Schema strategy: `none`, `validate`, `create` or `create-drop`; any other value fails the startup ([Schema Strategy](../modules/data-relational.md#schema-strategy-ddl-auto)) |
 | `pyfly.data.relational.pool.size` | `int` | *(driver default)* | Connection pool size (`pool_size`) |
 | `pyfly.data.relational.pool.max-overflow` | `int` | *(driver default)* | Max overflow connections above pool size |
 | `pyfly.data.relational.pool.timeout` | `float` | *(driver default)* | Seconds to wait for a connection from the pool |
@@ -108,11 +113,11 @@ Compiles derived query method names into SQLAlchemy queries using the `QueryMeth
 Build dynamic queries with `Specification[T]`:
 
 ```python
-spec = (
-    Specification.where(field="status", op="eq", value="ACTIVE")
-    .and_where(field="total", op="gt", value=100)
-)
-results = await repository.find_all_by_spec(spec)
+from pyfly.data.relational.sqlalchemy import FilterOperator, Specification
+
+spec = FilterOperator.eq("status", "ACTIVE") & FilterOperator.gt("total", 100)
+recent = Specification(lambda root, q: q.where(root.total > 1000))   # a predicate of your own
+results = await repository.find_all_by_spec(spec | recent)
 ```
 
 ### Alembic Migrations
