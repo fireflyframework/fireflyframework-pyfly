@@ -1100,12 +1100,12 @@ def _registry_split_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.L
     return [r for r in caplog.records if r.getMessage() == "relational_registry_not_the_configurations"]
 
 
-async def test_a_user_datasource_registry_beside_a_configured_url_warns_that_the_modules_keep_their_own(
+async def test_a_user_datasource_registry_beside_a_configured_url_warns_of_the_configurations_registry(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The units of work and the relational beans run on the application's registry, while the modules that
-    look the registry up by configuration build their engines in the configuration's: said once, like the
-    engine bean's split."""
+    """The units of work, the relational beans and the framework stores run on the application's registry, while
+    code that looks the registry up by configuration (``DataSourceRegistry.for_config``) builds its engines in the
+    configuration's: said once, like the engine bean's split."""
     ctx = ApplicationContext(_config(tmp_path))
     ctx.register_bean(_UserRegistryConfiguration)
     with caplog.at_level(logging.WARNING, logger="pyfly.data.relational.auto_configuration"):

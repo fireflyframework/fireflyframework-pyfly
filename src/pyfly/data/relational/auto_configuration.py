@@ -140,12 +140,13 @@ _NAMED_SPLIT_HINT = (
 
 
 _REGISTRY_SPLIT_HINT = (
-    "@transactional, repositories, SessionProvider, infrastructure_unit() and the relational beans run on this "
-    "registry, the application's DataSourceRegistry bean, while the modules that look the registry up by "
-    "configuration (event store, snapshots, saga persistence, the PostgreSQL cache: "
-    "DataSourceRegistry.for_config) keep the configuration's, with engines and pools of their own built from "
-    "pyfly.data.relational; declare the datasources under pyfly.data.relational instead of a registry bean, or "
-    "return DataSourceRegistry.for_config(config) from it"
+    "@transactional, repositories, SessionProvider, infrastructure_unit(), the relational beans and the framework "
+    "stores (event store, snapshots, saga persistence, the SQL cache, the outbox...: they resolve the context's "
+    "registry bean) run on this registry, the application's DataSourceRegistry bean, while the configuration's "
+    "registry, built from pyfly.data.relational, exists beside it for code that looks the registry up by "
+    "configuration (DataSourceRegistry.for_config), with engines and pools of its own; declare the datasources "
+    "under pyfly.data.relational instead of a registry bean, or return DataSourceRegistry.for_config(config) "
+    "from it"
 )
 
 # The application registries a split from the configuration's was reported for: a restarted context (it builds
@@ -156,8 +157,9 @@ _REGISTRY_SPLIT_REPORTED: weakref.WeakSet[Any] = weakref.WeakSet()
 def _warn_if_registry_split(datasource_registry: DataSourceRegistry, config: Config) -> None:
     """WARNING (``relational_registry_not_the_configurations``), once per registry, when the context's
     ``DataSourceRegistry`` bean is the application's own while ``pyfly.data.relational.url`` is configured:
-    the units of work run on it, and the modules that look the registry up by configuration on the
-    configuration's (the counterpart of ``relational_engine_not_in_registry`` for a registry bean)."""
+    the units of work and the framework stores run on it, and code that looks the registry up by configuration
+    (``DataSourceRegistry.for_config``) on the configuration's, beside it (the counterpart of
+    ``relational_engine_not_in_registry`` for a registry bean)."""
     if datasource_registry in _REGISTRY_SPLIT_REPORTED:
         return
     if not str(RelationalProperties.from_config(config).url or "").strip():
@@ -612,8 +614,9 @@ class DataSourceAutoConfiguration:
         bean (an application's session factory, engine or registry bean included).
 
         On an application's own ``DataSourceRegistry`` bean beside a configured ``pyfly.data.relational.url``
-        it logs ``relational_registry_not_the_configurations``: the modules that look the registry up by
-        configuration keep the configuration's."""
+        it logs ``relational_registry_not_the_configurations``: the framework stores resolve that bean too, and
+        the configuration's registry exists beside it for code that looks the registry up by configuration
+        (``DataSourceRegistry.for_config``)."""
         _warn_if_registry_split(datasource_registry, config)
         return transaction_managers_for(datasource_registry)
 

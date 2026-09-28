@@ -57,8 +57,8 @@ factory function (:func:`orchestration_state_table` and the others), so a migrat
 builds the store's table the same way sees it.
 
 Stores call :func:`ensure_tables` when they start: it creates their tables when the schema strategy
-allows it (:func:`creates_tables`: ``pyfly.data.relational.ddl-auto`` is ``create``, ``create-drop`` or
-``update``; with ``none``, ``validate`` or any other value the tables are left to migrations), then checks
+allows it (:func:`creates_tables`: ``pyfly.data.relational.ddl-auto`` is ``create`` or ``create-drop``;
+with ``none``, ``validate`` or any other value the tables are left to migrations), then checks
 that every table and column is there, and fails fast with :class:`FrameworkSchemaError` naming what is
 missing. Declaring a new framework table: add a factory function next to the others (a ``Table`` on
 :data:`framework_metadata` built by :func:`_declare`), its module-level default table, and a row above.
