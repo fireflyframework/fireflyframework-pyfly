@@ -165,17 +165,27 @@ class MongoTransactionManager:
         self._write_concern = _write_concern(write_concern)
         self._max_commit_time = max_commit_time
         self._transactions: bool | None = None
+        with _LOOKUP_LOCK:
+            # The first manager built for a client is its manager (for_client) until another one is attached.
+            if not isinstance(getattr(client, _MANAGER, None), MongoTransactionManager):
+                setattr(client, _MANAGER, self)
 
     # -- factories ------------------------------------------------------------------------------------------
 
     @classmethod
     def for_client(cls, client: AsyncMongoClient[Any]) -> MongoTransactionManager:
-        """The manager of *client*: the one the application configured for it (:meth:`attach`), else an ad-hoc
-        manager with the default settings, built once and kept on the client.
+        """The manager of *client*: the one the installed registry has for it, else the one kept on the client (the
+        application's, :meth:`attach`; or the first one built for it), else an ad-hoc manager with the default
+        settings, built once and kept on the client.
 
         An ad-hoc manager is named ``"document"``, unless a manager of another client already uses that name
         (the installed registry's, or another ad-hoc one): then it gets a name of its own, so a unit of one
         client is never joined by a repository of another."""
+        registry = installed_registry()
+        if registry is not None:
+            registered = registry.find_by_resource(client)
+            if isinstance(registered, MongoTransactionManager):
+                return registered
         manager = getattr(client, _MANAGER, None)
         if isinstance(manager, MongoTransactionManager):
             return manager
@@ -184,7 +194,6 @@ class MongoTransactionManager:
             if not isinstance(manager, MongoTransactionManager):
                 manager = cls(client, datasource=_adhoc_name(client))
                 _ADHOC_NAMES[manager.datasource] = manager
-                setattr(client, _MANAGER, manager)
             return manager
 
     def attach(self) -> None:

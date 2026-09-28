@@ -428,6 +428,41 @@ async def test_a_cancelled_unit_is_aborted_and_releases_its_locks(env: Env) -> N
     assert reloaded is not None and reloaded.balance == 5
 
 
+async def test_a_cancel_during_a_command_aborts_the_transaction(env: Env) -> None:
+    """The cancellation lands while a slow command of the unit is in flight: the unit is poisoned, aborted and its
+    session ended, so the server keeps no transaction (with its document locks) and the next unit writes at once."""
+    saved = await env.repository.save(TxAccount(owner="busy", balance=1))
+
+    @transactional(datasource="document")
+    async def slow() -> None:
+        account = await env.repository.find_by_id(saved.id)
+        assert account is not None
+        account.balance = 99
+        await env.repository.save(account)
+        async with env.repository._operation() as session:
+            collection = TxAccount.get_pymongo_collection()
+            await collection.find({"$where": "sleep(3000) || true"}, session=session).to_list()
+
+    with anyio.move_on_after(0.5):
+        await slow()
+
+    cursor = await env.client.admin.aggregate(
+        [{"$currentOp": {"idleSessions": True, "allUsers": True}}, {"$match": {"transaction": {"$exists": True}}}]
+    )
+    assert await cursor.to_list() == []
+
+    @transactional(datasource="document")
+    async def writes() -> None:
+        account = await env.repository.find_by_id(saved.id)
+        assert account is not None
+        account.balance = 7
+        await env.repository.save(account)
+
+    await writes()
+    reloaded = await env.repository.find_by_id(saved.id)
+    assert reloaded is not None and reloaded.balance == 7
+
+
 async def test_after_commit_runs_only_after_a_commit(env: Env) -> None:
     seen: list[str] = []
 
@@ -560,3 +595,27 @@ async def test_every_command_of_a_unit_carries_its_transaction(mongo_backend: Mo
         transactions = {body.get("txnNumber") for _name, body in commands}
         assert len(transactions) == 1 and None not in transactions
         assert db.log.names()[-1] == "commitTransaction"
+
+
+async def test_the_deprecated_runner_runs_on_the_unit_of_work(env: Env) -> None:
+    from pyfly.data.document.mongodb.transactional import run_mongo_transaction
+
+    service = LegacyService(env.client, env.repository)
+
+    async def body(self: LegacyService, owner: str, *, session: Any = None) -> Any:
+        await self.repository.save(TxAccount(owner=owner))
+        await TxAccount(owner=f"{owner}-raw").insert(session=session)
+        raise ValueError("rolled back")
+
+    with pytest.warns(DeprecationWarning), pytest.raises(ValueError):
+        await run_mongo_transaction(body, (service, "old"), {})
+    assert await env.owners() == []
+    with pytest.warns(DeprecationWarning), pytest.raises(KeyError):
+        await run_mongo_transaction(_raise_after_save, (service,), {}, no_rollback_for=(KeyError,))
+    assert await env.owners() == ["kept"]
+
+
+async def _raise_after_save(service: LegacyService, *, session: Any = None) -> None:
+    assert session is not None  # the runner always passed the session, as it did before
+    await service.repository.save(TxAccount(owner="kept"))
+    raise KeyError("kept anyway")
