@@ -300,14 +300,20 @@ class KafkaEventBus:
         self._producer = await self._new_producer()
 
     async def _new_producer(self) -> Any:
-        """A started producer."""
+        """A started producer. One whose start failed (the broker cannot be reached) is closed again: a caller
+        that attempts the publish again (the outbox forwarder, while a broker is down) opens one per attempt."""
         if self._producer_factory is not None:
             producer = self._producer_factory(bootstrap_servers=self._bootstrap_servers)
         else:
             from aiokafka import AIOKafkaProducer  # type: ignore[import-untyped]
 
             producer = AIOKafkaProducer(bootstrap_servers=self._bootstrap_servers)
-        await producer.start()
+        try:
+            await producer.start()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await producer.stop()
+            raise
         return producer
 
     def _new_consumer(self, **settings: Any) -> Any:
