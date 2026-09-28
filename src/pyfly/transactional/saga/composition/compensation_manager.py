@@ -15,9 +15,8 @@
 
 The compensations run as the saga engine runs a saga's own: in a task of their own with the transaction
 state cleared (:func:`~pyfly.data.transaction.detached`), to completion even when the caller is cancelled
-meanwhile.
-Each saga of a composition committed its steps on its own, never in the caller's unit of work, so its
-compensation commits on its own too: a caller's rollback must not take the compensation with it while the
+meanwhile. Each saga of a composition committed its steps on its own, never in the caller's unit of work, so
+its compensation commits on its own too: a caller's rollback must not take the compensation with it while the
 saga's effects stay.
 
 Once they ran, the persisted state of each saga that had completed is updated where the engine records a
