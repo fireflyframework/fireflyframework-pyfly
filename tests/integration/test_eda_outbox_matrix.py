@@ -602,6 +602,41 @@ async def test_a_handler_that_raises_cancelled_error_fails_its_delivery_and_the_
     assert await bus.outbox.pending("cancelling") == []
 
 
+async def test_a_round_hook_that_raises_cancelled_error_fails_the_round_and_the_relay_goes_on(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A round hook (where a bus keeps its wake-up connection alive) raises a ``CancelledError`` of its own: it
+    awaited something another task cancelled, and the relay's task was not asked to cancel. That round fails,
+    like one whose statement raised, and the relay goes on: only a stop ends it."""
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="hooked", poll_interval=0.05)
+    received = Recorder()
+    bus.subscribe("*", received)
+    rounds = 0
+
+    async def hook() -> None:
+        nonlocal rounds
+        rounds += 1
+        if rounds == 1:
+            future = asyncio.get_running_loop().create_future()
+            future.cancel()  # a keepalive whose request another task cancelled
+            await future
+
+    bus.relay.add_round_hook(hook)
+    await bus.publish("d", "e", {"n": 1})
+    await bus.start()
+    try:
+        await _wait_until(lambda: received.ids() == [1])
+        assert bus.relay.counters.failed_rounds == 1
+        assert bus.relay.alive
+        assert (await bus.health_status()).status == "UP"
+    finally:
+        await bus.stop()  # returns: the round's CancelledError did not end the relay
+
+    assert bus.state is BusState.STOPPED
+    assert await bus.outbox.pending("hooked") == []
+
+
 async def test_a_relay_whose_task_ended_under_a_running_bus_reports_down_and_stops_quietly(
     relational_backend: RelationalBackend, caplog: pytest.LogCaptureFixture
 ) -> None:
