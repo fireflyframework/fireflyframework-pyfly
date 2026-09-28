@@ -20,21 +20,29 @@ Mirrors ``org.fireflyframework.eventsourcing``:
 * :class:`EventStore` — append/load/snapshot SPI
 * :class:`InMemoryEventStore` — default zero-dep adapter
 * :class:`SqlAlchemyEventStore` — async SQL adapter
-* :class:`SnapshotStore` — snapshot SPI + in-memory adapter
+* :class:`SnapshotStore` — snapshot SPI + in-memory and SQL adapters
 * :class:`TransactionalOutbox` — event publisher with at-least-once guarantees
-* :class:`Projection` — read-model projector
+* :class:`Projection` — read-model projector, run by :class:`ProjectionRunner`
+* :class:`CheckpointStore` — where each projection's position is kept (in-memory and SQL adapters)
 """
 
 from __future__ import annotations
 
 from pyfly.eventsourcing.aggregate import AggregateRoot, EventHandlerException
+from pyfly.eventsourcing.checkpoint import (
+    CheckpointStore,
+    InMemoryCheckpointStore,
+    ProjectionLease,
+    SqlAlchemyCheckpointStore,
+)
 from pyfly.eventsourcing.event import DomainEvent, StoredEventEnvelope, domain_event
 from pyfly.eventsourcing.outbox import OutboxRecord, TransactionalOutbox
-from pyfly.eventsourcing.projection import Projection, ProjectionRunner
+from pyfly.eventsourcing.projection import FunctionProjection, Projection, ProjectionRunner
 from pyfly.eventsourcing.snapshot import (
     InMemorySnapshotStore,
     Snapshot,
     SnapshotStore,
+    SqlAlchemySnapshotStore,
 )
 from pyfly.eventsourcing.store import (
     ConcurrencyError,
@@ -46,20 +54,26 @@ from pyfly.eventsourcing.upcaster import EventUpcaster, NoOpUpcaster
 
 __all__ = [
     "AggregateRoot",
+    "CheckpointStore",
     "ConcurrencyError",
     "DomainEvent",
     "EventHandlerException",
     "EventStore",
     "EventUpcaster",
+    "FunctionProjection",
+    "InMemoryCheckpointStore",
     "InMemoryEventStore",
     "InMemorySnapshotStore",
     "NoOpUpcaster",
     "OutboxRecord",
     "Projection",
+    "ProjectionLease",
     "ProjectionRunner",
     "Snapshot",
     "SnapshotStore",
+    "SqlAlchemyCheckpointStore",
     "SqlAlchemyEventStore",
+    "SqlAlchemySnapshotStore",
     "StoredEventEnvelope",
     "TransactionalOutbox",
     "domain_event",

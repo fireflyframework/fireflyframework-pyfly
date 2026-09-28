@@ -39,7 +39,15 @@ def domain_event(cls: type) -> type:
 
 @dataclass
 class StoredEventEnvelope:
-    """Wire format for events persisted to the event store."""
+    """Wire format for events persisted to the event store.
+
+    ``occurred_at`` is data: when the event happened, by the clock of the process that built the envelope.
+    ``global_position`` is where the store placed the event on its global stream (see
+    :mod:`pyfly.eventsourcing.store` for the order it follows); the store sets it on the envelopes it reads
+    (``None`` on an envelope not read from a store, or read before the store numbered the event: the ``head-row``
+    strategy numbers an event once it has committed). It is not part of the event: not in the JSON form, and not
+    compared, so an envelope equals the same event read back.
+    """
 
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     aggregate_id: str = ""
@@ -51,6 +59,7 @@ class StoredEventEnvelope:
     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     version: int = 1
     tenant_id: str | None = None
+    global_position: int | None = field(default=None, compare=False)
 
     @classmethod
     def of(

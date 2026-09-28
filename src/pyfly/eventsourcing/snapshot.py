@@ -11,7 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Snapshot store SPI + in-memory + SQL adapters."""
+"""Snapshot store SPI + in-memory + SQL adapters.
+
+A snapshot is an aggregate's state as of one of its events (``sequence``); loading the aggregate replays only
+the events after it. A store keeps the newest snapshot of each aggregate: saving an older one than it holds
+changes nothing.
+
+:class:`SqlAlchemySnapshotStore` keeps them in the framework table ``pyfly_snapshots``, saves with the
+dialect's conditional upsert (:mod:`pyfly.data.relational.upsert`), and runs through
+:func:`~pyfly.data.transaction.infrastructure_unit`: inside a unit of work on its datasource a snapshot commits or
+rolls back with the events it follows (``EventSourcedRepository.save`` writes both in the caller's unit).
+"""
 
 from __future__ import annotations
 
@@ -19,7 +29,13 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from pyfly.data.transaction import infrastructure_unit, outside_transaction
+
+if TYPE_CHECKING:
+    from sqlalchemy import Table
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 @dataclass
@@ -58,88 +74,123 @@ class InMemorySnapshotStore:
 
 
 class SqlAlchemySnapshotStore:
-    """Async SQL adapter for the snapshot store.
+    """Async SQL adapter for the snapshot store (see the module documentation).
 
-    Expects an ``AsyncEngine``; uses raw SQL so it works on any backend.
-    Caller must run :meth:`initialize` once.
+    *engine* is where the snapshots live: an ``AsyncEngine``, a registry ``DataSource`` or a datasource name.
+    *table_name* renames the table (declared on the framework metadata under that name). With *create_table*
+    false the store never creates its table and only checks it at :meth:`start` (migrations own the schema).
     """
 
-    DDL = """
-    CREATE TABLE IF NOT EXISTS pyfly_snapshots (
-        aggregate_id   VARCHAR(64) PRIMARY KEY,
-        aggregate_type VARCHAR(255) NOT NULL,
-        sequence       INTEGER NOT NULL,
-        payload        TEXT NOT NULL,
-        created_at     TIMESTAMP NOT NULL
-    )
-    """
+    def __init__(self, engine: Any, *, table_name: str = "pyfly_snapshots", create_table: bool = True) -> None:
+        self._target = engine
+        self._table_name = table_name
+        self._create_table = create_table
+        self._table_object: Table | None = None
+        self._single_statement: bool | None = None
+        self._started = False
 
-    def __init__(self, engine: Any) -> None:
-        self._engine = engine
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Create the table when allowed, then check it; raises ``FrameworkSchemaError`` when it is unusable.
+
+        The application context starts the store; one built by hand starts on first use."""
+        from pyfly.data.relational.framework_schema import ensure_tables
+
+        with outside_transaction():
+            await ensure_tables(self._target, self._table, create=self._create_table)
+        self._started = True
+
+    async def _ready(self) -> None:
+        if not self._started:
+            await self.start()
+
+    async def stop(self) -> None:
+        """Nothing to release: the engine belongs to the datasource registry (or to the caller)."""
 
     async def initialize(self) -> None:
-        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
+        """Create the table if it does not exist (kept for callers that set the store up by hand)."""
+        from pyfly.data.relational.framework_schema import ensure_tables
 
-        async with self._engine.begin() as conn:
-            await conn.execute(text(self.DDL))
+        with outside_transaction():
+            await ensure_tables(self._target, self._table, create=True)
+        self._started = True
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """The engine of the store's datasource."""
+        from pyfly.data.relational.framework_schema import framework_engine
+
+        return framework_engine(self._target)
+
+    @property
+    def _table(self) -> Table:
+        if self._table_object is None:
+            from pyfly.data.relational.framework_schema import snapshots_table
+
+            self._table_object = snapshots_table(self._table_name)
+        return self._table_object
+
+    def _one_statement_save(self) -> bool:
+        """Whether a save is one statement (a conditional ``ON CONFLICT`` upsert: PostgreSQL, SQLite), which runs
+        on an autocommit connection outside a unit of work where the backend makes that cheaper."""
+        if self._single_statement is None:
+            from pyfly.data.relational.upsert import backend_name, native_upsert
+
+            self._single_statement = native_upsert(backend_name(self.engine), conditional=True)
+        return self._single_statement
+
+    # ------------------------------------------------------------------
+    # SnapshotStore
+    # ------------------------------------------------------------------
 
     async def save(self, snapshot: Snapshot) -> None:
-        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
+        """Store *snapshot*, unless the store holds a snapshot of the aggregate at a later (or the same) sequence."""
+        from pyfly.data.relational.upsert import upsert
 
-        payload_json = json.dumps(snapshot.payload)
-        created_at = datetime.now(UTC).replace(tzinfo=None)
-        async with self._engine.begin() as conn:
-            await conn.execute(
-                text(
-                    """
-                    INSERT INTO pyfly_snapshots
-                        (aggregate_id, aggregate_type, sequence, payload, created_at)
-                    VALUES (:aid, :atype, :seq, :payload, :created_at)
-                    ON CONFLICT (aggregate_id) DO UPDATE SET
-                        aggregate_type = EXCLUDED.aggregate_type,
-                        sequence       = EXCLUDED.sequence,
-                        payload        = EXCLUDED.payload,
-                        created_at     = EXCLUDED.created_at
-                    WHERE pyfly_snapshots.sequence < EXCLUDED.sequence
-                    """
-                ),
-                {
-                    "aid": snapshot.aggregate_id,
-                    "atype": snapshot.aggregate_type,
-                    "seq": snapshot.sequence,
-                    "payload": payload_json,
-                    "created_at": created_at,
-                },
+        await self._ready()
+        values = {
+            "aggregate_id": snapshot.aggregate_id,
+            "aggregate_type": snapshot.aggregate_type,
+            "sequence": snapshot.sequence,
+            "payload": json.dumps(snapshot.payload),
+            "created_at": datetime.now(UTC),
+        }
+        async with infrastructure_unit(self._target, single_statement=self._one_statement_save()) as session:
+            await upsert(
+                session,
+                self._table,
+                values,
+                key=["aggregate_id"],
+                where=lambda existing, incoming: existing.sequence < incoming.sequence,
             )
 
     async def load(self, aggregate_id: str) -> Snapshot | None:
-        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
+        from sqlalchemy import select
 
-        async with self._engine.connect() as conn:
-            row = (
-                await conn.execute(
-                    text(
-                        """SELECT aggregate_id, aggregate_type, sequence, payload
-                           FROM pyfly_snapshots WHERE aggregate_id = :aid"""
-                    ),
-                    {"aid": aggregate_id},
-                )
-            ).first()
+        await self._ready()
+        table = self._table
+        statement = select(table.c.aggregate_type, table.c.sequence, table.c.payload).where(
+            table.c.aggregate_id == aggregate_id
+        )
+        async with infrastructure_unit(self._target, read_only=True) as session:
+            row = (await session.execute(statement)).first()
         if row is None:
             return None
         return Snapshot(
-            aggregate_id=row[0],
-            aggregate_type=row[1],
-            sequence=row[2],
-            payload=json.loads(row[3]),
+            aggregate_id=aggregate_id,
+            aggregate_type=str(row.aggregate_type),
+            sequence=int(row.sequence),
+            payload=json.loads(row.payload),
         )
 
     async def delete(self, aggregate_id: str) -> bool:
-        from sqlalchemy import text  # type: ignore[import-not-found, unused-ignore]
+        from sqlalchemy import delete
 
-        async with self._engine.begin() as conn:
-            result = await conn.execute(
-                text("DELETE FROM pyfly_snapshots WHERE aggregate_id = :aid"),
-                {"aid": aggregate_id},
-            )
-        return bool(result.rowcount > 0)
+        await self._ready()
+        table = self._table
+        async with infrastructure_unit(self._target, single_statement=True) as session:
+            result = await session.execute(delete(table).where(table.c.aggregate_id == aggregate_id))
+        return int(getattr(result, "rowcount", 0)) > 0

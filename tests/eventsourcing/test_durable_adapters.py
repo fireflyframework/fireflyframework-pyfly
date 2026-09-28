@@ -267,7 +267,7 @@ class TestProviderSelection:
         try:
             store = auto.event_store(cfg)
             assert isinstance(store, SqlAlchemyEventStore)
-            assert store._engine is registry.get("event-store").engine
+            assert store.engine is registry.get("event-store").engine
         finally:
             await registry.close()
 
@@ -307,7 +307,7 @@ class TestProviderSelection:
         try:
             store = auto.snapshot_store(cfg)
             assert isinstance(store, SqlAlchemySnapshotStore)
-            assert store._engine is registry.get("snapshot-store").engine
+            assert store.engine is registry.get("snapshot-store").engine
         finally:
             await registry.close()
 
@@ -330,7 +330,7 @@ class TestProviderSelection:
         registry = DataSourceRegistry.for_config(cfg)
         try:
             store = auto.snapshot_store(cfg)
-            assert store._engine is registry.primary.engine
+            assert store.engine is registry.primary.engine
             assert registry.primary.url.render_as_string() == "postgresql+asyncpg://localhost/test"
         finally:
             await registry.close()
