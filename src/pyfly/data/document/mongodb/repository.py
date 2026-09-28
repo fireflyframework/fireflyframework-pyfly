@@ -1212,12 +1212,7 @@ class MongoRepository(Generic[T, ID]):
                         return
                 yield cast(T, parse_obj(model, row))  # type: ignore[arg-type]
         finally:
-            if unit.completed:
-                await cursor.close()  # its session's unit is over: no other command can run on it any more
-            else:
-                # killCursors on the unit's session, under its guard like every other command on it.
-                async with unit.operation():
-                    await cursor.close()
+            await _close_cursor(unit, cursor)
 
     # ------------------------------------------------------------------
     # Specification extensions (PyFly)
@@ -1234,6 +1229,22 @@ class MongoRepository(Generic[T, ID]):
     async def find_slice_by_spec(self, spec: MongoSpecification[T], pageable: Pageable) -> Slice[T]:
         """A slice of the documents matching a specification, with no count."""
         return await self._slice(spec.to_predicate(self._model, {}), pageable)
+
+
+async def _close_cursor(unit: UnitOfWork, cursor: Any) -> None:
+    """Close a stream's *cursor*, never leaving it open. Its ``killCursors`` goes on the unit's session, under the
+    unit's guard like every command on it. A unit that is completing or completed refuses an operation: the close then
+    waits for the guard its completion's own commands (commit or abort, the end of the session) hold, and closes the
+    cursor after them (pymongo kills the cursor of an ended session on a connection of its own)."""
+    if not unit.completed:
+        try:
+            async with unit.operation():
+                await cursor.close()
+            return
+        except IllegalTransactionStateError:
+            pass  # the unit started completing while the close waited for its guard
+    async with unit.guard:
+        await cursor.close()
 
 
 def _as_id(model: type, value: Any) -> Any:

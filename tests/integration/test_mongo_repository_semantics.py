@@ -47,6 +47,7 @@ from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.transaction import IllegalTransactionStateError, TransactionTemplate
+from pyfly.data.transaction.synchronization import TransactionSynchronizationAdapter
 from pyfly.data.transaction.unit_of_work import UnitOfWork
 from pyfly.kernel.exceptions import DuplicateKeyException, OptimisticLockingFailureException
 from tests.support.mongo import BeanieDatabase, beanie_database
@@ -634,3 +635,49 @@ async def test_stream_all_closed_early_waits_for_the_guard_a_sibling_holds(mongo
                 await holder
             await closing
         assert probe.under_guard == [True]
+
+
+async def test_a_stream_closed_while_its_unit_completes_still_closes_its_cursor(mongo_rs_url: str) -> None:
+    """The unit starts completing while the close waits for the guard a sibling holds: the close waits for the
+    completion's own commands on the session instead of failing, and the stream's cursor is closed."""
+    probe = _KillCursorsProbe()
+    async with beanie_database(mongo_rs_url, MODELS, listeners=[probe]) as database:
+        repository: MongoRepository[SemNote, str] = MongoRepository(SemNote)
+        await repository.save_all([SemNote(title=f"k{index:03d}") for index in range(150)])
+        held, release = asyncio.Event(), asyncio.Event()
+        closing: asyncio.Task[None] | None = None
+        holder: asyncio.Task[None] | None = None
+
+        class ReleaseWhenCompleting(TransactionSynchronizationAdapter):
+            async def before_completion(self) -> None:
+                release.set()  # the unit is COMPLETING: let the sibling go, the close gets the guard next
+
+        try:
+            async with TransactionTemplate(MongoTransactionManager.for_client(database.client)).transaction():
+                unit = repository._current_unit()
+                probe.unit = unit
+                unit.register_synchronization(ReleaseWhenCompleting())
+                stream = repository.stream_all()
+                assert (await anext(stream)).title == "k000"
+
+                async def sibling() -> None:
+                    async with unit.operation():
+                        held.set()
+                        await release.wait()
+
+                holder = asyncio.create_task(sibling())
+                await held.wait()
+                closing = asyncio.create_task(stream.aclose())  # type: ignore[attr-defined]
+                await asyncio.sleep(0.05)
+                assert not closing.done()
+        finally:
+            release.set()
+            if holder is not None:
+                await holder
+        assert closing is not None
+        await asyncio.wait_for(closing, timeout=10)  # the close does not fail on the completed unit
+        for _ in range(100):  # pymongo kills the cursor of an ended session on its own connection, shortly after
+            if probe.under_guard:
+                break
+            await asyncio.sleep(0.05)
+        assert len(probe.under_guard) == 1
