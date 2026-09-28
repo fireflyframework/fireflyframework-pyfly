@@ -133,6 +133,24 @@ async def test_a_publish_is_part_of_the_unit_of_work(relational_backend: Relatio
     assert received.ids() == [2]
 
 
+async def test_a_unit_that_publishes_many_events_wakes_the_relay_once(relational_backend: RelationalBackend) -> None:
+    """Every publish registered its own after-commit wake-up: a unit that published N events carried N
+    synchronizations. It now carries one, however many events it publishes."""
+    engine = relational_backend.create_engine()
+    bus = await _bus(engine, group="batch")
+    bus.subscribe("*", Recorder())
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+
+    async with template.transaction() as unit:
+        assert unit is not None
+        before = len(unit.synchronizations)
+        for number in range(5):
+            await bus.publish("d", "e", {"n": number})
+        assert len(unit.synchronizations) == before + 1
+
+    assert [p.envelope.payload["n"] for p in await bus.outbox.pending("batch")] == [0, 1, 2, 3, 4]
+
+
 async def test_a_publish_racing_its_groups_first_registration_is_still_owed_to_the_group(
     relational_backend: RelationalBackend,
 ) -> None:
@@ -752,6 +770,50 @@ async def test_a_released_delivery_keeps_its_place(relational_backend: Relationa
         (next_one,) = await outbox.claim("g", limit=1, lease=timedelta(minutes=5), owner="node")
         order.append((next_one.envelope.event_type, next_one.attempts))
     assert order == [("first", 1), ("second", 1), ("third", 1)]
+
+
+async def test_giving_back_a_large_claim_stays_within_the_bound_parameter_limit(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A release puts each delivery back where it was with a ``CASE`` (two bound parameters per delivery, one more
+    in the ``IN`` list): 500 per statement were about 1500 parameters, past the 999 of SQLite before 3.32, so a
+    relay with a batch over 333 could not give its claim back there."""
+    from pyfly.testing import StatementCounter
+
+    engine = relational_backend.create_engine()
+    outbox = Outbox(engine)
+    await outbox.start()
+    now = outbox.now()
+    async with engine.begin() as conn:
+        await conn.execute(
+            TABLES.events.insert(),
+            [
+                {
+                    "event_id": f"e{n}",
+                    "destination": "d",
+                    "event_type": "x",
+                    "payload": "{}",
+                    "headers": "{}",
+                    "created_at": now,
+                }
+                for n in range(600)
+            ],
+        )
+        await conn.execute(
+            text(
+                f"INSERT INTO {TABLES.deliveries.name} (consumer_group, outbox_id, available_at, attempts) "
+                f"SELECT 'g', id, created_at, 0 FROM {TABLES.events.name}"
+            )
+        )
+    claimed = await outbox.claim("g", limit=600, lease=timedelta(minutes=5), owner="node")
+    assert len(claimed) == 600
+
+    with StatementCounter(engine) as counter:
+        assert await outbox.release(claimed) == 600
+
+    updates = [statement for statement in counter.statements if statement.verb == "UPDATE"]
+    assert updates and all(len(statement.parameters) <= 999 for statement in updates)
+    assert len(await outbox.claim("g", limit=1000, lease=timedelta(minutes=5), owner="node")) == 600
 
 
 async def test_a_round_whose_settling_fails_gives_back_what_it_did_not_start(

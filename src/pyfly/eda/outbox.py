@@ -119,7 +119,11 @@ DEFAULT_PREFIX = "pyfly_outbox"
 _MAX_ERROR_LENGTH = 4000
 
 _IN_LIST_CHUNK = 500
-"""The most outbox ids one ``IN`` list of a settling or releasing statement holds (bind-parameter limits)."""
+"""The most outbox ids one ``IN`` list of a settling statement holds (bind-parameter limits)."""
+
+_CASE_CHUNK = 250
+"""The most outbox ids one releasing statement holds: three bound parameters each (the ``IN`` list, and the
+``CASE`` that puts each back where it was), within SQLite's 999 before 3.32."""
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -1017,7 +1021,7 @@ class Outbox:
         released = 0
         for (group, token), claimed in _by_claim(deliveries).items():
             due = {delivery.outbox_id: delivery.due_at or now for delivery in claimed}
-            for ids in _chunks(list(due)):
+            for ids in _chunks(list(due), _CASE_CHUNK):
                 available_at = case(
                     {outbox_id: literal(due[outbox_id], UtcTimestamp()) for outbox_id in ids},
                     value=table.c.outbox_id,

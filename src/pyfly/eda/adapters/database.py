@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from pyfly.data.transaction.synchronization import TransactionSynchronizationAdapter
 from pyfly.eda.dlq import EdaDeadLetterStore
 from pyfly.eda.outbox import (
     Outbox,
@@ -227,6 +228,16 @@ class _PostgresListener:
                 await driver.close()
 
 
+class _WakeAfterCommit(TransactionSynchronizationAdapter):
+    """Wakes a relay once the unit that published to its outbox commits."""
+
+    def __init__(self, relay: OutboxRelay) -> None:
+        self._relay = relay
+
+    async def after_commit(self) -> None:
+        self._relay.wake()
+
+
 class BusState(enum.Enum):
     """Where a bus is in its lifecycle."""
 
@@ -317,6 +328,7 @@ class DatabaseEventBus:
         )
         self._listener: _PostgresListener | None = None
         self._relay.add_round_hook(self._check_listener)
+        self._waker = _WakeAfterCommit(self._relay)
         self._state = BusState.NEW
         self._lock = asyncio.Lock()
 
@@ -393,8 +405,6 @@ class DatabaseEventBus:
         await self._append(envelope)
 
     async def _append(self, envelope: EventEnvelope) -> None:
-        from pyfly.data.transaction import after_commit
-
         await self._resolve()
         # The event is owed to the groups registered for its destination, as the publishing unit sees them, and
         # to this bus's own group whenever this process consumes it: its relay may not have registered the group
@@ -404,10 +414,21 @@ class DatabaseEventBus:
         # group, that failed the business unit on MariaDB (1020, "Record has changed since last read").
         include = (self._group,) if self._relay.subscriptions and self._consumes(envelope.destination) else ()
         await self._outbox.append(envelope, include=include)
-        await after_commit(self._relay.wake)
+        await self._wake_after_commit()
 
     def _consumes(self, destination: str) -> bool:
         return self._destinations is None or destination in self._destinations
+
+    async def _wake_after_commit(self) -> None:
+        """Wake the relay once the publishing unit commits (at once outside a unit): one synchronization per
+        unit, however many events it publishes."""
+        from pyfly.data.transaction import current_unit_of_work, register_synchronization
+
+        unit = current_unit_of_work()
+        if unit is None:
+            self._relay.wake()
+        elif not any(synchronization is self._waker for synchronization in unit.synchronizations):
+            register_synchronization(self._waker)
 
     def _owns_datasource(self) -> bool:
         """Whether the bus builds its datasource itself (a subclass given a URL outside an application does)."""
