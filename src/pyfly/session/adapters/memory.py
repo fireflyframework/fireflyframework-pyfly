@@ -63,6 +63,16 @@ class InMemorySessionStore:
             self._store[session_id] = (data, time.monotonic() + ttl)
             return True
 
+    async def rename(self, old_id: str, new_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Move the session from *old_id* to *new_id* with *data* and a new TTL, only if the store holds it
+        under *old_id* and it has not expired (under the lock); ``False`` otherwise, and nothing is written."""
+        async with self._lock:
+            entry = self._store.pop(old_id, None)
+            if entry is None or time.monotonic() > entry[1]:
+                return False
+            self._store[new_id] = (data, time.monotonic() + ttl)
+            return True
+
     async def delete(self, session_id: str) -> None:
         """Remove a session."""
         async with self._lock:

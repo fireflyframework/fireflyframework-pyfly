@@ -24,10 +24,11 @@ provider's name; the store runs on every backend SQLAlchemy supports, on the fra
   (:func:`~pyfly.session.adapters.redis.allow_session_type` covers both stores).
 - **Expiry is an instant.** ``expires_at`` is a UTC instant: a session is read only before it, whatever the
   process's time zone.
-- **Replaced only while held.** :meth:`SqlSessionStore.replace` (the
-  :class:`~pyfly.session.ports.outbound.ConditionalSessionStore` operation) is one conditional ``UPDATE``
-  that writes over a session only while the table holds it unexpired, so the ``SessionFilter`` never brings
-  back a session that was logged out, evicted or expired while one of its requests ran.
+- **Replaced and renamed only while held.** :meth:`SqlSessionStore.replace` and
+  :meth:`SqlSessionStore.rename` (the :class:`~pyfly.session.ports.outbound.ConditionalSessionStore`
+  operations) are one conditional ``UPDATE`` each, which writes over a session, or moves it to a new id, only
+  while the table holds it unexpired, so the ``SessionFilter`` never brings back a session that was logged
+  out, evicted or expired while one of its requests ran.
 - **Purged.** At most once per *purge_interval* a write deletes a batch of expired sessions, after its
   commit; :meth:`SqlSessionStore.purge_expired` deletes them all.
 - **Joins the unit of work** bound for its datasource, as the other framework stores: outside one each
@@ -201,6 +202,30 @@ class SqlSessionStore:
         if replaced:
             await self._purge_if_due()
         return replaced
+
+    async def rename(self, old_id: str, new_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Move the session to *new_id* with *data*, expiring *ttl* seconds from now, only while the table holds
+        it unexpired under *old_id*: one conditional ``UPDATE`` of its key, as Spring Session JDBC changes a
+        session id in place. ``False`` when the session is gone (deleted or expired), and nothing is written."""
+        from sqlalchemy import update
+
+        await self.start()
+        table = self._table
+        now = self._clock()
+        statement = (
+            update(table)
+            .where(table.c.session_id == old_id, table.c.expires_at > now)
+            .values(
+                session_id=new_id,
+                data=json.dumps(data, default=_json_default),
+                expires_at=now + timedelta(seconds=ttl),
+            )
+        )
+        async with infrastructure_unit(self._datasource(), single_statement=True) as session:
+            moved = int((await session.execute(statement)).rowcount) == 1
+        if moved:
+            await self._purge_if_due()
+        return moved
 
     async def delete(self, session_id: str) -> None:
         from sqlalchemy import delete

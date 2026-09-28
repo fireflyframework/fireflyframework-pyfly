@@ -63,14 +63,17 @@ _REGISTRATION = ClientRegistration(
 
 class IdpStubbedHandler(OAuth2LoginHandler):
     """The real login handler, with the identity provider's token and userinfo calls answered locally: every
-    login authenticates *principal*."""
+    login authenticates *principal*. :attr:`during_exchange`, when set, runs while the code is exchanged."""
 
     def __init__(self, principal: str, controller: SessionConcurrencyController | None) -> None:
         super().__init__(InMemoryClientRegistrationRepository(_REGISTRATION), concurrency=controller)
         self._principal = principal
+        self.during_exchange: Callable[[], Awaitable[None]] | None = None
 
     async def _exchange_code(self, registration: Any, code: str, code_verifier: str | None = None) -> dict[str, Any]:
         await asyncio.sleep(0)
+        if self.during_exchange is not None:
+            await self.during_exchange()
         return {"access_token": f"at-{code}"}
 
     async def _fetch_user_info(self, registration: Any, access_token: str) -> dict[str, Any]:
@@ -377,3 +380,83 @@ async def a_cancelled_logout_still_ends_the_session(replica: Replica, via: str, 
 
     assert await _gone(replica.store, s1), f"{via}: the logged-out session is still in the store"
     assert await authenticated_as(replica, s1) is None, f"{via}: the logged-out session still authenticates"
+
+
+async def a_rotation_after_a_revocation_brings_nothing_back(replica: Replica, revocation: str) -> None:
+    """A request R of a logged-in session S1 is running when S1 is revoked (*revocation* as for
+    :func:`a_revoked_session_stays_revoked`); R then rotates the session id (a privilege elevation, not a login)
+    and changes the session. The rotation inserted the session under its new id S2, sent S2's cookie, and S2
+    authenticated: the revoked session was back under another id. Now neither id is in the store, R's response
+    sets no session cookie, and neither id authenticates."""
+    first = await login(replica, await start_login(replica.store))
+    assert first.status == 302
+    s1 = first.session_id
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def elevate(request: Request) -> Response:
+        entered.set()
+        await release.wait()
+        request.state.session.rotate_id()
+        request.state.session.set_attribute("elevated", True)
+        return Response(status_code=200)
+
+    r_request = app_request(s1)
+    r_task = asyncio.create_task(replica.session_filter.do_filter(r_request, elevate))
+    await asyncio.wait_for(entered.wait(), 10)
+    if revocation == "eviction":
+        assert (await login(replica, await start_login(replica.store))).status == 302
+    else:
+        assert (await logout(replica, s1, revocation)).status_code == 302
+    release.set()
+    r_response: Response = await asyncio.wait_for(r_task, 10)
+
+    s2 = r_request.state.session.id
+    assert s2 != s1
+    assert not await replica.store.exists(s2), f"{revocation}: the revoked session is back under its new id"
+    assert not await replica.store.exists(s1)
+    assert session_cookies(r_response) == [], f"{revocation}: the response sets the session cookie"
+    assert await authenticated_as(replica, s2) is None
+    assert await authenticated_as(replica, s1) is None
+
+
+async def a_rotation_moves_a_live_session(replica: Replica) -> None:
+    """A request of a live, logged-in session rotates its id (a privilege elevation) and changes it: the session
+    moves to the new id, with its data, the old id no longer resolves, and the response sends the new cookie."""
+    first = await login(replica, await start_login(replica.store))
+    s1 = first.session_id
+
+    async def elevate(request: Request) -> Response:
+        request.state.session.rotate_id()
+        request.state.session.set_attribute("elevated", True)
+        return Response(status_code=200)
+
+    request = app_request(s1)
+    response = await replica.session_filter.do_filter(request, elevate)
+
+    s2 = request.state.session.id
+    assert session_cookies(response) == [s2]
+    assert not await replica.store.exists(s1)
+    moved = await replica.store.get(s2)
+    assert moved is not None and moved["elevated"] is True
+    assert await authenticated_as(replica, s2) == replica.principal
+    assert await authenticated_as(replica, s1) is None
+
+
+async def a_login_stands_when_its_pre_authentication_session_is_gone(replica: Replica) -> None:
+    """The pre-authentication session is deleted while the login exchanges the code (it expired, or another
+    request of the browser ended it): a login is a fresh authentication, so its rotation still stores the
+    session under the new id, and the browser is logged in."""
+    pre_auth = await start_login(replica.store)
+
+    async def end_the_pre_authentication_session() -> None:
+        await replica.store.delete(pre_auth)
+
+    replica.handler.during_exchange = end_the_pre_authentication_session
+    try:
+        result = await login(replica, pre_auth)
+    finally:
+        replica.handler.during_exchange = None
+
+    assert result.status == 302
+    assert await replica.store.exists(result.session_id)
+    assert await authenticated_as(replica, result.session_id) == replica.principal

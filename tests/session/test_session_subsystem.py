@@ -106,6 +106,24 @@ class TestInMemorySessionStore:
         assert await InMemorySessionStore().get("nope") is None
 
     @pytest.mark.asyncio
+    async def test_rename_moves_only_a_session_the_store_holds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = InMemorySessionStore()
+        assert await store.rename("gone", "new", {"a": 1}, ttl=60) is False
+        assert not await store.exists("new")
+
+        await store.save("old", {"a": 1}, ttl=10)
+        assert await store.rename("old", "new", {"a": 2}, ttl=60) is True
+        assert await store.get("old") is None
+        assert await store.get("new") == {"a": 2}
+
+        now = time.monotonic()
+        monkeypatch.setattr("pyfly.session.adapters.memory.time.monotonic", lambda: now + 30)
+        assert await store.exists("new")  # the rename gave it the new TTL
+        monkeypatch.setattr("pyfly.session.adapters.memory.time.monotonic", lambda: now + 120)
+        assert await store.rename("new", "newer", {"a": 3}, ttl=60) is False  # expired: not moved
+        assert not await store.exists("newer")
+
+    @pytest.mark.asyncio
     async def test_replace_changes_only_a_session_the_store_holds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         store = InMemorySessionStore()
         assert await store.replace("gone", {"a": 1}, ttl=60) is False

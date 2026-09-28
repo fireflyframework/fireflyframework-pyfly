@@ -194,6 +194,32 @@ async def test_a_cancelled_logout_still_ends_the_session(relational_backend: Rel
         await logins.a_cancelled_logout_still_ends_the_session(replica, via, registry)
 
 
+@pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
+async def test_a_rotation_after_a_revocation_brings_nothing_back(
+    relational_backend: RelationalBackend, revocation: str
+) -> None:
+    async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
+        replica = logins.Replica(store, _controller(store, registry, max_sessions=1))
+
+        await logins.a_rotation_after_a_revocation_brings_nothing_back(replica, revocation)
+
+
+async def test_a_rotation_moves_a_live_session(relational_backend: RelationalBackend) -> None:
+    async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
+        await logins.a_rotation_moves_a_live_session(
+            logins.Replica(store, _controller(store, registry, max_sessions=1))
+        )
+
+
+async def test_a_login_stands_when_its_pre_authentication_session_is_gone(
+    relational_backend: RelationalBackend,
+) -> None:
+    async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
+        await logins.a_login_stands_when_its_pre_authentication_session_is_gone(
+            logins.Replica(store, _controller(store, registry, max_sessions=1))
+        )
+
+
 async def test_one_login_at_a_time_through_the_login_flow_keeps_the_latest_sessions(
     relational_backend: RelationalBackend,
 ) -> None:
@@ -424,6 +450,25 @@ async def test_replace_changes_only_a_session_the_store_holds(relational_backend
         now[0] = now[0] + timedelta(seconds=31)
         assert await store.replace("sid", {"a": 3}, ttl=60) is False  # expired: not brought back
         assert await store.get("sid") is None
+
+
+async def test_rename_moves_only_a_session_the_store_holds(relational_backend: RelationalBackend) -> None:
+    now = [datetime.now(UTC)]
+    async with repository_datasources(relational_backend) as datasources:
+        store = SqlSessionStore(datasources.registry.primary, clock=lambda: now[0], purge_interval=None)
+        assert await store.rename("gone", "new", {"a": 1}, ttl=60) is False
+        assert await store.get("new") is None
+
+        await store.save("old", {"a": 1}, ttl=10)
+        assert await store.rename("old", "new", {"a": 2}, ttl=60) is True
+        assert await store.get("old") is None
+        assert await store.get("new") == {"a": 2}
+
+        now[0] = now[0] + timedelta(seconds=30)
+        assert await store.exists("new")  # the rename gave it the new expiry
+        now[0] = now[0] + timedelta(seconds=31)
+        assert await store.rename("new", "newer", {"a": 3}, ttl=60) is False  # expired: not moved
+        assert await store.get("newer") is None
 
 
 async def test_expired_sessions_are_not_read_and_are_purged(relational_backend: RelationalBackend) -> None:

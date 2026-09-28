@@ -87,8 +87,9 @@ class FormLoginFilter(OncePerRequestFilter):
         session = getattr(getattr(request, "state", None), "session", None)
         if session is not None:
             # Rotate the session id on authentication to prevent session fixation,
-            # then bind the authenticated context to the (new) session.
-            session.rotate_id()
+            # then bind the authenticated context to the (new) session. A login: the
+            # new id is stored even if the pre-authentication session is gone meanwhile.
+            session.rotate_id(on_login=True)
             session.set_attribute(_SECURITY_CONTEXT_KEY, context)
         request.state.security_context = context
         logger.info("Form login successful for user: %s", context.user_id)

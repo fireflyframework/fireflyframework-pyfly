@@ -174,6 +174,28 @@ async def test_a_cancelled_logout_still_ends_the_session(redis_client: Any, via:
 
 
 @requires_docker
+@pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
+async def test_a_rotation_after_a_revocation_brings_nothing_back(redis_client: Any, revocation: str) -> None:
+    principal = f"alice-{uuid.uuid4().hex[:8]}"
+    replica, registry = _redis_replica(redis_client, principal)
+    try:
+        await logins.a_rotation_after_a_revocation_brings_nothing_back(replica, revocation)
+    finally:
+        await redis_client.delete(f"{registry.key_prefix}{principal}")
+
+
+@requires_docker
+async def test_a_rotation_moves_a_live_session_and_a_login_stands_alone(redis_client: Any) -> None:
+    principal = f"alice-{uuid.uuid4().hex[:8]}"
+    replica, registry = _redis_replica(redis_client, principal)
+    try:
+        await logins.a_rotation_moves_a_live_session(replica)
+        await logins.a_login_stands_when_its_pre_authentication_session_is_gone(replica)
+    finally:
+        await redis_client.delete(f"{registry.key_prefix}{principal}")
+
+
+@requires_docker
 async def test_register_limited_evicts_the_oldest(redis_client: Any) -> None:
     registry = _registries(redis_client)[0]
     await registry.register("bob", "s1", 1.0)

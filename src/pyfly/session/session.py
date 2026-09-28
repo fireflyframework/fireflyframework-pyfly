@@ -44,6 +44,7 @@ class HttpSession:
         self._previous_id: str | None = None
         # A session that is not new was loaded from the store under its id.
         self._stored_id: str | None = None if is_new else session_id
+        self._rotated_on_login = False
 
         now = time.time()
         if "_created_at" not in self._data:
@@ -106,19 +107,33 @@ class HttpSession:
         """Return all attribute names, excluding internal metadata keys."""
         return [k for k in self._data if not k.startswith("_")]
 
-    def rotate_id(self) -> None:
+    @property
+    def rotated_on_login(self) -> bool:
+        """Whether :meth:`rotate_id` was called with ``on_login=True`` since the session was last persisted."""
+        return self._rotated_on_login
+
+    def rotate_id(self, *, on_login: bool = False) -> None:
         """Assign a fresh session id, preserving all data.
 
         Call on authentication / privilege elevation to prevent session-fixation
         attacks: an attacker who fixed the victim's pre-auth session id cannot
         ride the authenticated session. The store entry and cookie are migrated
         to the new id when the session is persisted by the ``SessionFilter``.
+
+        Args:
+            on_login: The rotation comes with a fresh authentication (a login): the
+                store gets the session under the new id even if the old entry is gone
+                meanwhile, since the authentication stands on its own. Otherwise (a
+                privilege elevation within a session, say) the filter moves the stored
+                session to the new id only while the store still holds it, so a session
+                logged out or evicted meanwhile is not brought back under the new id.
         """
         if self._invalidated:
             return
         self._previous_id = self._id
         self._id = uuid.uuid4().hex
         self._modified = True
+        self._rotated_on_login = self._rotated_on_login or on_login
 
     def invalidate(self) -> None:
         """Mark the session for deletion."""
@@ -128,12 +143,14 @@ class HttpSession:
     def mark_persisted(self) -> None:
         """Record that the store holds the session as it is now, under its current id: :attr:`modified` is
         ``False`` until the next change (made through :meth:`set_attribute`, :meth:`remove_attribute`,
-        :meth:`rotate_id` or :meth:`invalidate`), and :attr:`stored_id` is the current id.
+        :meth:`rotate_id` or :meth:`invalidate`), :attr:`stored_id` is the current id, and
+        :attr:`rotated_on_login` is ``False``.
 
         :attr:`previous_id` is kept: it still tells the request's other filters that the id was rotated.
         """
         self._modified = False
         self._stored_id = self._id
+        self._rotated_on_login = False
 
     def get_data(self) -> dict[str, Any]:
         """Return the raw session data dictionary."""

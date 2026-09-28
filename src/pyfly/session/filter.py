@@ -53,14 +53,17 @@ class SessionFilter(OncePerRequestFilter):
     **A revoked session stays revoked.** A session the store is known to hold
     (:attr:`HttpSession.stored_id`: loaded by this request, or already saved by it) is written back
     through the store's ``replace`` (:class:`~pyfly.session.ports.outbound.ConditionalSessionStore`),
-    only while the store still holds it. When it was logged out, evicted or expired while the request
-    ran, the change is dropped, the session counts as invalidated, and the response sets no session
-    cookie at all: the request neither brings the session back nor sends its cookie again, and it
-    does not clear the cookie either (another request of the same browser, a login in another tab,
-    may have set a new one meanwhile). A new or rotated id is inserted with ``save`` and the old id
-    deleted. A store without ``replace`` gets every change through ``save``, an insert-or-replace,
-    and cannot tell a revoked session from a live one: the filter logs ``session_store_without_replace``
-    (a WARNING) when it is built on one.
+    and moved to its new id through ``rename`` when the request rotated it (``rotate_id()``, a
+    privilege elevation), only while the store still holds it. When it was logged out, evicted or
+    expired while the request ran, the change is dropped, the session counts as invalidated, and the
+    response sets no session cookie at all: the request neither brings the session back, under its id
+    or a new one, nor sends its cookie again, and it does not clear the cookie either (another request
+    of the same browser, a login in another tab, may have set a new one meanwhile). A new session, and
+    one rotated by a login (``rotate_id(on_login=True)``: a fresh authentication stands even if the old
+    entry is gone), is inserted with ``save`` and its old id deleted. A store without ``replace`` and
+    ``rename`` gets every change through ``save``, an insert-or-replace, and cannot tell a revoked
+    session from a live one: the filter logs ``session_store_without_replace`` (a WARNING) when it is
+    built on one.
 
     **Deletions run to their end.** The deletion of an invalidated session (a logout) and of a rotated
     session's old id runs in a task of its own, shielded from the request's cancellation: a
@@ -170,16 +173,24 @@ class SessionFilter(OncePerRequestFilter):
             return True
         if not session.modified:
             return True
-        if stale is not None:
-            await self._delete_shielded([stale])
         conditional = self._conditional
-        if conditional is not None and stale is None and stored is not None:
-            if not await conditional.replace(session.id, session.get_data(), self._ttl):
-                # Logged out, evicted or expired while this request ran: never bring it back.
+        if conditional is not None and stored is not None and not session.rotated_on_login:
+            data = session.get_data()
+            if stale is None:
+                written = await conditional.replace(session.id, data, self._ttl)
+            else:
+                written = await conditional.rename(stale, session.id, data, self._ttl)
+            if not written:
+                # Logged out, evicted or expired while this request ran: never bring it back, under its id or a
+                # new one.
                 logger.debug("session_ended_during_request")
                 session.invalidate()
                 return False
         else:
+            # A new session, a login's rotation (a fresh authentication stands even if the old entry is gone),
+            # or a store that cannot write conditionally.
+            if stale is not None:
+                await self._delete_shielded([stale])
             await self._store.save(session.id, session.get_data(), self._ttl)
         session.mark_persisted()
         return True

@@ -66,6 +66,10 @@ class _YieldingStore(InMemorySessionStore):
         await asyncio.sleep(0)
         return await super().replace(session_id, data, ttl)
 
+    async def rename(self, old_id: str, new_id: str, data: dict[str, Any], ttl: int) -> bool:
+        await asyncio.sleep(0)
+        return await super().rename(old_id, new_id, data, ttl)
+
 
 def _controller(store: InMemorySessionStore, *, max_sessions: int, strategy: str) -> SessionConcurrencyController:
     return SessionConcurrencyController(
@@ -239,6 +243,33 @@ async def test_a_login_cancelled_while_registering_leaves_no_session_behind() ->
 
     assert request.state.session.invalidated
     assert await logins._gone(store, request.state.session.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
+async def test_a_rotation_after_a_revocation_brings_nothing_back(revocation: str) -> None:
+    store = _YieldingStore()
+    replica = logins.Replica(store, _controller(store, max_sessions=1, strategy="evict-oldest"))
+
+    await logins.a_rotation_after_a_revocation_brings_nothing_back(replica, revocation)
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_moves_a_live_session() -> None:
+    store = _YieldingStore()
+
+    await logins.a_rotation_moves_a_live_session(
+        logins.Replica(store, _controller(store, max_sessions=1, strategy="evict-oldest"))
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_login_stands_when_its_pre_authentication_session_is_gone() -> None:
+    store = _YieldingStore()
+
+    await logins.a_login_stands_when_its_pre_authentication_session_is_gone(
+        logins.Replica(store, _controller(store, max_sessions=1, strategy="evict-oldest"))
+    )
 
 
 @pytest.mark.asyncio

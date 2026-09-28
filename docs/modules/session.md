@@ -81,6 +81,9 @@ from pyfly.session import HttpSession
 | `id` | Unique session identifier (UUID hex string) |
 | `is_new` | `True` if the session was created during this request |
 | `stored_id` | The id the store is known to hold the session under: the id it was loaded with, then the id of its last save (`None` for a new session not saved yet) |
+| `rotate_id(*, on_login=False)` | Assign a fresh id (session-fixation defense). `on_login=True` for a login: the new id is stored even if the old entry is gone meanwhile. Otherwise (a privilege elevation) the filter moves the stored session to the new id only while the store still holds it, so a session logged out or evicted meanwhile is not brought back |
+| `previous_id` | The id before the last `rotate_id()` |
+| `rotated_on_login` | `True` when `rotate_id(on_login=True)` was called since the session was last persisted |
 | `created_at` | Unix timestamp of session creation (`float`) |
 | `last_accessed` | Unix timestamp of the most recent access (`float`) |
 | `invalidated` | `True` if `invalidate()` has been called |
@@ -90,7 +93,7 @@ from pyfly.session import HttpSession
 | `remove_attribute(name)` | Remove an attribute if present |
 | `get_attribute_names()` | List of all user-set attribute names (excludes internal `_*` keys) |
 | `invalidate()` | Mark the session for deletion; filter will delete cookie and store entry |
-| `mark_persisted()` | Record that the store holds the session as it is now, under its current id: `modified` is `False` until the next change, `stored_id` is the current id (the filter calls it after each save; `previous_id` is kept) |
+| `mark_persisted()` | Record that the store holds the session as it is now, under its current id: `modified` is `False` until the next change, `stored_id` is the current id and `rotated_on_login` is `False` (the filter calls it after each save; `previous_id` is kept) |
 | `get_data()` | Raw session dict (includes internal metadata) |
 
 ### `SessionStore` protocol
@@ -109,23 +112,28 @@ class SessionStore(Protocol):
     async def exists(self, session_id: str) -> bool: ...
 ```
 
-`save` inserts or replaces. A store that can also write over a session only while it holds it is a
-`ConditionalSessionStore` (`from pyfly.session import ConditionalSessionStore`), with one more method:
+`save` inserts or replaces. A store that can also write over a session, or move it to a new id, only while it
+holds it is a `ConditionalSessionStore` (`from pyfly.session import ConditionalSessionStore`), with two more
+methods:
 
 ```python
 class ConditionalSessionStore(SessionStore, Protocol):
     async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool: ...
+    async def rename(self, old_id: str, new_id: str, data: dict[str, Any], ttl: int) -> bool: ...
 ```
 
-`replace` writes the data and moves the expiry *ttl* seconds on only if the store holds the session and it has
-not expired, in one atomic step, and returns `False` (writing nothing) otherwise. The three shipped stores
-implement it: the in-memory store under its lock, Redis with `SET ... XX`, the SQL store with one conditional
-`UPDATE`. The `SessionFilter` uses it so that a request never brings back a session that was logged out,
+`replace` writes the data and moves the expiry *ttl* seconds on, and `rename` moves the session to a new id with
+the data and the new expiry, only if the store holds the session and it has not expired, in one atomic step;
+each returns `False` (writing nothing) otherwise. The three shipped stores implement them: the in-memory store
+under its lock, Redis with `SET ... XX` and a Lua script (both keys of a rename must be on one node: in a Redis
+Cluster, in one hash slot), the SQL store with one conditional `UPDATE` each (a rename updates the key in place,
+as Spring Session JDBC does). The `SessionFilter` uses it so that a request never brings back a session that was logged out,
 evicted or expired while the request ran (see [`SessionFilter`](#sessionfilter)). A custom store without
 `replace` keeps working: every change goes through `save`, and such a store cannot tell a revoked session from a
 live one: the `SessionFilter` logs `session_store_without_replace` (a WARNING) when it is built on such a store.
-A subclass of a shipped store that overrides `save` (to encrypt the data, say) must override `replace` the same
-way: the filter writes every change of a session the store already holds through `replace`, bypassing `save`.
+A subclass of a shipped store that overrides `save` (to encrypt the data, say) must override `replace` and
+`rename` the same way: the filter writes every change of a session the store already holds through them,
+bypassing `save`.
 
 ### `InMemorySessionStore`
 
@@ -207,15 +215,18 @@ appended to a list attribute, say) is saved only along with such a change: once 
 in-place mutation alone is not saved again. Call `set_attribute` with the mutated value to save it.
 
 **A revoked session stays revoked.** A session the store is known to hold (`stored_id`: loaded by the request,
-or already saved by it) is written back through the store's `replace`, only while the store still holds it.
+or already saved by it) is written back through the store's `replace`, and moved to its new id through `rename`
+when the request rotated it (`rotate_id()`, a privilege elevation), only while the store still holds it.
 When the session was logged out (by another request of the same browser), evicted (by a login elsewhere under
 `evict-oldest`) or expired while the request ran, its change is dropped, the session counts as invalidated and
 the response sets no session cookie at all: the request neither brings the session back nor sends its cookie
 again, and it does not clear the cookie either, since another request of the same browser (a login in another
-tab, rotating the session) may have set a new one meanwhile. A new or rotated id is inserted with `save`, and
-the entry the store held the session under (`stored_id`) is deleted, however many rotations came before, so
-no earlier id resolves to the session. With a custom store that has no `replace`, every change goes through
-`save`, which brings such a session back.
+tab, rotating the session) may have set a new one meanwhile, and it does not bring the session back under a new
+id. A new session, and one rotated by a login (`rotate_id(on_login=True)`: a fresh authentication stands even
+if the old entry is gone), is inserted with `save`, and the entry the store held the session under
+(`stored_id`) is deleted, however many rotations came before, so no earlier id resolves to the session. With a
+custom store that has no `replace` and `rename`, every change goes through `save`, which brings such a session
+back.
 
 **Deletions run to their end.** The deletion of an invalidated session (a logout, a refused or failed login)
 and of a rotated session's old id runs in a task of its own, shielded from the request's cancellation: a

@@ -236,7 +236,7 @@ class OAuth2LoginHandler:
 
         # Rotate the session id on successful authentication to prevent session
         # fixation — the pre-auth id (which an attacker may have fixed) is dropped.
-        session.rotate_id()
+        session.rotate_id(on_login=True)
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
         redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
         session.remove_attribute(_REDIRECT_URI_KEY)
