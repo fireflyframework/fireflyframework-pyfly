@@ -210,7 +210,9 @@ When the session was logged out (by another request of the same browser), evicte
 `evict-oldest`) or expired while the request ran, its change is dropped, the session counts as invalidated and
 the response sets no session cookie at all: the request neither brings the session back nor sends its cookie
 again, and it does not clear the cookie either, since another request of the same browser (a login in another
-tab, rotating the session) may have set a new one meanwhile. A new or rotated id is inserted with `save`. With a custom store that has no `replace`, every change goes through
+tab, rotating the session) may have set a new one meanwhile. A new or rotated id is inserted with `save`, and
+the entry the store held the session under (`stored_id`) is deleted, however many rotations came before, so
+no earlier id resolves to the session. With a custom store that has no `replace`, every change goes through
 `save`, which brings such a session back.
 
 `request.state.persist_session` (a coroutine function taking no arguments) saves the session at once. Every

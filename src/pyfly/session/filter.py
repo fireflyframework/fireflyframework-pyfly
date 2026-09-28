@@ -144,10 +144,11 @@ class SessionFilter(OncePerRequestFilter):
         session is left unmodified until its next change. ``False`` when the write-back of a session the store
         was known to hold found it gone (revoked while the request ran): the session is then invalidated, and
         nothing was written."""
-        # If the id was rotated (e.g. on login), drop the pre-rotation entry so a
-        # fixed/stale id can no longer resolve to this session (anti-fixation).
-        if session.previous_id is not None and session.previous_id != session.id:
-            await self._store.delete(session.previous_id)
+        # If the id was rotated (e.g. on login), drop the entry the store holds the session under, so a
+        # fixed/stale id can no longer resolve to this session (anti-fixation), however many rotations came
+        # before this persist.
+        if session.stored_id is not None and session.stored_id != session.id:
+            await self._store.delete(session.stored_id)
 
         if session.invalidated:
             await self._store.delete(session.id)

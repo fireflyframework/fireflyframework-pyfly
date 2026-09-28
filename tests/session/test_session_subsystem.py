@@ -295,6 +295,44 @@ class TestSessionFilter:
         assert (await store.get("existing"))["step"] == 2
 
     @pytest.mark.asyncio
+    async def test_two_rotations_before_one_persist_leave_no_old_id_resolvable(self) -> None:
+        """The filter deleted only the id before the last rotation, which the store never held: the loaded id
+        kept resolving to the session after the request rotated it twice."""
+        store = InMemorySessionStore()
+        await store.save("loaded", {"user": "ada"}, ttl=60)
+        f = SessionFilter(store=store)
+        request = _request(cookies={"PYFLY_SESSION": "loaded"})
+        response = _Response()
+
+        async def call_next(req: Any) -> _Response:
+            req.state.session.rotate_id()
+            req.state.session.rotate_id()
+            return response
+
+        await f.do_filter(request, call_next)
+        assert not await store.exists("loaded")
+        assert (await store.get(response.set_cookie_calls[0]["value"]))["user"] == "ada"
+
+    @pytest.mark.asyncio
+    async def test_a_rotation_after_persist_session_drops_the_saved_id(self) -> None:
+        store = InMemorySessionStore()
+        await store.save("loaded", {"user": "ada"}, ttl=60)
+        f = SessionFilter(store=store)
+        request = _request(cookies={"PYFLY_SESSION": "loaded"})
+        saved: list[str] = []
+
+        async def call_next(req: Any) -> _Response:
+            req.state.session.rotate_id()
+            await req.state.persist_session()
+            saved.append(req.state.session.id)
+            req.state.session.rotate_id()
+            return _Response()
+
+        await f.do_filter(request, call_next)
+        assert not await store.exists("loaded") and not await store.exists(saved[0])
+        assert await store.exists(request.state.session.id)
+
+    @pytest.mark.asyncio
     async def test_a_changed_session_ended_during_the_request_is_not_saved_back(self) -> None:
         """A logout or an eviction deleted the session while one of its requests was changing it: the request's
         persist saved it back (an upsert), and the revoked session was live again, its cookie sent anew."""
