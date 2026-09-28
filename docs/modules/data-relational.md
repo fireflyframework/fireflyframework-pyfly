@@ -1700,7 +1700,9 @@ MySQL and MariaDB, and a naming convention for indexes.
 
 The `env.py` of `pyfly db init` lists it in Alembic's `target_metadata`, so autogenerate migrates the framework
 tables (their revisions import `pyfly.data.relational.framework_schema` for its column types) and never drops
-them. An `env.py` written by hand lists it too:
+them. The first revision it writes for a project therefore creates all four, whether or not the application
+uses those stores: they stay empty until a store writes to them, and a revision that dropped them would have
+the next autogenerate propose them again. An `env.py` written by hand lists it too:
 
 ```python
 # migrations/env.py
