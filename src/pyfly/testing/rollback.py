@@ -27,9 +27,10 @@ transaction manager is replaced, in the context's ``TransactionManagerRegistry``
 of work of the test as a savepoint of that transaction. Repository calls, ``@transactional`` services,
 ``SessionProvider`` units, the ``AsyncSession`` bean inside a unit and the framework stores all find it.
 Each unit still completes on its own (its savepoint is released or rolled back, and its after-commit
-callbacks run), so a failing unit leaves the test's earlier writes in place, on PostgreSQL too. A read that
-ends well releases its savepoint (in production it rolls back, which undoes nothing), so what a loop writes
-while it reads a stream stays. On exit the datasource's own manager is back and the transaction rolls back.
+callbacks run), so a failing unit leaves the test's earlier writes in place, on PostgreSQL too, and so does a
+cancelled one. A read that ends well releases its savepoint (in production it rolls back, which undoes
+nothing), so what a loop writes while it reads a stream stays. On exit the datasource's own manager is back and
+the transaction rolls back.
 
 The units of the task that entered the block, and of the tasks it starts, take part; the context's own
 background work (started before the block) keeps running on the datasource's own connections and commits.
@@ -45,7 +46,17 @@ What differs from production, by construction:
 - a stream reads its rows when its statement runs, not through a server-side cursor: a cursor left open on
   the shared connection would hang the other units' statements on MySQL and MariaDB, and on SQLite the scan
   would see the rows the test writes meanwhile;
-- ``REQUIRES_NEW`` gets a savepoint too, so the outer unit's rollback undoes it;
+- ``REQUIRES_NEW`` gets a savepoint too, and so does every unit that starts while ``NOT_SUPPORTED`` suspends
+  one (a repository call's auto unit, a new ``@transactional`` unit): the enclosing unit's rollback undoes them,
+  where in production they commit on their own;
+- a cancellation that lands while a unit's statement runs (a cancel scope, ``asyncio.wait_for``, the unit's own
+  ``timeout=``) lets the statement run to its end, and is raised when it returns: the unit rolls back to its
+  savepoint, as it rolls back in production, and the test goes on, later by the rest of the statement (on
+  PostgreSQL a unit's ``timeout=`` still cancels its statement on the server). Interrupting it would lose the
+  test's connection, and its transaction with it. A statement that runs past the unit's session (one on the
+  connection ``session.connection()`` returns, a lazy load through ``awaitable_attrs``) is not covered: once a
+  cancellation cuts one short, every later unit fails with ``IllegalTransactionStateError`` naming the unit the
+  connection was lost in;
 - the settings of a transaction are the test transaction's: a unit's isolation level, read-only hint and
   SQLite ``BEGIN IMMEDIATE`` are not applied (a read-only unit still refuses ORM writes), and what a unit sets
   with ``SET LOCAL`` (a PostgreSQL statement timeout, an after-begin customizer's setting) lasts until the

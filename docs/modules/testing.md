@@ -774,9 +774,10 @@ each covered datasource holds one connection with a transaction open, and the da
 runs every unit of work of the test as a savepoint of that transaction: repository calls, `@transactional`
 services, `SessionProvider` units and the framework stores all take part. Each unit still completes on its own
 (its savepoint is released or rolled back, its after-commit callbacks run), so a failing unit leaves the
-test's earlier writes in place, on PostgreSQL too. A read that ends well releases its savepoint (in production
-it rolls back, which undoes nothing), so what a loop writes while it reads a stream (`stream_all()` outside a
-transaction, a save per row) stays, as in production. What differs from production, by construction:
+test's earlier writes in place, on PostgreSQL too, and so does a cancelled one. A read that ends well releases
+its savepoint (in production it rolls back, which undoes nothing), so what a loop writes while it reads a stream
+(`stream_all()` outside a transaction, a save per row) stays, as in production. What differs from production,
+by construction:
 
 - every unit of a datasource runs on one connection, so the units must nest: tasks that each open a unit of
   their own and run at the same time (`asyncio.gather` of `@transactional` calls or of repository calls, a
@@ -790,7 +791,19 @@ transaction, a save per row) stays, as in production. What differs from producti
   server-side cursor: a cursor left open on the shared connection would hang the other units' statements on
   MySQL and MariaDB, and on SQLite the scan would see the rows the test writes meanwhile. It holds the rows
   of its statement's start, as in production;
-- `REQUIRES_NEW` gets a savepoint too, so the outer unit's rollback undoes it;
+- `REQUIRES_NEW` gets a savepoint too, and so does every unit that starts while `NOT_SUPPORTED` suspends one
+  (a repository call's auto unit, a new `@transactional` unit): the enclosing unit's rollback undoes them,
+  where in production they commit on their own;
+- a cancellation that lands while a unit's statement runs (`anyio.move_on_after`, `asyncio.wait_for`, the
+  unit's own `@transactional(timeout=...)`) lets the statement run to its end, and is raised when it returns:
+  the test sees the cancellation, `TimeoutError` or `TransactionTimedOutError`, the unit rolls back to its
+  savepoint as it rolls back in production, and the test goes on, later by the rest of the statement (on
+  PostgreSQL a unit's `timeout=` still cancels its statement on the server). Interrupting the statement would
+  lose the test's connection, and the test's transaction with it. That covers the unit's statements through its
+  session, its savepoints and the statements of the after-begin customizers; a statement that runs past the
+  unit's session (one on the connection `session.connection()` returns, a lazy load through `awaitable_attrs`)
+  is not covered: once a cancellation cuts one short, every later unit of the test fails with
+  `IllegalTransactionStateError` naming the unit the connection was lost in;
 - a unit's isolation level, read-only hint and SQLite `BEGIN IMMEDIATE` are the test transaction's (a
   read-only unit still refuses ORM writes), and what a unit sets with `SET LOCAL` lasts until the test ends
   unless the unit rolls back. The test transaction is a real one on an application's own engine too: on a
