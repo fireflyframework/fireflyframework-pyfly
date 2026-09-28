@@ -30,7 +30,9 @@ The application context replaces every ``@async_method`` of a bean with :func:`d
 
 The calls are drained when the application context stops: the executor belongs to the ``TaskScheduler``,
 which the context stops (waiting for its tasks) before any ``@pre_destroy``. A call submitted once the
-scheduler has stopped (by another consumer-phase bean still draining) is not waited for.
+scheduler has stopped (by another consumer-phase bean still draining) is not waited for; a synchronous
+method's call then fails with ``RuntimeError`` when the executor is a ``ThreadPoolTaskExecutor``, whose pool
+has shut down.
 """
 
 from __future__ import annotations

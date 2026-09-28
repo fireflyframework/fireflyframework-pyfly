@@ -829,7 +829,9 @@ and the application context replaces the bean's method with a dispatcher
 - **Shutdown** waits for the calls in flight: they run on the `TaskScheduler`'s
   executor, which the context stops before any `@pre_destroy`. A call submitted
   once the scheduler has stopped (by another consumer-phase bean still draining,
-  such as a message listener) is not waited for.
+  such as a message listener) is not waited for, and a synchronous method's call
+  fails then with `RuntimeError` when the executor is a `ThreadPoolTaskExecutor`
+  (its pool has shut down, and rejects new work as Spring's does).
 
 ```python
 from pyfly.scheduling.async_methods import AsyncUncaughtExceptionHandler
