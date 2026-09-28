@@ -458,14 +458,21 @@ class TargetMetadata(list["MetaData"]):
 
     Autogenerate compares the database with every one of them. Alembic operations name the unnamed
     constraints of a revision with the ``naming_convention`` of ``target_metadata``: this list answers with
-    its first ``MetaData``'s (``Base.metadata``), so a history that opts in with
-    :func:`~pyfly.data.relational.sqlalchemy.naming.apply_convention_to_operations` keeps its names.
+    its first ``MetaData``'s (``Base.metadata``), and setting it sets that one's, so a history that opts in
+    with :func:`~pyfly.data.relational.sqlalchemy.naming.apply_convention_to_operations` (with no argument, or
+    ``target_metadata``) keeps its names.
     """
 
     @property
     def naming_convention(self) -> Any:
         """The naming convention of the application's ``MetaData`` (the first)."""
         return self[0].naming_convention if self else {}
+
+    @naming_convention.setter
+    def naming_convention(self, convention: Any) -> None:
+        if not self:
+            raise ValueError("target_metadata holds no MetaData to give the naming convention to")
+        self[0].naming_convention = convention
 
 
 def migration_metadata(alembic_config: AlembicConfig, *, default_models: Sequence[str] = ()) -> TargetMetadata:

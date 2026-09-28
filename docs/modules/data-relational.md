@@ -158,7 +158,7 @@ operations take the naming convention of that first `MetaData`):
 ```python
 from pyfly.data.relational.sqlalchemy.naming import apply_convention_to_operations
 
-apply_convention_to_operations()  # Base.metadata
+apply_convention_to_operations(target_metadata)  # sets it on Base.metadata, the first
 ```
 
 Do it only when every revision of the history was first applied under the convention: a history started

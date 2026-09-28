@@ -400,7 +400,7 @@ async def test_a_legacy_history_replays_on_a_fresh_database(
 _OPT_IN = """
 from pyfly.data.relational.sqlalchemy.naming import apply_convention_to_operations
 
-apply_convention_to_operations()  # Base.metadata, the first of target_metadata
+apply_convention_to_operations(target_metadata)  # Base.metadata, the first of target_metadata
 """
 
 

@@ -348,6 +348,23 @@ def test_the_src_directory_joins_the_path_only_when_the_package_needs_it(model_p
     assert "wp11_app.domain.entities" in sys.modules
 
 
+def test_the_env_py_target_metadata_opts_in_to_the_naming_convention() -> None:
+    """``apply_convention_to_operations(target_metadata)``, the call naming.py documents and env.py files made
+    before 26.09.08: the env.py's target_metadata names the convention of its first MetaData, and sets it."""
+    from sqlalchemy import MetaData
+
+    from pyfly.data.relational.migrations import TargetMetadata
+    from pyfly.data.relational.sqlalchemy.entity import NAMING_CONVENTION
+    from pyfly.data.relational.sqlalchemy.naming import apply_convention_to_operations
+
+    application, framework = MetaData(), MetaData(naming_convention={"ix": "fw_%(column_0_label)s"})
+    target = TargetMetadata([application, framework])
+    assert apply_convention_to_operations(target) is target
+    assert application.naming_convention == NAMING_CONVENTION
+    assert target.naming_convention == NAMING_CONVENTION
+    assert framework.naming_convention == {"ix": "fw_%(column_0_label)s"}
+
+
 # ---------------------------------------------------------------------------------------------------------
 # A '%' in the URL (C119, C120)
 # ---------------------------------------------------------------------------------------------------------
