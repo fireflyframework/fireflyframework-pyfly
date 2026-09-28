@@ -259,7 +259,8 @@ class DatabaseEventBus:
       :class:`~pyfly.eda.outbox.OutboxRelay`;
     - *create_tables*: create the outbox tables when they are missing (otherwise they are only checked);
       *tables*: the outbox's tables (the ``pyfly_outbox_*`` ones by default);
-    - *notify*: the PostgreSQL wake-ups (``None``: on when the store is a SQL store on PostgreSQL and the
+    - *notify*: the PostgreSQL wake-ups (``None``: on when the store is a SQL store on PostgreSQL that notifies
+      *channel*, as the one the bus builds does (a *store* given needs ``notify_channel=channel``), and the
       ``LISTEN`` connection can be opened: with the asyncpg driver, or on *listen_dsn*), on *channel*, with the
       ``LISTEN`` connection opened on *listen_dsn* when given;
     - *dead_letter_store*: where dead letters go instead of the outbox's table.
@@ -480,6 +481,14 @@ class DatabaseEventBus:
         if self._notify and not postgresql:
             raise ValueError("notify=True needs a SQL outbox store on PostgreSQL (LISTEN/NOTIFY)")
         if sql is None or not postgresql:
+            return False
+        if sql.notify_channel != self._channel:
+            # A store the caller built sends no NOTIFY on the bus's channel: a LISTEN there would never wake.
+            if self._notify:
+                raise ValueError(
+                    f"notify=True needs a store that notifies the bus's channel {self._channel!r} "
+                    f"(SqlOutboxStore(notify_channel={self._channel!r})); it notifies {sql.notify_channel!r}"
+                )
             return False
         driver = sql.engine().dialect.driver
         if listen_driver_supported(driver, self._listen_dsn):

@@ -35,7 +35,7 @@ from pyfly.eda.types import EventEnvelope
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.outbox import TransactionalOutbox
 from pyfly.messaging.listener_container import FixedBackOff, RetryPolicy
-from tests.support.backend_matrix import PG, RelationalBackend
+from tests.support.backend_matrix import PG, SQLITE_FILE, RelationalBackend
 from tests.support.outbox_contract import PortOnlyStore
 
 
@@ -90,6 +90,40 @@ async def test_the_database_bus_on_another_store_refuses_the_postgresql_wake_ups
         DatabaseEventBus("primary", store=store)
 
 
+@pytest.mark.backends(PG)
+async def test_the_database_bus_listens_only_on_a_sql_store_that_notifies_its_channel(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A SQL store the caller built sends ``NOTIFY`` on its own ``notify_channel`` (none by default): a bus that
+    opened a ``LISTEN`` connection on another channel would hold it for nothing. It polls instead, and
+    ``notify=True`` refuses to start."""
+    engine = relational_backend.create_engine()
+
+    async def handler(envelope: EventEnvelope) -> None:
+        return None
+
+    silent = DatabaseEventBus(store=SqlOutboxStore(engine), group="silent")
+    silent.subscribe("*", handler)
+    await silent.start()
+    try:
+        assert silent.listener_state is ListenerState.OFF
+    finally:
+        await silent.stop()
+
+    with pytest.raises(ValueError, match="notifies the bus's channel"):
+        await DatabaseEventBus(store=SqlOutboxStore(engine), notify=True).start()
+    with pytest.raises(ValueError, match="notifies the bus's channel"):
+        await DatabaseEventBus(store=SqlOutboxStore(engine, notify_channel="other"), notify=True).start()
+
+    notifying = DatabaseEventBus(store=SqlOutboxStore(engine, notify_channel="pyfly_eda"), group="notified")
+    notifying.subscribe("*", handler)
+    await notifying.start()
+    try:
+        assert notifying.listener_state is ListenerState.LISTENING
+    finally:
+        await notifying.stop()
+
+
 async def test_the_relay_runs_on_any_outbox_store(relational_backend: RelationalBackend) -> None:
     store, template = await _store(relational_backend)
     relay = OutboxRelay(store, group="audit", transactional=False)
@@ -130,3 +164,38 @@ async def test_the_event_sourcing_outbox_runs_on_any_outbox_store(relational_bac
     assert outbox.outbox is store
     with pytest.raises(ValueError, match="not both"):
         TransactionalOutbox(publish, datasource="primary", store=store)
+
+
+class _StopCountingStore(PortOnlyStore):
+    def __init__(self, store: SqlOutboxStore) -> None:
+        super().__init__(store)
+        self.stops = 0
+
+    async def stop(self) -> None:
+        self.stops += 1
+        await super().stop()
+
+
+@pytest.mark.backends(SQLITE_FILE)
+async def test_the_event_sourcing_outbox_stops_its_store_when_its_relay_fails_to_stop(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A store that holds resources of its own (a document store's client) is released even when the relay's
+    stop raises, as the buses and the transactional publisher release theirs."""
+    store = _StopCountingStore(SqlOutboxStore(relational_backend.create_engine()))
+
+    async def publish(envelope: StoredEventEnvelope) -> None:
+        return None
+
+    outbox = TransactionalOutbox(publish, store=store)
+    await outbox.start()
+    relay_stop = outbox.relay.stop
+
+    async def failing_stop() -> None:
+        await relay_stop()
+        raise RuntimeError("the relay's stop failed")
+
+    outbox.relay.stop = failing_stop  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="the relay's stop failed"):
+        await outbox.stop()
+    assert store.stops == 1

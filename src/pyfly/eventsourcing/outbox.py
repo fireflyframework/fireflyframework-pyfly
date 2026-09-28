@@ -167,9 +167,12 @@ class TransactionalOutbox:
         await self._relay.start()
 
     async def stop(self) -> None:
-        """Stop the relay, then the store; what it had not delivered stays in the store. Idempotent."""
-        await self._relay.stop()
-        await self._outbox.stop()
+        """Stop the relay, then the store (also when the relay's stop raised); what it had not delivered stays in
+        the store. Idempotent."""
+        try:
+            await self._relay.stop()
+        finally:
+            await self._outbox.stop()
 
     async def pending(self) -> list[OutboxRecord]:
         """The events not delivered yet and still to be attempted (a dead-lettered one is not pending)."""
