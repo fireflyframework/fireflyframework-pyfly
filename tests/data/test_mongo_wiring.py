@@ -253,4 +253,3 @@ def test_the_replica_set_container_raises_the_open_file_limit() -> None:
     container = mongodb_replica_set_container()
     (ulimit,) = container.get_wrapped_container()._kwargs["ulimits"]
     assert (ulimit.name, ulimit.soft, ulimit.hard) == ("nofile", 64000, 64000)
-
