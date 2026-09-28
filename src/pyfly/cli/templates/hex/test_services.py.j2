@@ -28,7 +28,7 @@ class TestTodoService:
         service = data_context.get_bean(TodoService)
         await service.create("Task A", "")
         await service.create("Task B", "")
-        assert len(await service.list_all()) == 2  # the rows of the other tests were rolled back
+        assert len(await service.list_all()) == 2  # only this test's rows: its units of work roll back when it ends
 
     async def test_get_todo(self, data_context: ApplicationContext) -> None:
         service = data_context.get_bean(TodoService)
