@@ -36,7 +36,7 @@ from pyfly.data.document.mongodb.document import BaseDocument, DocumentAuditingH
 from pyfly.data.document.mongodb.post_processor import MongoRepositoryBeanPostProcessor
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
-from pyfly.data.transaction import TransactionTemplate
+from pyfly.data.transaction import IllegalTransactionStateError, TransactionTemplate
 from tests.support.mongo import BeanieDatabase, beanie_database
 
 TIMEOUT = 10.0
@@ -324,3 +324,34 @@ async def test_an_auditor_read_from_a_repository_stamps_every_write(env: Env, in
         ]
     finally:
         await handler.stop()
+
+
+@pytest.mark.parametrize(
+    "how", ["save new", "save stored", "save_all", "delete", "delete_by_id", "delete_all", "delete_by_status"]
+)
+async def test_a_read_only_unit_refuses_a_write_before_any_event_action_runs(env: Env, how: str) -> None:
+    """A write in a read-only unit fails before the document's validation and event actions (user code) run."""
+    repository = _orders()
+    order = await env.run(
+        lambda: repository.save(ActOrder(customer=str(env.customer.id), status="KEPT")), in_unit=False
+    )
+    ActOrder.seen.clear()
+    calls: dict[str, Callable[[], Awaitable[Any]]] = {
+        "save new": lambda: repository.save(ActOrder(customer=str(env.customer.id))),
+        "save stored": lambda: repository.save(order),
+        "save_all": lambda: repository.save_all([order, ActOrder(customer=str(env.customer.id))]),
+        "delete": lambda: repository.delete(order),
+        "delete_by_id": lambda: repository.delete_by_id(str(order.id)),
+        "delete_all": lambda: repository.delete_all([order]),
+        "delete_by_status": lambda: repository.delete_by_status("KEPT"),
+    }
+
+    async def read_only() -> None:
+        async with env.template.transaction(read_only=True):
+            await calls[how]()
+
+    with pytest.raises(IllegalTransactionStateError, match="read-only"):
+        await env.run(read_only, in_unit=False)
+    assert ActOrder.seen == []
+    assert await env.statuses() == ["KEPT"]
+    assert await env.labels() == ["inserted KEPT"]

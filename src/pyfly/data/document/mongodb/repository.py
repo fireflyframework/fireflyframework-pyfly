@@ -561,11 +561,11 @@ class MongoRepository(Generic[T, ID]):
         filter_document = self._filters(filters)
         return self._model.find(filter_document, session=self._session)  # type: ignore[attr-defined]
 
-    @contextlib.asynccontextmanager
-    async def _operation(self, *, write: bool = False) -> AsyncIterator[AsyncClientSession]:
-        """One operation on the current unit's session, under its guard (a failure is recorded on the unit)."""
+    def _writable_unit(self) -> UnitOfWork:
+        """The unit of the current call, refused when it is read-only: a write checks it before it runs the
+        document's validation and event actions (user code)."""
         unit = self._current_unit()
-        if write and unit.read_only:
+        if unit.read_only:
             raise IllegalTransactionStateError(
                 f"{unit.describe()} is read-only and {type(self).__name__} cannot write in it. "
                 + (
@@ -577,6 +577,12 @@ class MongoRepository(Generic[T, ID]):
                 ),
                 datasource=unit.datasource,
             )
+        return unit
+
+    @contextlib.asynccontextmanager
+    async def _operation(self, *, write: bool = False) -> AsyncIterator[AsyncClientSession]:
+        """One operation on the current unit's session, under its guard (a failure is recorded on the unit)."""
+        unit = self._writable_unit() if write else self._current_unit()
         async with unit.operation():
             yield cast(AsyncClientSession, unit.resource)
 
@@ -881,9 +887,10 @@ class MongoRepository(Generic[T, ID]):
         A save whose write fails, or whose transaction rolls back, gives the document back the id, revision and
         saved state it had, so saving it again retries the same write (a new document is inserted again)."""
         document: Any = entity
+        unit = self._writable_unit()
         settings = self._model.get_settings()  # type: ignore[attr-defined]
         new = self._is_new(document)
-        (state,) = _snapshots(self._current_unit(), (document,))
+        (state,) = _snapshots(unit, (document,))
         try:
             await _validate(document)
             if new:
@@ -949,7 +956,7 @@ class MongoRepository(Generic[T, ID]):
         if not items:
             return []
         settings = self._model.get_settings()  # type: ignore[attr-defined]
-        unit = self._current_unit()
+        unit = self._writable_unit()
         transactional = in_transaction(unit)
         states = _snapshots(unit, items)
         operations: list[InsertOne[Any] | UpdateOne] = []
@@ -1015,6 +1022,7 @@ class MongoRepository(Generic[T, ID]):
 
     async def _delete_document(self, entity: Any) -> None:
         """Beanie's ``delete`` of *entity*: its delete actions, outside the guard, around one ``delete``."""
+        self._writable_unit()
         await _run_actions(entity, EventTypes.DELETE, ActionDirections.BEFORE)
         async with self._operation(write=True) as session:
             await entity.delete(session=session, skip_actions=_SKIP_ACTIONS)
@@ -1066,6 +1074,7 @@ class MongoRepository(Generic[T, ID]):
     async def _delete_where(self, filter_document: dict[str, Any], *, many: bool, actions: bool = True) -> int:
         """Delete what *filter_document* matches: one command, or document by document (loading them) when the
         class has delete event actions and *actions* is true. Returns how many were deleted."""
+        self._writable_unit()
         if actions and _has_delete_actions(self._model):
             documents = await self._find(filter_document, limit=None if many else 1)
             for document in documents:
