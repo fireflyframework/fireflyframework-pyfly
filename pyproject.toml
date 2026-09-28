@@ -182,7 +182,6 @@ dev = [
     "coverage[toml]>=7.13.5",
     "mypy>=1.20.2",
     "ruff>=0.15.12",
-    "mongomock-motor>=0.0.36",
     "jsonpath-ng>=1.8.0",
     "respx>=0.21.0",
     "aiosmtpd>=1.4",
