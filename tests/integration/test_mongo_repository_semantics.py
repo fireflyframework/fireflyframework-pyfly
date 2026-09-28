@@ -40,9 +40,11 @@ from pydantic import Field, field_validator
 from pyfly.data.document.mongodb.document import BaseDocument
 from pyfly.data.document.mongodb.post_processor import MongoRepositoryBeanPostProcessor
 from pyfly.data.document.mongodb.repository import IN_CHUNK, MongoRepository
+from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
 from pyfly.data.pageable import Order, Pageable, Sort
 from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.query_parser import InvalidQueryMethodError
+from pyfly.data.transaction import TransactionTemplate
 from pyfly.kernel.exceptions import DuplicateKeyException, OptimisticLockingFailureException
 from tests.support.mongo import BeanieDatabase, beanie_database
 
@@ -317,6 +319,27 @@ async def test_a_derived_query_by_id_converts_the_id(db: BeanieDatabase) -> None
     saved = await repository.save_all([SemNote(title="by-id"), SemNote(title="other")])
     found = await repository.find_by_id_in([str(saved[0].id), "not-an-id"])
     assert [note.title for note in found] == ["by-id"]
+
+
+class TitledNotes(MongoRepository[SemNote, str]):
+    """A subclass written against the ``_query`` helper of earlier releases."""
+
+    async def titled(self, display: str) -> list[SemNote]:
+        return list(await self._query(display=display).to_list())
+
+
+async def test_the_query_helper_of_earlier_releases_maps_names_and_runs_on_the_call_session(
+    db: BeanieDatabase,
+) -> None:
+    repository = TitledNotes()
+    await repository.save_all([SemNote(title="a", displayName="A"), SemNote(title="b", displayName="B")])
+    db.log.clear()
+    async with TransactionTemplate(MongoTransactionManager.for_client(db.client)).transaction():
+        assert [note.title for note in await repository.titled("A")] == ["a"]
+    (find,) = [body for name, body in db.log.commands if name == "find"]
+    assert find["filter"] == {"displayName": "A"} and "txnNumber" in find
+    with pytest.raises(InvalidPropertyError):
+        await repository._query(nope=1).to_list()
 
 
 # ---------------------------------------------------------------------------------------------------------

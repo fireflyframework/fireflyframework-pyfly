@@ -315,6 +315,8 @@ class OrderRepository(MongoRepository[OrderDocument, str]):
         return result.modified_count
 ```
 
+The `_query(**filters)` helper of earlier releases is kept for subclasses written against it: it returns a Beanie find query on `self._session`, with the names validated and mapped as `find_all(**filters)` does (the `_sort_spec` and `_find_page` helpers are gone: use `find_all(Sort)`/`find_all(Pageable)`).
+
 A persistence failure is raised translated to the kernel's exceptions, from the driver's (`pyfly.data.document.mongodb.exception_translation`): a duplicate key (alone or in a bulk write) is a `DuplicateKeyException` naming the unique index, a document validation failure a `DataIntegrityException`, a Beanie revision conflict an `OptimisticLockingFailureException`, and a write conflict (or any other transient transaction error) a `ConcurrencyException`, which a retry can get past.
 
 ### Creating a Repository
@@ -676,7 +678,7 @@ await compiled(UserDocument, email="alice@example.com")          # through a rep
 `MongoSpecification` composes filter documents with `&` (`$and`), `|` (`$or`) and `~`; `MongoFilterOperator` builds them field by field, and `MongoFilterUtils` from keyword arguments, dicts and examples (a pydantic example by its fields). They mean what the relational ones mean:
 
 - Field names are the document's Python fields, resolved when the specification is applied: `id` is matched as `_id` (an id is converted to the document's id type) and an aliased field under its alias. A name that is not a field raises `InvalidPropertyError`; a dotted path into an embedded document keeps what follows its first segment as written.
-- `like(field, pattern)` is SQL `LIKE`: anchored and case-sensitive (pass `ignore_case=True` to ignore case); `contains(field, value)` matches the value as it is (case-sensitive unless `ignore_case=True`). Before 26.09.08, `like` ignored case.
+- `like(field, pattern)` is SQL `LIKE`: anchored and case-sensitive (pass `ignore_case=True` to ignore case); `contains(field, value)` matches the value as it is (case-sensitive unless `ignore_case=True`). **Breaking:** before 26.09.08, `like` ignored case (`$options: "i"`); a caller that relied on that passes `ignore_case=True`.
 - `neq(field, value)` is false for a null or missing field, as `!=` is on SQL, and `~spec` follows SQL's three-valued logic: it matches the documents for which `spec` is false, never those for which it is unknown (`NOT (role = 'admin')` leaves out a document without a role). MongoDB's own `$ne` and `$nor` would match them. `~` of a specification that filters nothing still filters nothing.
 
 ```python
@@ -723,6 +725,8 @@ The `DocumentProperties` dataclass (`pyfly.config.properties.mongodb`) captures 
 | `health.timeout`           | `float`       | `2.0`                          | Seconds the readiness check waits for `ping` |
 
 Before 26.09.08 the client was built from the URI alone: the documented pool settings were ignored, and `tz_aware=False` made every `BaseDocument` timestamp naive after a save and a load.
+
+> **Upgrading (breaking):** the document client is built with `tz_aware=True`, so every `datetime` it returns (from any document or raw pymongo read, not only `BaseDocument`'s fields) is aware UTC. Comparing one with a naive `datetime` raises `TypeError`: compare with aware values (`datetime.now(UTC)`), or set `pyfly.data.document.tz_aware: false` to get naive values back from the driver again (`BaseDocument`'s timestamps stay aware either way: a naive value is read as UTC).
 
 ### pyfly.yaml Keys
 
@@ -926,7 +930,7 @@ A Beanie call without `session=` runs outside the transaction. `TransactionTempl
 
 ### Replica Set Requirement
 
-MongoDB transactions require a replica set (a single-node one is enough) or a sharded cluster. On a standalone server `@transactional` raises `IllegalTransactionStateError` saying so, instead of running without a transaction; repository calls outside a transaction still work (each write is atomic on its own document). A message listener container opens a unit per delivery on the default datasource: on a standalone server set `pyfly.messaging.listener.transactional` (`pyfly.eda.listener.transactional`) to `false`.
+MongoDB transactions require a replica set (a single-node one is enough) or a sharded cluster. On a standalone server `@transactional` raises `IllegalTransactionStateError` saying so, instead of running without a transaction; repository calls outside a transaction still work (each write is atomic on its own document). A message listener container opens a unit per delivery on the default datasource: on a standalone server set `pyfly.messaging.listener.transactional` (`pyfly.eda.listener.transactional`) to `false`. **Breaking** for a MongoDB-only application on a standalone server: the document datasource is now the default transaction manager when the relational layer is off, so every delivery fails with `IllegalTransactionStateError` (naming the setting) until the setting is `false`; before 26.09.08 the container found no manager and delivered without a unit.
 
 For local development, you can run a single-node replica set:
 

@@ -480,6 +480,14 @@ class MongoRepository(Generic[T, ID]):
         """The ``ClientSession`` of the current call's unit (for a custom method that calls Beanie itself)."""
         return cast(AsyncClientSession, self._current_unit().resource)
 
+    def _query(self, **filters: Any) -> Any:
+        """A Beanie find query of the documents whose fields equal *filters*, on the current call's session (the
+        helper of earlier releases, kept for subclasses written against it; ``find_all(**filters)`` is the
+        public form). The names are validated and mapped as ``find_all``'s; the query's terminal call does not
+        take the operation guard, as any Beanie call a custom method makes with :attr:`_session`."""
+        filter_document = self._filters(filters)
+        return self._model.find(filter_document, session=self._session)  # type: ignore[attr-defined]
+
     @contextlib.asynccontextmanager
     async def _operation(self, *, write: bool = False) -> AsyncIterator[AsyncClientSession]:
         """One operation on the current unit's session, under its guard (a failure is recorded on the unit)."""
