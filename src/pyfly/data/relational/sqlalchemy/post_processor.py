@@ -53,6 +53,14 @@ _IMPLEMENTATION_HOOKS = (
 )
 """The hooks that decide how a method is built: a subclass that overrides one may build it per instance."""
 
+_LEGACY_HOOKS = ("_compile_derived", "_wrap_derived_method")
+"""The hooks a derived method is built with by the base post-processor's :meth:`_implement_derived`."""
+
+
+def _overrides_legacy_hooks(cls: type) -> bool:
+    """Whether *cls* overrides a hook of :data:`_LEGACY_HOOKS`, so its derived methods are built with them."""
+    return any(getattr(cls, hook) is not getattr(RepositoryBeanPostProcessor, hook) for hook in _LEGACY_HOOKS)
+
 
 class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
     """Replaces stub methods on :class:`Repository` subclasses with real query implementations.
@@ -129,7 +137,13 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
     def _implement_derived(self, bean: Any, method: QueryMethod) -> Callable[..., Any]:
         """The derived query of *method*, compiled once per repository class and entity, as a repository
         operation that binds its arguments by the stub's signature (its ``Pageable`` or ``Sort`` parameter
-        pages or sorts the query)."""
+        pages or sorts the query).
+
+        A subclass that overrides :meth:`_compile_derived` or :meth:`_wrap_derived_method` (the hooks every
+        derived method was built with before this processor compiled them its own way) has its methods built
+        with those hooks, as :class:`~pyfly.data.post_processor.BaseRepositoryPostProcessor` builds them."""
+        if _overrides_legacy_hooks(type(self)):
+            return super()._implement_derived(bean, method)
         entity = bean._model
         parsed = self._parse(method, entity)
         check_arguments(method, parsed)

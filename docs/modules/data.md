@@ -1102,10 +1102,10 @@ from pyfly.data import BaseRepositoryPostProcessor, DERIVED_PREFIXES
 **Shared behaviour:**
 - `before_init(bean, bean_name)` — Returns the bean unchanged (default no-op)
 - `after_init(bean, bean_name)` — Iterates class attributes, detects stubs, compiles derived queries
-- `_is_stub(method)` — Bytecode analysis to detect `...` or `pass` stubs
+- `_is_stub(method)` — Reads the body's shape (`pyfly.data.post_processor.is_stub`): an optional docstring, then nothing, `...`, `pass` or `raise NotImplementedError`; any other body is a hand-written method and is kept
 - `DERIVED_PREFIXES` — `("find_by_", "count_by_", "exists_by_", "delete_by_")`
 
-**Abstract hooks:**
+**Hooks** (the first three are abstract):
 
 | Method | Description |
 |--------|-------------|
@@ -1113,6 +1113,9 @@ from pyfly.data import BaseRepositoryPostProcessor, DERIVED_PREFIXES
 | `_compile_derived(parsed, entity, bean)` | Compile a parsed derived query into a callable |
 | `_wrap_derived_method(compiled_fn)` | Wrap a compiled function for binding onto the bean |
 | `_process_query_decorated(...)` | Handle decorator-based queries (default: no-op) |
+| `_implement_derived(bean, method)` | Build one derived method (default: `_parse` the name against `_properties(entity)`, check the arguments, then `_compile_derived` and `_wrap_derived_method`) |
+
+The SQLAlchemy adapter overrides `_implement_derived` to build each derived statement once per repository class. A subclass of it that overrides `_compile_derived` or `_wrap_derived_method` still has its derived methods built with those hooks.
 
 **Adapter implementations:**
 

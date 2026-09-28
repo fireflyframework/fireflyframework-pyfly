@@ -668,6 +668,47 @@ class HookedOrderRepository(SoftDeleteRepository[HookedOrder, int]):
     pass
 
 
+class HookedStubRepository(SoftDeleteRepository[HookedOrder, int]):
+    async def find_by_status(self, status: str) -> list[HookedOrder]: ...
+
+    async def delete_by_status(self, status: str) -> int: ...
+
+
+class LegacyHooksProcessor(RepositoryBeanPostProcessor):
+    """A processor written against the legacy hooks: it overrides ``_compile_derived`` and ``_wrap_derived_method``
+    only, and records when each runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    def _compile_derived(self, parsed: Any, entity: Any, bean: Any, *, return_type: Any = None) -> Any:
+        self.calls.append(f"compile {parsed.prefix}")
+        return super()._compile_derived(parsed, entity, bean, return_type=return_type)
+
+    def _wrap_derived_method(self, compiled_fn: Any) -> Any:
+        wrapped = super()._wrap_derived_method(compiled_fn)
+        calls = self.calls
+
+        async def recorded(self_arg: Any, *args: Any) -> Any:
+            calls.append("call")
+            return await wrapped(self_arg, *args)
+
+        return recorded
+
+
+class WrapOnlyProcessor(RepositoryBeanPostProcessor):
+    """A processor that overrides ``_wrap_derived_method`` alone."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wrapped = 0
+
+    def _wrap_derived_method(self, compiled_fn: Any) -> Any:
+        self.wrapped += 1
+        return super()._wrap_derived_method(compiled_fn)
+
+
 @pytest.mark.backends("sqlite-file")
 class TestLegacyHooks:
     """``_compile_derived`` and ``_wrap_derived_method`` still give a working method, for the repository the call is
@@ -686,6 +727,31 @@ class TestLegacyHooks:
             assert await method(repo, "open") == 1
             rows = (await session.execute(text("SELECT id, deleted_at FROM pp_hooked_order ORDER BY id"))).all()
             assert [(row[0], row[1] is not None) for row in rows] == [(1, True), (2, False)]
+
+    async def test_a_processor_that_overrides_the_hooks_builds_its_methods_with_them(
+        self, relational_backend: RelationalBackend
+    ):
+        """``after_init`` builds a derived method through a subclass's ``_compile_derived`` and
+        ``_wrap_derived_method``, as it did before the processor compiled derived queries its own way: overriding
+        them is never silently bypassed."""
+        await relational_backend.create_tables(HookedOrder)
+        engine = relational_backend.create_engine()
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            session.add_all([HookedOrder(id=1, status="open"), HookedOrder(id=2, status="done")])
+            await session.flush()
+            processor = LegacyHooksProcessor()
+            repo = processor.after_init(HookedStubRepository(HookedOrder, session), "hooked")
+            assert processor.calls == ["compile find_by", "compile delete_by"]
+            assert [order.id for order in await repo.find_by_status(status="done")] == [2]
+            assert await repo.delete_by_status("open") == 1
+            assert processor.calls[2:] == ["call", "call"]
+            rows = (await session.execute(text("SELECT id, deleted_at FROM pp_hooked_order ORDER BY id"))).all()
+            assert [(row[0], row[1] is not None) for row in rows] == [(1, True), (2, False)]
+
+            wrap_only = WrapOnlyProcessor()
+            again = wrap_only.after_init(HookedStubRepository(HookedOrder, session), "hooked_again")
+            assert wrap_only.wrapped == 2
+            assert [order.id for order in await again.find_by_status("done")] == [2]
 
 
 class TestIsStub:
