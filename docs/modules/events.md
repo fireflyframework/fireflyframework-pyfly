@@ -370,7 +370,10 @@ LaraFly shape (its key order, `DATE_ATOM` timestamps), select `serialization-for
 The `postgres` and `database` providers are one bus, `DatabaseEventBus` (`PostgresEventBus` keeps the
 constructor the Postgres adapter always had): a **transactional outbox** on a datasource of the application's
 `DataSourceRegistry`, with that datasource's pool, connect arguments and dialect setup. `database` runs on any
-SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/NOTIFY as a wake-up.
+SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/NOTIFY as a wake-up. In a MongoDB
+application (`pyfly.eda.outbox.store: mongo`, or `auto` without a relational datasource) the `database` bus keeps its
+outbox in the document database instead ([The outbox on MongoDB](#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)):
+the tables and statements below are the SQL store's, the guarantees are both stores'.
 
 - **A publish is part of the publisher's unit of work.** `publish()` writes the event into
   `pyfly_outbox_events` in the unit bound for the outbox's datasource (a short unit of its own outside one):
