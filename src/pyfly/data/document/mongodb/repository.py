@@ -400,8 +400,34 @@ class _RestoreOnRollback(TransactionSynchronizationAdapter):
     async def after_completion(self, status: CompletionStatus) -> None:
         states, self.states = self.states, {}  # a completed unit keeps no document alive
         if status is CompletionStatus.ROLLED_BACK:
-            for state in states.values():
-                state.restore()
+            failure = _restore(states.values())
+            if failure is not None:
+                raise failure  # logged and counted by the unit, as any synchronization failure
+
+
+def _restore(states: Iterable[_DocumentState]) -> Exception | None:
+    """Give each document of *states* its state back; one that refuses it (a validator that runs on assignment)
+    does not stop the others. Returns the first failure."""
+    failure: Exception | None = None
+    for state in states:
+        try:
+            state.restore()
+        except Exception as error:  # noqa: BLE001 — every document gets its state back; the first failure is reported
+            if failure is None:
+                failure = error
+    return failure
+
+
+def _restore_after(error: BaseException, states: Iterable[_DocumentState]) -> None:
+    """Give the documents of *states* their state back after a write failed with *error* (the error the caller
+    re-raises: a restore that fails too is logged)."""
+    failure = _restore(states)
+    if failure is not None:
+        _logger.warning(
+            "document_state_restore_failed",
+            extra={"error": type(error).__name__},
+            exc_info=(type(failure), failure, failure.__traceback__),
+        )
 
 
 def _snapshots(documents: Iterable[Any]) -> list[_DocumentState]:
@@ -930,7 +956,7 @@ class MongoRepository(Generic[T, ID]):
                 if new:
                     self._stored(document, True, fields)
                 raise
-            state.restore()
+            _restore_after(error, (state,))
             raise
         _written(unit, (state,))
         if new:
@@ -1023,8 +1049,7 @@ class MongoRepository(Generic[T, ID]):
             written = 0 if transactional else _written_before(error, len(plans))
             for entity, new, document in plans[:written]:
                 self._stored(entity, new, document)
-            for state in states[written:]:
-                state.restore()
+            _restore_after(error, states[written:])
             raise
         _written(unit, states)
         for entity, new, document in plans:

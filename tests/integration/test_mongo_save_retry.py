@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gc
+import logging
 import uuid
 import weakref
 from collections.abc import AsyncIterator
@@ -34,6 +35,7 @@ from typing import Any, ClassVar
 import pytest
 from beanie import Document, Insert, Save, after_event, before_event, init_beanie
 from beanie.odm.fields import PydanticObjectId
+from pydantic import ConfigDict, field_validator
 from pymongo import AsyncMongoClient, IndexModel, WriteConcern
 from pymongo.errors import WriteConcernError
 
@@ -384,6 +386,42 @@ async def test_a_completed_unit_keeps_no_document_alive(
     gc.collect()
     assert units[0].completed
     assert [reference() for reference in references] == [None, None, None]
+
+
+class RtGuarded(Document):
+    """A document whose id, once given, cannot be taken back (its validator runs on assignment)."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    code: str
+
+    class Settings:
+        name = "rt_guarded"
+        use_revision = True
+
+    @field_validator("id")
+    @classmethod
+    def _kept(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("an id cannot be taken back")
+        return value
+
+
+async def test_a_restore_that_fails_does_not_stop_the_others(
+    mongo_rs_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async with beanie_database(mongo_rs_url, [RtDoc, RtGuarded]) as database:
+        template = TransactionTemplate(MongoTransactionManager.for_client(database.client))
+        guarded = RtGuarded(code="g")
+        plain = RtDoc(code="p")
+        with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="rolled back"):
+            async with template.transaction():
+                await MongoRepository(RtGuarded).save(guarded)
+                await RtRepository().save(plain)
+                raise RuntimeError("rolled back")
+        _assert_new(plain)
+        assert guarded.id is not None  # its restore failed, and was logged
+        assert "an id cannot be taken back" in caplog.text
 
 
 async def test_without_a_transaction_the_documents_written_before_a_failure_stay_saved(mongo_url: str) -> None:
