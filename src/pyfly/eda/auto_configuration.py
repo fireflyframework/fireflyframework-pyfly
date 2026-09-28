@@ -66,9 +66,13 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
   framework's tables on a relational datasource, ``outbox.datasource``/``outbox.url``), ``mongo``
   (:class:`~pyfly.eda.adapters.mongo_outbox.MongoOutboxStore`: collections of the document database,
   ``pyfly.data.document.database``, on the document datasource's client and units of work; it needs the document
-  data layer and a replica set) or ``auto`` (the default: ``mongo`` when the application has a Mongo client,
-  ``pyfly.data.document.enabled``, and no relational datasource in its ``DataSourceRegistry`` nor an
-  ``outbox.datasource``/``outbox.url``, else ``sql``). The ``postgres`` provider is the SQL store on PostgreSQL.
+  data layer and a replica set; an ``outbox.datasource``/``outbox.url`` beside it raises) or ``auto`` (the default:
+  ``mongo`` when the document datasource is the default of ``@transactional``, which it is when
+  ``pyfly.data.document.enabled`` is on and ``pyfly.data.relational.enabled`` is not, unless
+  ``pyfly.data.document.transaction.default`` says otherwise, and no ``outbox.datasource``/``outbox.url`` is set;
+  else ``sql``). ``auto`` reads the configuration alone: the ``dev`` profile's SQLite fallback and a datasource
+  another store registers do not count. The store chosen is logged at INFO (``eda_outbox_store``). The
+  ``postgres`` provider is the SQL store on PostgreSQL.
 * ``outbox.forward.*`` — the forwarding relay of the transactional publisher: ``destinations`` (comma-separated;
   unset or ``*``: every destination; a publish to another destination goes to the broker after the commit),
   ``group`` (``pyfly.forward:<provider>``), ``poll-interval``, ``batch-size``, ``claim-timeout``,
@@ -99,6 +103,7 @@ dead-letter table otherwise).
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
 # must resolve return types at runtime for @bean method registration.
 
+import logging
 from typing import Any
 
 from pyfly.config.auto import AutoConfiguration
@@ -117,6 +122,8 @@ from pyfly.eda.domain_events import DomainEventPublisher
 from pyfly.eda.health import EventPublisherHealthIndicator
 from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.ports.outbox import OutboxStore
+
+_logger = logging.getLogger(__name__)
 
 
 @auto_configuration
@@ -153,7 +160,7 @@ class EdaAutoConfiguration:
         group = str(config.get("pyfly.eda.group", "pyfly-default"))
 
         if provider in ("postgres", "database"):
-            kind = self._outbox_store_kind(config, provider, container)  # a store it cannot run on fails here
+            kind = self._outbox_store_kind(config, provider)  # a store it cannot run on fails here
             return self._outbox_bus(config, provider, destinations, group, dead_letter_store, container, kind)
 
         transport = self._transport(config, provider, destinations, group, dead_letter_store)
@@ -249,24 +256,62 @@ class EdaAutoConfiguration:
         return parse_bool(raw, "pyfly.eda.outbox.enabled")
 
     @classmethod
-    def _outbox_store_kind(cls, config: Config, provider: str, container: Container | None) -> str:
-        """The outbox store ``pyfly.eda.outbox.store`` names: ``sql`` or ``mongo``; ``auto`` picks ``mongo`` when the
-        application has a Mongo client and no relational datasource, else ``sql`` (see
-        :meth:`_has_relational_datasource`). The ``postgres`` provider is the SQL store on PostgreSQL: ``mongo``
-        raises there."""
-        kind = str(config.get("pyfly.eda.outbox.store", "auto") or "auto").strip().lower()
-        if kind not in ("sql", "mongo", "auto"):
-            raise ValueError(f"pyfly.eda.outbox.store must be sql, mongo or auto, got {kind!r}")
-        if kind == "auto":
-            mongo = cls._has_mongo_client(config) and not cls._has_relational_datasource(config, provider, container)
-            kind = "mongo" if mongo else "sql"
+    def _outbox_store_kind(cls, config: Config, provider: str) -> str:
+        """The outbox store ``pyfly.eda.outbox.store`` names: ``sql`` or ``mongo``; ``auto`` picks one by
+        :meth:`_auto_outbox_store`. Logs the store chosen (``eda_outbox_store``, INFO). The ``postgres`` provider is
+        the SQL store on PostgreSQL: ``mongo`` raises there, and so does ``mongo`` beside an
+        ``outbox.datasource``/``outbox.url``, which name a relational datasource."""
+        setting = str(config.get("pyfly.eda.outbox.store", "auto") or "auto").strip().lower()
+        if setting not in ("sql", "mongo", "auto"):
+            raise ValueError(f"pyfly.eda.outbox.store must be sql, mongo or auto, got {setting!r}")
+        if setting == "auto":
+            kind, reason = cls._auto_outbox_store(config, provider)
+        else:
+            kind, reason = setting, f"pyfly.eda.outbox.store={setting}"
         if kind == "mongo" and provider == "postgres":
             raise ValueError(
                 "pyfly.eda.provider=postgres keeps the outbox in PostgreSQL (its LISTEN/NOTIFY wake-ups are the SQL "
                 "store's), so pyfly.eda.outbox.store=mongo does not apply to it: use pyfly.eda.provider=database for "
                 "the outbox bus on MongoDB, or a broker with pyfly.eda.outbox.enabled=true"
             )
+        named = cls._outbox_datasource_key(config)
+        if kind == "mongo" and named is not None:
+            raise ValueError(
+                f"pyfly.eda.outbox.store=mongo keeps the outbox in the document database, and {named} names a "
+                f"relational datasource for it: remove {named}, or set pyfly.eda.outbox.store=sql (or auto) to keep "
+                "the outbox on that datasource"
+            )
+        _logger.info("eda_outbox_store", extra={"store": kind, "setting": setting, "reason": reason})
         return kind
+
+    @classmethod
+    def _auto_outbox_store(cls, config: Config, provider: str) -> tuple[str, str]:
+        """The store ``auto`` picks, and why: ``sql`` for the ``postgres`` provider and for an
+        ``outbox.datasource``/``outbox.url``; otherwise ``mongo`` exactly when the document datasource is the default
+        of ``@transactional`` (:func:`~pyfly.config.properties.mongodb.document_is_default_datasource`: the document
+        data layer is on, and the relational one is not, unless ``pyfly.data.document.transaction.default`` says
+        otherwise), so that a publish in a plain ``@transactional`` joins that unit. It reads the configuration alone:
+        a datasource the ``DataSourceRegistry`` holds without the relational data layer (the ``dev`` profile's
+        fallback, another store's URL) does not change the answer, nor does the order the beans are built in."""
+        from pyfly.config.properties.mongodb import document_is_default_datasource
+
+        if provider == "postgres":
+            return "sql", "pyfly.eda.provider=postgres"
+        named = cls._outbox_datasource_key(config)
+        if named is not None:
+            return "sql", f"{named} is set"
+        if document_is_default_datasource(config):
+            return "mongo", "the document datasource is the default of @transactional"
+        return "sql", "the document datasource is not the default of @transactional"
+
+    @staticmethod
+    def _outbox_datasource_key(config: Config) -> str | None:
+        """``pyfly.eda.outbox.datasource`` or ``pyfly.eda.outbox.url``, whichever is set (``None``: neither)."""
+        for key in ("pyfly.eda.outbox.datasource", "pyfly.eda.outbox.url"):
+            value = config.get(key)
+            if value is not None and str(value).strip():
+                return key
+        return None
 
     @staticmethod
     def _has_mongo_client(config: Config) -> bool:
@@ -274,24 +319,6 @@ class EdaAutoConfiguration:
         auto-configuration reads ``pyfly.data.document.enabled`` (a ``pyfly.data.document.uri`` alone wires no
         client)."""
         return str(config.get("pyfly.data.document.enabled", "")).strip().lower() == "true"
-
-    @staticmethod
-    def _has_relational_datasource(config: Config, provider: str, container: Container | None) -> bool:
-        """Whether the outbox has a relational datasource to run on: always for ``postgres``; when
-        ``pyfly.eda.outbox.datasource`` or ``pyfly.eda.outbox.url`` names one; else when the context's
-        ``DataSourceRegistry`` has any datasource. The registry reads every way a datasource is configured (the
-        legacy ``pyfly.data.url``, the ``PYFLY_DATA_RELATIONAL_URL`` environment variable, the ``dev`` profile's
-        fallback, named datasources); the presence of its bean says nothing, as the datasource auto-configuration
-        registers it wherever SQLAlchemy is installed."""
-        from pyfly.data.relational.framework_schema import context_datasource_registry
-
-        if provider == "postgres":
-            return True
-        for key in ("pyfly.eda.outbox.datasource", "pyfly.eda.outbox.url"):
-            value = config.get(key)
-            if value is not None and str(value).strip():
-                return True
-        return bool(context_datasource_registry(config, container).names())
 
     @classmethod
     def _transactional(
@@ -309,7 +336,7 @@ class EdaAutoConfiguration:
         from pyfly.eda.outbox import SqlOutboxStore
         from pyfly.eda.outbox_forwarding import ForwardingSettings, TransactionalEventPublisher
 
-        kind = cls._outbox_store_kind(config, provider, container)
+        kind = cls._outbox_store_kind(config, provider)
         listener = cls._listener_settings(config)
         forwarding = ForwardingSettings.from_config(config, retry=listener.retry)
         store: OutboxStore

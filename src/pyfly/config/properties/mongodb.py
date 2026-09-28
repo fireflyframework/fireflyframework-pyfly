@@ -139,6 +139,26 @@ class DocumentProperties:
         return options
 
 
+def document_is_default_datasource(config: Config) -> bool:
+    """Whether the document datasource is the default of ``@transactional`` (a boundary that names no datasource):
+    the document data layer is on (``pyfly.data.document.enabled``) and ``pyfly.data.document.transaction.default``
+    says so, which, unset, it does when the relational data layer is not enabled (``pyfly.data.relational.enabled``).
+
+    It reads the configuration alone, never a ``DataSourceRegistry``: a datasource the registry holds without the
+    relational data layer (the ``dev`` profile's SQLite fallback, a URL another store registered, such as
+    ``pyfly.cache.postgres.url``) changes nothing, and neither does the order the beans are built in. The document
+    auto-configuration makes its datasource the default by this rule, and ``pyfly.eda.outbox.store=auto`` picks the
+    MongoDB outbox store by it, so the outbox and a plain ``@transactional`` run on one database.
+    """
+    if str(config.get(f"{PREFIX}.enabled", "")).strip().lower() != "true":
+        return False
+    default = DocumentProperties.from_config(config).transaction.default
+    if default is not None:
+        return bool(default)
+    relational = str(config.get("pyfly.data.relational.enabled", "false")).strip().lower()
+    return relational not in ("true", "1", "yes", "on")
+
+
 def _names(value: Any, key: str) -> list[str]:
     """A list of dotted names: a YAML list, or one comma-separated string (an environment variable)."""
     if value is None:

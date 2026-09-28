@@ -479,6 +479,7 @@ class TestTransactionalOutboxConfiguration:
             tmp_path,
             **{
                 "pyfly.data.document.enabled": "true",
+                "pyfly.data.relational.enabled": "true",
                 "pyfly.eda.provider": "memory",
                 "pyfly.eda.outbox.enabled": "true",
                 "pyfly.eda.outbox.store": "AUTO",
@@ -486,15 +487,21 @@ class TestTransactionalOutboxConfiguration:
         )
         assert isinstance(EdaAutoConfiguration().event_publisher(both).store, SqlOutboxStore)  # type: ignore[attr-defined]
 
-    def test_auto_sees_every_relational_datasource_the_registry_has(self, tmp_path: Path, monkeypatch: Any) -> None:
-        """The relational datasource is the registry's, however it is configured: the legacy ``pyfly.data.url``
-        alias, the ``PYFLY_DATA_RELATIONAL_URL`` environment variable, or a named datasource. An application with
-        one of them and a Mongo client stays on the SQL store it had."""
+    def test_auto_keeps_the_relational_layers_sql_store_however_its_url_is_configured(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """With the relational data layer on beside the document one, the store is the SQL one on the registry's
+        primary, however its URL is configured: the legacy ``pyfly.data.url`` alias, the ``PYFLY_DATA_RELATIONAL_URL``
+        environment variable; an ``outbox.datasource`` names another datasource of the registry."""
         import pytest
 
         from pyfly.eda.adapters.database import DatabaseEventBus
 
-        document = {"pyfly.data.document.enabled": "true", "pyfly.eda.provider": "database"}
+        document = {
+            "pyfly.data.document.enabled": "true",
+            "pyfly.data.relational.enabled": "true",
+            "pyfly.eda.provider": "database",
+        }
         legacy = pyfly_config(base={**document, "pyfly.data.url": f"sqlite+aiosqlite:///{tmp_path / 'legacy.db'}"})
         bus = EdaAutoConfiguration().event_publisher(legacy)
         assert type(bus) is DatabaseEventBus
@@ -617,6 +624,7 @@ class TestAutoOutboxStoreInAnApplicationContext:
             {
                 "pyfly.data.document.enabled": "true",
                 "pyfly.data.document.uri": "mongodb://localhost:1",
+                "pyfly.data.relational.enabled": "true",
                 "pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
                 "pyfly.eda.provider": "memory",
                 "pyfly.eda.outbox.enabled": "true",
@@ -654,3 +662,147 @@ class TestAutoOutboxStoreInAnApplicationContext:
         publisher = EdaAutoConfiguration().event_publisher(config)
         assert getattr(publisher, "joins_transactions", False) is True
         assert EdaCommandEventPublisher(publisher).joins_transactions is True
+
+
+# -- pyfly.eda.outbox.store=auto: one rule, the default @transactional datasource's -------------------------------
+
+
+async def _default_transaction_datasource(config: Any) -> str:
+    """The datasource a plain ``@transactional`` runs on in an application of *config* with the document layer on:
+    what the document auto-configuration's registration makes the default of the context's managers."""
+    from pyfly.data.document.auto_configuration import DocumentAutoConfiguration
+    from pyfly.data.transaction.registry import TransactionManagerRegistry
+
+    registry = TransactionManagerRegistry()
+    manager = MagicMock(datasource="document")
+    registration = DocumentAutoConfiguration().mongo_transaction_manager_registration(
+        config, manager, MagicMock(get=lambda: registry)
+    )
+    await registration.start()
+    try:
+        return registry.default_name
+    finally:
+        await registration.stop()
+
+
+class TestAutoOutboxStoreRule:
+    """``auto`` picks the Mongo store exactly when the document datasource is the default of ``@transactional``, from
+    the configuration alone: the outbox and a plain ``@transactional`` never land on two databases, whatever the
+    ``DataSourceRegistry`` holds and whichever bean was built first."""
+
+    @staticmethod
+    def _store(values: dict[str, object], provider: str = "memory") -> Any:
+        config = pyfly_config(base={**values, "pyfly.eda.provider": provider, "pyfly.eda.outbox.enabled": "true"})
+        publisher = EdaAutoConfiguration().event_publisher(config)
+        return publisher.outbox if provider == "database" else publisher.store  # type: ignore[attr-defined]
+
+    async def test_auto_agrees_with_the_default_transaction_manager(self, tmp_path: Path) -> None:
+        from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
+        from pyfly.eda.outbox import SqlOutboxStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+        document = {"pyfly.data.document.enabled": "true"}
+        cases: list[tuple[str, dict[str, object], str]] = [
+            ("document-only", {}, "mongo"),
+            ("document-only, dev profile", {"pyfly.profiles.active": "dev"}, "mongo"),
+            ("relational URL without the relational layer", {"pyfly.data.relational.url": url}, "mongo"),
+            ("legacy URL without the relational layer", {"pyfly.data.url": url}, "mongo"),
+            ("polyglot", {"pyfly.data.relational.enabled": "true", "pyfly.data.relational.url": url}, "sql"),
+            (
+                "polyglot, the document datasource made the default",
+                {
+                    "pyfly.data.relational.enabled": "true",
+                    "pyfly.data.relational.url": url,
+                    "pyfly.data.document.transaction.default": "true",
+                },
+                "mongo",
+            ),
+            (
+                "document-only, the document datasource not the default",
+                {"pyfly.data.relational.url": url, "pyfly.data.document.transaction.default": "false"},
+                "sql",
+            ),
+        ]
+        for label, values, expected in cases:
+            config = {**document, **values}
+            default = await _default_transaction_datasource(pyfly_config(base=config))
+            assert default == ("document" if expected == "mongo" else "primary"), label
+            for provider in ("memory", "database"):
+                store = self._store(config, provider)
+                kind = MongoOutboxStore if expected == "mongo" else SqlOutboxStore
+                assert isinstance(store, kind), (label, provider, type(store).__name__)
+
+    def test_relational_only_applications_get_the_sql_store(self, tmp_path: Path) -> None:
+        from pyfly.eda.outbox import SqlOutboxStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+        for values in (
+            {"pyfly.data.relational.enabled": "true", "pyfly.data.relational.url": url},
+            {"pyfly.data.relational.url": url},
+        ):
+            assert isinstance(self._store(values), SqlOutboxStore), values
+
+    def test_another_stores_datasource_does_not_flip_auto(self, tmp_path: Path) -> None:
+        """A datasource another framework store registered in the registry (the PostgreSQL cache's
+        ``pyfly.cache.postgres.url`` alias, here) is no relational data layer: auto answers the same before and after
+        it is registered, so the order the beans are built in does not matter."""
+        from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
+
+        cache_url = f"sqlite+aiosqlite:///{tmp_path / 'cache.db'}"
+        values: dict[str, object] = {"pyfly.data.document.enabled": "true", "pyfly.cache.postgres.url": cache_url}
+        config = pyfly_config(base={**values, "pyfly.eda.provider": "memory", "pyfly.eda.outbox.enabled": "true"})
+        before = EdaAutoConfiguration().event_publisher(config).store  # type: ignore[attr-defined]
+        DataSourceRegistry.for_config(config).resolve(cache_url, name="cache", url_key="pyfly.cache.postgres.url")
+        assert DataSourceRegistry.for_config(config).names()
+        after = EdaAutoConfiguration().event_publisher(config).store  # type: ignore[attr-defined]
+        assert isinstance(before, MongoOutboxStore)
+        assert isinstance(after, MongoOutboxStore)
+
+    def test_an_outbox_datasource_keeps_auto_on_the_sql_store(self, tmp_path: Path) -> None:
+        from pyfly.eda.outbox import SqlOutboxStore
+
+        values: dict[str, object] = {
+            "pyfly.data.document.enabled": "true",
+            "pyfly.data.relational.datasources.main.url": f"sqlite+aiosqlite:///{tmp_path / 'main.db'}",
+            "pyfly.eda.outbox.datasource": "main",
+        }
+        assert isinstance(self._store(values), SqlOutboxStore)
+        url_values: dict[str, object] = {
+            "pyfly.data.document.enabled": "true",
+            "pyfly.eda.outbox.url": f"sqlite+aiosqlite:///{tmp_path / 'outbox.db'}",
+        }
+        assert isinstance(self._store(url_values), SqlOutboxStore)
+
+    def test_the_mongo_store_refuses_an_outbox_datasource(self, tmp_path: Path) -> None:
+        import pytest
+
+        for key, value in (
+            ("pyfly.eda.outbox.datasource", "main"),
+            ("pyfly.eda.outbox.url", f"sqlite+aiosqlite:///{tmp_path / 'outbox.db'}"),
+        ):
+            for provider in ("memory", "database"):
+                values: dict[str, object] = {
+                    "pyfly.data.document.enabled": "true",
+                    "pyfly.eda.outbox.store": "mongo",
+                    key: value,
+                }
+                with pytest.raises(ValueError, match=rf"pyfly\.eda\.outbox\.store=mongo.*{key.replace('.', r'\.')}"):
+                    self._store(values, provider)
+
+    def test_the_chosen_store_is_logged_once(self, caplog: Any, tmp_path: Path) -> None:
+        import logging
+
+        caplog.set_level(logging.INFO, logger="pyfly.eda.auto_configuration")
+        for values, provider, store in (
+            ({"pyfly.data.document.enabled": "true"}, "memory", "mongo"),
+            ({"pyfly.data.document.enabled": "true"}, "database", "mongo"),
+            ({"pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"}, "database", "sql"),
+        ):
+            caplog.clear()
+            self._store(values, provider)
+            records = [r for r in caplog.records if r.getMessage() == "eda_outbox_store"]
+            assert len(records) == 1, (values, provider)
+            assert records[0].levelno == logging.INFO
+            assert records[0].store == store  # type: ignore[attr-defined]
+            assert records[0].setting == "auto"  # type: ignore[attr-defined]
+            assert records[0].reason  # type: ignore[attr-defined]

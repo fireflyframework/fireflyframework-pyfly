@@ -45,7 +45,7 @@ try:
 except ImportError:
     AsyncMongoClient = object  # type: ignore[misc,assignment]
 
-from pyfly.config.properties.mongodb import DocumentProperties
+from pyfly.config.properties.mongodb import DocumentProperties, document_is_default_datasource
 from pyfly.container.bean import bean
 from pyfly.container.container import Container
 from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError, NoUniqueBeanError
@@ -205,10 +205,6 @@ def _uncompiled_query_methods(bean: Any) -> list[str]:
     ]
 
 
-def _relational_enabled(config: Config) -> bool:
-    return str(config.get("pyfly.data.relational.enabled", "false")).strip().lower() in ("true", "1", "yes", "on")
-
-
 @auto_configuration
 @conditional_on_class("beanie")
 class DocumentAutoConfiguration:
@@ -283,15 +279,12 @@ class DocumentAutoConfiguration:
         transaction_managers: Provider[TransactionManagerRegistry] | None = None,
         metrics: Provider[MetricsRegistry] | None = None,
     ) -> MongoTransactionManagerRegistration:
-        """Registers the manager in the context's transaction managers while the context runs."""
-        properties = DocumentProperties.from_config(config)
-        default = properties.transaction.default
-        if default is None:
-            default = not _relational_enabled(config)
+        """Registers the manager in the context's transaction managers while the context runs, as their default
+        when :func:`~pyfly.config.properties.mongodb.document_is_default_datasource` says so."""
         return MongoTransactionManagerRegistration(
             mongo_transaction_manager,
             _lookup(transaction_managers),
-            default=default,
+            default=document_is_default_datasource(config),
             metrics=_lookup(metrics),
         )
 
