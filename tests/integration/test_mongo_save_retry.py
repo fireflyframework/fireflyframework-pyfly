@@ -41,7 +41,7 @@ from pymongo.errors import WriteConcernError
 
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
-from pyfly.data.transaction import Propagation, TransactionTemplate
+from pyfly.data.transaction import CommitOutcomeUnknownError, Propagation, TransactionTemplate
 from pyfly.data.transaction.synchronization import TransactionPhase, on_phase
 from pyfly.kernel.exceptions import ConcurrencyException, DuplicateKeyException, OptimisticLockingFailureException
 from tests.support.mongo import BeanieDatabase, beanie_database
@@ -365,6 +365,43 @@ async def test_a_new_document_whose_write_concern_fails_keeps_the_id_it_was_stor
     finally:
         await client.drop_database(name)
         await client.close()
+
+
+async def test_a_write_concern_failure_at_commit_keeps_what_the_transaction_stored(mongo_rs_url: str) -> None:
+    """``w: 2`` for the client on the one-member replica set: a transaction's writes are applied, and its commit's
+    write concern fails (``UnsatisfiableWriteConcern``, which pymongo does not label an unknown commit result). The
+    commit may have applied, so the boundary raises ``CommitOutcomeUnknownError`` and the documents keep the ids and
+    revisions they were written with: a retry updates them, never inserts them a second time."""
+    client: AsyncMongoClient[Any] = AsyncMongoClient(mongo_rs_url, w=2, wtimeoutMS=500)
+    name = f"pyfly_t_{uuid.uuid4().hex[:12]}"
+    try:
+        await init_beanie(database=client[name], document_models=[RtUnacknowledged])
+        repository: MongoRepository[RtUnacknowledged, str] = MongoRepository(RtUnacknowledged)
+        collection = client[name]["rt_unacknowledged"]
+
+        first = RtUnacknowledged(code="a")
+        with pytest.raises(CommitOutcomeUnknownError):
+            await repository.save_all([first])  # outside a unit: its own transaction
+        assert first.id is not None and await collection.count_documents({}) == 1
+        stored = await RtUnacknowledged.get(PydanticObjectId(first.id))
+        assert stored is not None and stored.revision_id == first.revision_id
+        with pytest.raises(CommitOutcomeUnknownError):
+            await repository.save_all([first])
+        assert await collection.count_documents({}) == 1
+
+        second = RtUnacknowledged(code="b")
+        with pytest.raises(CommitOutcomeUnknownError):
+            async with TransactionTemplate(MongoTransactionManager.for_client(client)).transaction():
+                await repository.save(second)
+        assert second.id is not None
+        stored = await RtUnacknowledged.get(PydanticObjectId(second.id))
+        assert stored is not None and stored.revision_id == second.revision_id
+        assert await collection.count_documents({}) == 2
+    finally:
+        await client.close()
+        cleaner: AsyncMongoClient[Any] = AsyncMongoClient(mongo_rs_url)  # dropDatabase takes the write concern too
+        await cleaner.drop_database(name)
+        await cleaner.close()
 
 
 @pytest.mark.parametrize("fail", [False, True], ids=["committed", "rolled-back"])

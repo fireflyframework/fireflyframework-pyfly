@@ -37,7 +37,9 @@ A write concern failure (pymongo's ``WriteConcernError``, ``WTimeoutError``: the
 the members the write concern asks for did not acknowledge it in time) is not translated, as the relational
 translator leaves a connection failure: nothing is wrong with the data, no kernel exception means "applied, not
 acknowledged", and a rule that names the driver's exception keeps working. The repository keeps a new document
-that such a write stored with the id and revision it was stored with.
+that such a write stored with the id and revision it was stored with. In a transaction the commit carries the write
+concern, and :class:`~pyfly.data.document.mongodb.transaction_manager.MongoTransactionManager` raises its failure as
+a :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`.
 """
 
 from __future__ import annotations

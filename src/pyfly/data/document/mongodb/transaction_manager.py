@@ -36,7 +36,8 @@ propagation (``REQUIRED``, ``REQUIRES_NEW``, ``SUPPORTS``,
 - **Failures.** MongoDB aborts a transaction as soon as one of its commands fails, so every driver error in
   a transactional unit marks it rollback-only: a caught duplicate key cannot commit the rest
   (:class:`~pyfly.data.transaction.errors.UnexpectedRollbackError` at the boundary). A commit whose outcome
-  the driver cannot know (the ``UnknownTransactionCommitResult`` label, after pymongo's own retry) raises
+  the driver cannot know (the ``UnknownTransactionCommitResult`` label, after pymongo's own retry, or a write
+  concern failure: the commit may have applied) raises
   :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`. Importing this module registers the
   translator of :mod:`~pyfly.data.document.mongodb.exception_translation`, so a commit failure leaves the
   boundary as the kernel's exception (a write conflict as a transient ``ConcurrencyException``) even in an
@@ -66,7 +67,7 @@ from typing import Any, cast
 
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
-from pymongo.errors import AutoReconnect, PyMongoError, ServerSelectionTimeoutError
+from pymongo.errors import AutoReconnect, PyMongoError, ServerSelectionTimeoutError, WriteConcernError
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
@@ -311,14 +312,17 @@ class MongoTransactionManager:
 
     async def commit(self, unit: UnitOfWork) -> None:
         """``commitTransaction`` (nothing for a unit without a transaction). A commit whose outcome is unknown
-        raises :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`."""
+        raises :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`: one labeled
+        ``UnknownTransactionCommitResult``, and any write concern failure (the commit may have applied, and only
+        its acknowledgment failed; pymongo labels a timeout, not ``UnsatisfiableWriteConcern`` or an unknown
+        ``w`` tag)."""
         if not in_transaction(unit):
             return
         session: AsyncClientSession = unit.resource
         try:
             await session.commit_transaction()
         except PyMongoError as error:
-            if error.has_error_label("UnknownTransactionCommitResult"):
+            if isinstance(error, WriteConcernError) or error.has_error_label("UnknownTransactionCommitResult"):
                 raise CommitOutcomeUnknownError(
                     f"The commit of {unit.describe()} failed with an unknown outcome ({type(error).__name__}); the "
                     "transaction may or may not have committed. Do not retry it blindly.",
