@@ -938,6 +938,33 @@ class TestDerivedMethodsAreCheckedAtStartup:
         Tracing().after_init(second, "second")
         assert set(built) == {id(first), id(second)}
 
+    @pytest.mark.parametrize("how", ["subclass", "instance"])
+    def test_a_processor_with_a_compiler_of_its_own_compiles_with_it(
+        self, processor: RepositoryBeanPostProcessor, how: str
+    ):
+        """The derived queries another processor compiled for the same repository class are not reused by a
+        processor whose compiler is its own, set by its class or on the instance."""
+        processor.after_init(_Valid(CheckedItem), "default")  # compiles _Valid's derived queries
+        compiled: list[str] = []
+
+        class Recording(QueryMethodCompiler):
+            def compile(self, parsed: Any, entity: Any, **kwargs: Any) -> Any:
+                compiled.append(parsed.prefix)
+                return super().compile(parsed, entity, **kwargs)
+
+        class OwnCompiler(RepositoryBeanPostProcessor):
+            def __init__(self) -> None:
+                super().__init__()
+                self._query_compiler = Recording()
+
+        custom = OwnCompiler() if how == "subclass" else RepositoryBeanPostProcessor()
+        custom._query_compiler = Recording()
+        custom.after_init(_Valid(CheckedItem), "custom")
+        assert sorted(compiled) == ["count_by", "delete_by", "exists_by", *["find_by"] * 5]
+        compiled.clear()
+        processor.after_init(_Valid(CheckedItem), "default again")  # the default processor's plan, untouched
+        assert compiled == []
+
 
 def _counted(function: Any, calls: list[str], name: str) -> Any:
     """*function*, recording *name* in *calls* each time it runs."""

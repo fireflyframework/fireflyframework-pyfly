@@ -31,9 +31,12 @@ from pyfly.data.transaction.registry import TransactionManagerRegistry
 
 _READ_FLAG = "__pyfly_read_operation__"
 
-_COMPILED: weakref.WeakKeyDictionary[type, dict[tuple[type, str], DerivedQuery]] = weakref.WeakKeyDictionary()
-"""The derived queries compiled per repository class, by entity and method name, for a post-processor that
-builds its methods its own way (the others reuse the whole method, :meth:`_shares_implementations`)."""
+_CompiledKey = tuple[type, type, Any, str]
+
+_COMPILED: weakref.WeakKeyDictionary[type, dict[_CompiledKey, DerivedQuery]] = weakref.WeakKeyDictionary()
+"""The derived queries compiled per repository class, by the post-processor's class, its compiler's class, the
+entity and the method name, for a post-processor that builds its methods its own way (the others reuse the whole
+method, :meth:`_shares_implementations`): a processor never reuses a query another one's hooks compiled."""
 
 _COMPILED_LOCK = threading.Lock()
 
@@ -92,12 +95,16 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         return resolved
 
     def _shares_implementations(self) -> bool:
-        """True unless a subclass overrides how methods are built: the methods this class builds read the
-        repository they are called on (its session, unit of work, criteria read on every call) and capture
-        nothing of the instance they were built for, so a repository class's methods are built once, for its
-        first instance, and bound to every later one."""
+        """True unless a subclass overrides how methods are built, or the processor has a compiler or an executor
+        of its own: the methods this class builds read the repository they are called on (its session, unit of
+        work, criteria read on every call) and capture nothing of the instance they were built for, so a
+        repository class's methods are built once, for its first instance, and bound to every later one."""
         cls = type(self)
-        return all(getattr(cls, hook) is getattr(RepositoryBeanPostProcessor, hook) for hook in _IMPLEMENTATION_HOOKS)
+        return (
+            type(self._query_compiler) is QueryMethodCompiler
+            and type(self._query_executor) is QueryExecutor
+            and all(getattr(cls, hook) is getattr(RepositoryBeanPostProcessor, hook) for hook in _IMPLEMENTATION_HOOKS)
+        )
 
     def after_init(self, bean: Any, bean_name: str) -> Any:
         """Compile the query methods, and bind the transaction managers of the context."""
@@ -156,7 +163,7 @@ class RepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
 
     def _derived_query(self, bean: Any, method: QueryMethod, parsed: ParsedQuery) -> DerivedQuery:
         cls = type(bean)
-        key = (bean._model, method.name)
+        key: _CompiledKey = (type(self), type(self._query_compiler), bean._model, method.name)
         with _COMPILED_LOCK:
             compiled = _COMPILED.setdefault(cls, {})
             query = compiled.get(key)
