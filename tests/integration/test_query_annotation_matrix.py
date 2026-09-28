@@ -24,11 +24,15 @@
   ``EXISTS`` subquery returns a list, scalars, rows and projections come back as declared, ``@modifying``
   statements return their row count (after a ``WITH`` clause too), a statement that is not a plain ``SELECT``
   runs in a write unit, and arguments bind by position or keyword (``?1`` in JPQL too).
+- ``IN (:name)`` binds a collection by its elements, and any other value (a string, a number, a UUID, ``None``)
+  as a list of one: ``"AB"`` matches the code ``AB``, never ``A`` and ``B`` letter by letter, in a ``SELECT``
+  and in a ``@modifying`` ``DELETE`` alike.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -518,6 +522,120 @@ async def test_arguments_bind_by_position_keyword_and_jpql_position(relational_b
         assert found is not None and found.id == 3
         assert _ids(await authors.find_ids([4, 1, 9])) == [1, 4]
         assert await authors.find_ids([]) == []
+
+
+class QaCode(Base):
+    """Codes that are one another's letters (``A``, ``B``, ``AB``): a string bound letter by letter matches
+    the wrong rows."""
+
+    __tablename__ = "qa_code"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    code: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    token: Mapped[uuid.UUID] = mapped_column(Uuid)
+
+
+class CodeRepository(Repository[QaCode, int]):
+    @query("SELECT c.id FROM QaCode c WHERE c.code IN (:codes) ORDER BY c.id")
+    async def coded(self, codes: str | Iterable[str] | None) -> list[int]: ...
+
+    @query("SELECT id FROM qa_code WHERE code IN (:codes) ORDER BY id", native=True)
+    async def native_coded(self, codes: str | Iterable[str] | None) -> list[int]: ...
+
+    @query("SELECT c.id FROM QaCode c WHERE c.code IN (?1) ORDER BY c.id")
+    async def coded_at(self, codes: str | Iterable[str] | None) -> list[int]: ...
+
+    @query("SELECT c FROM QaCode c WHERE c.id IN :ids ORDER BY c.id")
+    async def numbered(self, ids: int | Iterable[int]) -> list[QaCode]: ...
+
+    @query("SELECT * FROM qa_code WHERE id IN (:ids) ORDER BY id", native=True)
+    async def native_numbered(self, ids: int | Iterable[int]) -> list[QaCode]: ...
+
+    @query("SELECT c.id FROM QaCode c WHERE c.token IN (:tokens) ORDER BY c.id")
+    async def tokened(self, tokens: uuid.UUID | Iterable[uuid.UUID]) -> list[int]: ...
+
+    @modifying
+    @query("DELETE FROM QaCode c WHERE c.code IN (:codes)")
+    async def discard(self, codes: str | Iterable[str] | None) -> int: ...
+
+    @modifying
+    @query("DELETE FROM qa_code WHERE code IN (:codes)", native=True)
+    async def native_discard(self, codes: str | Iterable[str] | None) -> int: ...
+
+
+async def _codes(datasources: Datasources) -> CodeRepository:
+    """Codes 1 (``A``), 2 (``B``), 3 (``AB``), 4 (``C``) and 5 (``NULL``); row *n*'s token is ``UUID(int=n)``."""
+    codes = {1: "A", 2: "B", 3: "AB", 4: "C", 5: None}
+    async with datasources.engine.begin() as conn:
+        await conn.execute(
+            insert(QaCode), [{"id": key, "code": code, "token": uuid.UUID(int=key)} for key, code in codes.items()]
+        )
+    return RepositoryBeanPostProcessor().after_init(CodeRepository(), "codes")
+
+
+async def _code_ids(datasources: Datasources) -> list[int]:
+    async with datasources.engine.connect() as conn:
+        return list((await conn.execute(select(QaCode.id).order_by(QaCode.id))).scalars().all())
+
+
+_CODE_CASES: list[tuple[str, Callable[[], Any], list[int]]] = [
+    ("a string", lambda: "AB", [3]),
+    ("a one-letter string", lambda: "A", [1]),
+    ("a list", lambda: ["A", "AB"], [1, 3]),
+    ("a tuple", lambda: ("B", "C"), [2, 4]),
+    ("a set", lambda: {"A", "C"}, [1, 4]),
+    ("a frozenset", lambda: frozenset({"AB"}), [3]),
+    ("a generator", lambda: (code for code in ("B", "AB")), [2, 3]),
+    ("an empty list", lambda: [], []),
+    ("None", lambda: None, []),  # IN (NULL): no row, not even the one whose code is NULL
+]
+"""(what is bound, a factory of it, the ids it matches); a factory, so each call gets a fresh generator."""
+
+_ID_CASES: list[tuple[str, Callable[[], Any], list[int]]] = [
+    ("an int", lambda: 3, [3]),
+    ("a list", lambda: [4, 1, 9], [1, 4]),
+    ("a tuple", lambda: (2,), [2]),
+    ("a set", lambda: {5, 2}, [2, 5]),
+    ("a frozenset", lambda: frozenset({1, 3}), [1, 3]),
+    ("a generator", lambda: (key for key in range(2, 4)), [2, 3]),
+    ("a range", lambda: range(4, 6), [4, 5]),
+]
+
+
+async def test_in_binds_a_collection_by_its_elements_and_a_single_value_as_one(
+    relational_backend: RelationalBackend,
+) -> None:
+    """``IN (:codes)`` (``IN :ids``, ``IN (?1)``) binds a collection, whichever it is, one value per element, and
+    a single value as a list of one: ``"AB"`` matches ``AB``, not ``A`` and ``B``; ``3`` matches row 3; a UUID binds
+    as ``Uuid``, as a list of UUIDs does. In JPQL and in native SQL alike."""
+    async with repository_datasources(relational_backend, QaCode) as datasources:
+        codes = await _codes(datasources)
+        for label, value, expected in _CODE_CASES:
+            for method in (codes.coded, codes.native_coded, codes.coded_at):
+                assert await method(value()) == expected, (label, method.__name__)
+        for label, value, expected in _ID_CASES:
+            for entities in (codes.numbered, codes.native_numbered):
+                assert _ids(await entities(value())) == expected, (label, entities.__name__)
+        assert await codes.tokened(uuid.UUID(int=3)) == [3]
+        assert await codes.tokened({uuid.UUID(int=4), uuid.UUID(int=1)}) == [1, 4]
+
+
+async def test_a_modifying_in_with_a_single_string_deletes_exactly_its_rows(
+    relational_backend: RelationalBackend,
+) -> None:
+    """``DELETE ... WHERE code IN (:codes)`` with ``"AB"`` deletes the row coded ``AB`` and keeps ``A`` and ``B``
+    (a string bound letter by letter deleted those two, and kept ``AB``); ``None`` deletes nothing."""
+    async with repository_datasources(relational_backend, QaCode) as datasources:
+        codes = await _codes(datasources)
+        assert await codes.discard("AB") == 1
+        assert await _code_ids(datasources) == [1, 2, 4, 5]
+        assert await codes.native_discard("B") == 1
+        assert await _code_ids(datasources) == [1, 4, 5]
+        assert await codes.discard(None) == 0
+        assert await codes.native_discard(None) == 0
+        assert await _code_ids(datasources) == [1, 4, 5]
+        assert await codes.native_discard(code for code in ("A", "C")) == 2
+        assert await _code_ids(datasources) == [5]
 
 
 async def test_modifying_statements_return_their_row_count(relational_backend: RelationalBackend) -> None:

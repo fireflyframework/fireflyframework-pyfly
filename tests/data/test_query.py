@@ -15,12 +15,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import pytest
-from sqlalchemy import Integer, String, text
+from sqlalchemy import Integer, String, Uuid, text
 from sqlalchemy.dialects import mssql, mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -31,8 +32,16 @@ from pyfly.data.query import modifying
 from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
-from pyfly.data.relational.sqlalchemy.query import QueryExecutor, _native, query, tokenize, transpile_jpql
+from pyfly.data.relational.sqlalchemy.query import (
+    QueryExecutor,
+    _native,
+    _parameter,
+    query,
+    tokenize,
+    transpile_jpql,
+)
 from pyfly.data.relational.sqlalchemy.repository import Repository
+from pyfly.data.relational.sqlalchemy.types import UtcDateTime
 from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
 # ---------------------------------------------------------------------------
@@ -533,6 +542,61 @@ class TestWhatAStatementDoes:
         by_name = {name: UUID(hex=str(key)) for key, name in items}
         compiled = executor.compile_query_method(_Statements.names_of, Item)
         assert await compiled(seeded_session, ids=kind([by_name["Bob"], by_name["Dave"]])) == ["Bob", "Dave"]
+
+
+class TestInListParameters:
+    """``IN (:name)`` binds a list: a collection (any iterable) by its elements, and any other value as a list of
+    one. A string, bytes, a mapping or ``None`` is one value, never iterated: ``"AB"`` letter by letter matched
+    the rows ``A`` and ``B``, and ``3`` could not be bound at all."""
+
+    @pytest.mark.parametrize(
+        ("value", "bound"),
+        [
+            pytest.param("AB", ["AB"], id="str"),
+            pytest.param(b"AB", [b"AB"], id="bytes"),
+            pytest.param(bytearray(b"AB"), [bytearray(b"AB")], id="bytearray"),
+            pytest.param(3, [3], id="int"),
+            pytest.param(2.5, [2.5], id="float"),
+            pytest.param(None, [None], id="None"),
+            pytest.param({"a": 1}, [{"a": 1}], id="mapping"),
+            pytest.param([1, 2], [1, 2], id="list"),
+            pytest.param((1, 2), [1, 2], id="tuple"),
+            pytest.param(range(1, 3), [1, 2], id="range"),
+            pytest.param([], [], id="empty"),
+        ],
+    )
+    def test_a_value_binds_as_a_list(self, value: Any, bound: list[Any]):
+        parameter = _parameter("x", value, expanding=True)
+        assert parameter.expanding is True
+        assert parameter.value == bound
+
+    def test_bytes_in_a_memoryview_are_one_value(self):
+        view = memoryview(b"AB")
+        assert _parameter("x", view, expanding=True).value == [view]
+
+    def test_a_set_and_a_generator_bind_their_elements(self):
+        assert sorted(_parameter("x", {2, 1}, expanding=True).value) == [1, 2]
+        assert sorted(_parameter("x", frozenset({"b", "a"}), expanding=True).value) == ["a", "b"]
+        assert _parameter("x", (n * 2 for n in (1, 2)), expanding=True).value == [2, 4]
+
+    def test_a_single_uuid_or_aware_datetime_is_typed_as_a_list_of_them_is(self):
+        key = UUID(int=7)
+        typed = _parameter("x", key, expanding=True)
+        assert typed.value == [key] and isinstance(typed.type, Uuid)
+        moment = datetime(2026, 9, 27, tzinfo=UTC)
+        typed = _parameter("x", moment, expanding=True)
+        assert typed.value == [moment] and isinstance(typed.type, UtcDateTime)
+
+    def test_a_list_is_typed_by_its_first_value_that_is_not_none(self):
+        key = UUID(int=7)
+        typed = _parameter("x", [None, key], expanding=True)
+        assert typed.value == [None, key] and isinstance(typed.type, Uuid)
+
+    def test_a_value_outside_in_binds_as_it_is(self):
+        """Only ``IN`` lists expand: ``= ANY(:ids)`` binds the list itself (a PostgreSQL array)."""
+        parameter = _parameter("x", [1, 2], expanding=False)
+        assert parameter.expanding is False and parameter.value == [1, 2]
+        assert _parameter("x", "AB", expanding=False).value == "AB"
 
 
 class TestLiteralsAsEachDialectReadsThem:

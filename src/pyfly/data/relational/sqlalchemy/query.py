@@ -70,9 +70,12 @@ before one.
 
 **Arguments** bind by name (``:name``, a parameter of the method) and, in JPQL, by position (``?1`` is the first
 parameter after ``self``); the method takes them by position or by keyword. ``IN (:ids)`` (or ``IN :ids``) binds
-a collection (a list, a tuple, a set...), one value per element. A ``UUID`` binds as SQLAlchemy's ``Uuid`` and an
-aware ``datetime`` as ``UtcDateTime`` (a collection by its elements), as entity columns of those types store them;
-other values bind as the driver takes them.
+a collection (a list, a tuple, a set, a generator...), one value per element, and any other value as a list of
+one: a string, bytes, a mapping, a number or ``None`` is one value, never iterated, so ``IN (:code)`` with ``"AB"``
+matches ``AB`` (not ``A`` and ``B``), and with ``None`` matches no row, as ``IN (NULL)`` does. A ``UUID`` binds as
+SQLAlchemy's ``Uuid`` and an aware ``datetime`` as ``UtcDateTime`` (a collection by its elements), as entity
+columns of those types store them; other values bind as the driver takes them. A parameter the query never uses
+is accepted, and binds nothing.
 
 **JPQL** (``native=False``, the default) is rewritten token by token, for the dialect the query runs on:
 
@@ -108,7 +111,7 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -951,10 +954,21 @@ def _bound(clause: Any, values: dict[str, Any], expanding: frozenset[str]) -> An
     return clause.bindparams(*(_parameter(name, value, name in expanding) for name, value in values.items()))
 
 
+_ONE_VALUE: tuple[type, ...] = (str, bytes, bytearray, memoryview, Mapping)
+"""Iterables that are one value in an ``IN`` list, never iterated: a string, binary data, a mapping."""
+
+
 def _parameter(name: str, value: Any, expanding: bool) -> Any:
-    if expanding and isinstance(value, Collection) and not isinstance(value, (str, bytes)):
-        value = list(value)  # a set binds as a list: SQLAlchemy indexes an expanding value
-    sample = value[0] if expanding and isinstance(value, list) and value else value
+    """The bind of *value* for ``:name`` (:func:`_bound`). After ``IN`` (*expanding*) it binds a list, as
+    SQLAlchemy indexes an expanding value: a collection (any iterable: a list, a tuple, a set, a generator...) by
+    its elements, and any other value, a string, bytes, a mapping or ``None`` included, as a list of one. A string
+    iterated letter by letter matched ``A`` and ``B`` for ``"AB"``; ``None`` binds ``IN (NULL)``, which matches no
+    row. A list is typed by its first value that is not ``None``."""
+    if expanding:
+        value = list(value) if isinstance(value, Iterable) and not isinstance(value, _ONE_VALUE) else [value]
+        sample = next((item for item in value if item is not None), None)
+    else:
+        sample = value
     if isinstance(sample, uuid.UUID):
         return bindparam(name, value, type_=Uuid(), expanding=expanding)
     if isinstance(sample, datetime) and sample.tzinfo is not None:
