@@ -1073,7 +1073,11 @@ result = await compositor.execute(composition, initial_inputs)
 
 The compositor executes sagas in topological order, resolves data flows
 between them, and applies the configured compensation policy if any saga
-fails.
+fails. The sagas of one layer run concurrently, and the compositor waits for
+all of them: when one fails, it compensates every saga that completed, in the
+earlier layers and in the failing layer alike. Each saga runs under a
+correlation id of its own, the composition's followed by `:` and the saga's
+name, so a persistence provider keeps the state of each saga apart.
 
 ---
 

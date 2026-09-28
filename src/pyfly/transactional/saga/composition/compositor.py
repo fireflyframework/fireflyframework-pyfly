@@ -39,7 +39,9 @@ class SagaCompositor:
     Sagas in the same DAG layer run concurrently via :func:`asyncio.gather`.
     On failure the compositor compensates every saga that completed: those of
     the earlier layers, and those of the failing layer, whichever of its
-    sagas failed.
+    sagas failed. Each saga runs under a correlation id of its own,
+    ``<composition correlation id>:<saga name>`` (:meth:`saga_correlation_id`),
+    so a persistence provider keeps each saga's state apart.
 
     Parameters
     ----------
@@ -177,5 +179,13 @@ class SagaCompositor:
             saga_name,
             input_data=resolved_input,
             headers=headers,
-            correlation_id=ctx.correlation_id,
+            correlation_id=self.saga_correlation_id(ctx.correlation_id, saga_name),
         )
+
+    @staticmethod
+    def saga_correlation_id(composition_correlation_id: str, saga_name: str) -> str:
+        """The correlation id a saga of a composition runs under: the composition's, then the saga's name.
+
+        Each saga is an execution of its own (the persistence providers key an execution's state by its
+        correlation id), and its id still names the composition it belongs to."""
+        return f"{composition_correlation_id}:{saga_name}"
