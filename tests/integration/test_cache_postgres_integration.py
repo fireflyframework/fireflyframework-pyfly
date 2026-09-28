@@ -433,7 +433,9 @@ async def test_expiry_does_not_move_with_the_process_time_zone(
             )
         ).scalars()
         seconds = [float(value) for value in remaining]
-    assert all(9 * 60 < value <= 10 * 60 for value in seconds), seconds
+    # The expiry comes from this process's clock and now() from the server's: a server clock a few milliseconds
+    # behind (a container VM's) leaves a little over ten minutes. The bug moved it by whole hours.
+    assert all(9 * 60 < value <= 10 * 60 + 5 for value in seconds), seconds
     assert await utc_node.get("shared") == "value" and await utc_node.exists("other") is True
 
 
