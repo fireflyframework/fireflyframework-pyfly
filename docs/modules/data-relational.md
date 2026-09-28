@@ -1284,8 +1284,9 @@ succeed. PyFly offers the three answers Spring does; choose one for each write p
 
 **A guarded atomic update** puts the check and the change in one statement, so two of them can never both
 take the same funds: the row lock (PostgreSQL, MySQL, MariaDB) or SQLite's single writer serializes
-them, and each evaluates its `WHERE` on the row the other one left. It needs no transaction around it: a
-call outside one runs in a write auto unit that commits.
+them, and under the default isolation level each evaluates its `WHERE` on the row the other one left
+(under `SERIALIZABLE`, PostgreSQL fails the second with a serialization error instead). It needs no
+transaction around it: a call outside one runs in a write auto unit that commits.
 
 ```python
 class AccountRepository(Repository[Account, UUID]):
