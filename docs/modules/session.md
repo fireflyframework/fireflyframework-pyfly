@@ -311,7 +311,8 @@ pyfly:
   [`SessionFilter`](#sessionfilter)). So a session a concurrent login evicted stays evicted, and so does one
   evicted or logged out while any other request of it was running. If the save or the registration fails, the
   handler invalidates the session and the filter deletes it, so no logged-in session is left that the cap does
-  not count. This needs a store that holds every session the registry
+  not count. A logout deregisters the session: the OAuth2 login handler's logout, and the generic
+  `LogoutFilter` when a controller is configured. This needs a store that holds every session the registry
   counts: beside a cross-process registry (`redis` or `postgres`), only a shared store (`store=postgres` or
   `redis`) does. With the in-memory store there, the auto-configuration does not give the store to the
   controller (it would take the other instances' live sessions for dead ones and admit logins over the cap),

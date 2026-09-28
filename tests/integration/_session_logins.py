@@ -99,7 +99,7 @@ class Replica:
         self.write_after_login = write_after_login
         self.session_filter = SessionFilter(store=store)
         self.handler = IdpStubbedHandler(principal, controller)
-        self.logout_filter = LogoutFilter()
+        self.logout_filter = LogoutFilter(concurrency=controller)
 
 
 @dataclass(frozen=True)
@@ -253,7 +253,8 @@ async def a_revoked_session_stays_revoked(replica: Replica, revocation: str) -> 
     evicted by a login of the same principal on another browser (*revocation* ``eviction``, under a cap of one
     with evict-oldest), or logged out by S1's own request, through the OAuth2 login handler's logout
     (``logout``) or the generic logout filter (``logout-filter``). When R ends, S1 must stay revoked: not in the
-    store, a later request with S1's cookie anonymous, and R's response not sending S1's cookie again."""
+    store, not registered with the concurrency controller, a later request with S1's cookie anonymous, and R's
+    response not sending S1's cookie again."""
     controller = replica.controller
     assert controller is not None
     first = await login(replica, await start_login(replica.store))
@@ -293,6 +294,8 @@ async def a_revoked_session_stays_revoked(replica: Replica, revocation: str) -> 
     r_response: Response = await asyncio.wait_for(r_task, 10)
 
     assert not await replica.store.exists(s1), f"{revocation}: the revoked session is back in the store"
+    registered = [session_id for session_id, _ in await controller.registry.list_sessions(replica.principal)]
+    assert s1 not in registered, f"{revocation}: the revoked session is still registered"
     assert await authenticated_as(replica, s1) is None, f"{revocation}: the revoked session authenticates"
     assert s1 not in session_cookies(r_response), f"{revocation}: the response sends the revoked session's cookie"
 

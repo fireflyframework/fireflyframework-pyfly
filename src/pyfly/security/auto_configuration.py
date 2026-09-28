@@ -329,14 +329,22 @@ class LogoutAutoConfiguration:
     """Auto-configures a generic logout filter (opt-in) from ``pyfly.security.logout.*``."""
 
     @bean
-    def logout_filter(self, config: Config) -> WebFilter:
+    def logout_filter(self, config: Config, container: Container) -> WebFilter:
+        from pyfly.session.concurrency import SessionConcurrencyController
         from pyfly.web.adapters.starlette.filters.logout_filter import LogoutFilter
 
+        # A logout deregisters the session from the session concurrency controller, when there is one
+        # (pyfly.session.concurrency.enabled), as the OAuth2 login handler's logout does.
+        try:
+            concurrency = container.resolve(SessionConcurrencyController)
+        except (NoSuchBeanError, NoUniqueBeanError):
+            concurrency = None
         return LogoutFilter(
             logout_url=str(config.get("pyfly.security.logout.logout-url", "/logout")),
             logout_success_url=str(config.get("pyfly.security.logout.success-url", "/login?logout")),
             delete_cookies=_csv_or_list(config.get("pyfly.security.logout.delete-cookies")),
             use_redirect=_as_bool(config.get("pyfly.security.logout.use-redirect", True)),
+            concurrency=concurrency,
         )
 
 

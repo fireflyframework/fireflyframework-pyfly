@@ -1473,7 +1473,7 @@ class X509Config:
 
 ### Logout
 
-`LogoutFilter` handles a POST to the logout URL — independent of OAuth2 — by invalidating the HTTP session, clearing the security context to anonymous, and deleting configured cookies. It runs at `HIGHEST_PRECEDENCE + 235` (after form login). With `use_redirect=True` it returns a `302` to the success URL; otherwise it returns `204 No Content`.
+`LogoutFilter` handles a POST to the logout URL — independent of OAuth2 — by invalidating the HTTP session, clearing the security context to anonymous, and deleting configured cookies. It runs at `HIGHEST_PRECEDENCE + 235` (after form login). With `use_redirect=True` it returns a `302` to the success URL; otherwise it returns `204 No Content`. Given a session concurrency controller (`concurrency=`; the auto-configuration passes the `SessionConcurrencyController` bean when `pyfly.session.concurrency.enabled=true`), it also deregisters the session, as the OAuth2 login handler's logout does, so the per-principal cap stops counting it at once.
 
 Enable config-driven logout (requires `starlette`):
 

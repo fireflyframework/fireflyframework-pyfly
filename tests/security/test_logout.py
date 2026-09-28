@@ -19,6 +19,11 @@ import pytest
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 
+from pyfly.container.container import Container
+from pyfly.core.config import Config
+from pyfly.security.auto_configuration import LogoutAutoConfiguration
+from pyfly.security.context import SecurityContext
+from pyfly.session.concurrency import ConcurrencyControlPolicy, InMemorySessionRegistry, SessionConcurrencyController
 from pyfly.session.session import HttpSession
 from pyfly.web.adapters.starlette.filters.logout_filter import LogoutFilter
 
@@ -76,3 +81,51 @@ class TestLogoutFilter:
         # The default path is no longer special.
         passed = await flt.do_filter(_post("/logout"), _call_next)
         assert passed.body == b"downstream"
+
+
+def _logged_in_post(path: str, user_id: str, session_id: str) -> Request:
+    request = Request({"type": "http", "method": "POST", "path": path, "headers": [], "query_string": b""})
+    session = HttpSession(session_id, {})
+    session.set_attribute("SECURITY_CONTEXT", SecurityContext(user_id=user_id))
+    request.state.session = session
+    return request
+
+
+def _controller() -> SessionConcurrencyController:
+    return SessionConcurrencyController(InMemorySessionRegistry(), ConcurrencyControlPolicy(max_sessions=1))
+
+
+class TestLogoutDeregistersTheSession:
+    """The OAuth2 login handler's logout deregistered the session from the concurrency controller; this filter
+    did not, so the registration of a logged-out session stayed until the controller dropped it as dead, or,
+    beside a controller with no session store to check, counted toward the cap until evicted."""
+
+    @pytest.mark.asyncio
+    async def test_logout_deregisters_the_session_with_the_controller(self) -> None:
+        controller = _controller()
+        assert await controller.on_login("ada", "sid", 1.0)
+
+        await LogoutFilter(concurrency=controller).do_filter(_logged_in_post("/logout", "ada", "sid"), _call_next)
+
+        assert await controller.registry.count("ada") == 0
+
+    @pytest.mark.asyncio
+    async def test_the_auto_configured_filter_uses_the_controller_bean(self) -> None:
+        controller = _controller()
+        container = Container()
+        container.register_instance(SessionConcurrencyController, controller)
+        assert await controller.on_login("ada", "sid", 1.0)
+        logout_filter = LogoutAutoConfiguration().logout_filter(Config({}), container)
+
+        await logout_filter.do_filter(_logged_in_post("/logout", "ada", "sid"), _call_next)
+
+        assert await controller.registry.count("ada") == 0
+
+    @pytest.mark.asyncio
+    async def test_without_a_controller_bean_the_logout_still_invalidates(self) -> None:
+        logout_filter = LogoutAutoConfiguration().logout_filter(Config({}), Container())
+        request = _logged_in_post("/logout", "ada", "sid")
+
+        response = await logout_filter.do_filter(request, _call_next)
+
+        assert response.status_code == 302 and request.state.session.invalidated
