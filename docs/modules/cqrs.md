@@ -783,7 +783,8 @@ command's unit of work commits**: through an `after_commit` synchronization
 (at once when the command runs outside a unit of work), so a wider unit that
 fails after the command publishes nothing. A publisher that joins transactions
 (`joins_transactions`: an `EdaCommandEventPublisher` over the `postgres` or
-`database` outbox bus) publishes at once instead, inside the unit, which
+`database` outbox bus, or over any provider with `pyfly.eda.outbox.enabled`)
+publishes at once instead, inside the unit, which
 commits or rolls back the events with it. That takes a unit that is still open
 when the bus publishes, on the outbox's datasource: a wider unit around the
 `send()` (a `@transactional` caller). A handler whose own `@transactional`
