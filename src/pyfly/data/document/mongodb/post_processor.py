@@ -126,7 +126,8 @@ class MongoRepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
         derived.__doc__ = method.function.__doc__
         derived.__module__ = method.function.__module__
         if parsed.prefix == "delete_by":
-            return repository_operation(derived, read=False, atomic=True, single=deletes_in_one_command)
+            # A derived delete runs the delete event actions (user code): the guard is taken per command only.
+            return repository_operation(derived, read=False, atomic=False, single=deletes_in_one_command)
         return repository_operation(derived, read=True, atomic=True)
 
     def _compile_derived(self, parsed: Any, entity: Any, bean: Any, *, return_type: Any = None) -> Any:
@@ -144,7 +145,7 @@ class MongoRepositoryBeanPostProcessor(BaseRepositoryPostProcessor):
             return await compiled_fn(self_arg._model, *args)
 
         read = not isinstance(compiled_fn, MongoDerivedQuery) or compiled_fn.parsed.prefix != "delete_by"
-        return repository_operation(wrapper, read=read, atomic=True)
+        return repository_operation(wrapper, read=read, atomic=read)
 
     def _process_query_decorated(self, bean: Any, cls: type, attr_name: str, attr: Any, entity: Any) -> bool:
         """Compile a ``@query`` method into a repository operation that binds its arguments by the stub's

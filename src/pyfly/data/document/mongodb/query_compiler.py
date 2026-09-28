@@ -196,7 +196,8 @@ class MongoDerivedQuery:
         from pyfly.data.document.mongodb.repository import repository_operation
 
         read = self.parsed.prefix != "delete_by"
-        return await repository_operation(execute, read=read, atomic=True)(repository)
+        # A delete runs the delete event actions (user code): the guard is taken per command only.
+        return await repository_operation(execute, read=read, atomic=read)(repository)
 
 
 async def _raw_rows(

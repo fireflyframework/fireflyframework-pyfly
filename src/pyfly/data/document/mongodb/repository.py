@@ -31,13 +31,22 @@ runs in an **operation scope**, as the relational repository's calls do:
   runs without one: MongoDB runs a command atomically on each document it touches. On a standalone server (no
   transactions) every auto unit runs without one.
 
+The operation guard is held for one driver command at a time, and never while the document's event actions
+run: Beanie's ``@before_event``/``@after_event`` and ``ValidateOnSave`` actions, and so ``BaseDocument``'s audit
+hooks and the application's ``AuditorAware``, are user code that may call repositories, and Beanie runs
+coroutine actions in ``asyncio.gather`` child tasks. The repository runs them itself around each write, in
+Beanie's order, and sends the write with ``skip_actions``. Inside a unit of work their repository calls join
+it; outside one they run in auto units of their own (the write of ``save`` or ``delete`` is one command, and an
+action's own writes are not part of it).
+
 The datasource is the one named by ``datasource=`` or the class attribute ``__datasource__``; without one it
 is the datasource of the manager that serves the client the document class is bound to (``"document"``).
 
 Spring Data semantics, at the fewest round trips:
 
 - ``save`` inserts a new document (its id is made on the client when its type allows: an ``ObjectId``, its
-  hex string for a ``str`` id, a ``UUID``) and upserts any other; ``save_all`` is one ordered ``bulk_write``
+  hex string for a ``str`` id, a ``UUID``) and saves any other as Beanie's ``save`` does (one revision-aware
+  ``findAndModify`` upsert); ``save_all`` is one ordered ``bulk_write``
   (``InsertOne`` for the new documents, a revision-aware ``UpdateOne`` for the others) that runs Beanie's
   validation, event actions and state management for each document, as ``save`` does (C039).
 - Ids are converted to the document's id type in every ``_id`` filter (C038): ``MongoRepository[Doc, str]``
@@ -169,10 +178,12 @@ def repository_operation(
 
     *read* selects an auto unit without a transaction outside a transaction, *single* a write auto unit without
     one: the method sends one command, which MongoDB runs atomically on each document it touches (a callable
-    decides from the repository the call is made on). *atomic* holds the unit's operation guard for the whole call (the
-    framework's own methods). A method decorated with ``@transactional`` opens no auto unit: its own boundary
-    provides the unit. A persistence exception leaves the call translated to the kernel's, raised from the
-    driver's, once the unit of work has seen the original.
+    decides from the repository the call is made on). *atomic* holds the unit's operation guard for the
+    whole call: the framework's own methods that run no user code (a method that runs the document's event
+    actions takes the guard for each driver command only, see the module documentation). A method decorated
+    with ``@transactional`` opens no auto unit: its own boundary provides the unit. A persistence exception
+    leaves the call translated to the kernel's, raised from the driver's, once the unit of work has seen the
+    original.
     """
     transactional = is_transactional(function)
 
@@ -212,7 +223,10 @@ def _wrap_operations(cls: type, *, atomic: bool) -> None:
             setattr(cls, name, repository_stream(attribute))
         elif inspect.iscoroutinefunction(attribute):
             single = _SINGLE_COMMAND.get(name, False) if atomic else False
-            setattr(cls, name, repository_operation(attribute, read=is_read_method(name), atomic=atomic, single=single))
+            guarded = atomic and name not in _RUNS_EVENT_ACTIONS
+            setattr(
+                cls, name, repository_operation(attribute, read=is_read_method(name), atomic=guarded, single=single)
+            )
 
 
 def _type_arguments(cls: type) -> tuple[Any, Any] | None:
@@ -251,6 +265,11 @@ def _persistable_hook(cls: type) -> Callable[[Any], bool] | None:
 def _chunks(values: Sequence[Any], size: int = IN_CHUNK) -> Iterable[list[Any]]:
     for start in range(0, len(values), size):
         yield list(values[start : start + size])
+
+
+_SKIP_ACTIONS: list[ActionDirections | str] = [ActionDirections.BEFORE, ActionDirections.AFTER]
+"""What a Beanie write sent under the operation guard skips: the repository runs the event actions itself,
+outside the guard (module documentation)."""
 
 
 async def _run_actions(entity: Any, event: EventTypes, direction: ActionDirections) -> None:
@@ -310,6 +329,12 @@ _SINGLE_COMMAND: dict[str, Single] = {
 }
 """The framework's write methods that send one command: they need no transaction outside one (a subclass's
 override of one is not assumed to)."""
+
+_RUNS_EVENT_ACTIONS: frozenset[str] = frozenset(
+    {"save", "save_all", "delete", "delete_by_id", "delete_all", "delete_all_by_id"}
+)
+"""The framework's methods that run the document's event actions: user code, so they hold the operation guard
+for each driver command only, never for the whole call (module documentation)."""
 
 
 class MongoRepository(Generic[T, ID]):
@@ -752,16 +777,45 @@ class MongoRepository(Generic[T, ID]):
             publisher.collect(entity, unit)
 
     async def save(self, entity: T) -> T:
-        """Insert a new document, or upsert one that is not new (``is_new()`` hook, else ``id is None``)."""
+        """Insert a new document, or save one that is not new (``is_new()`` hook, else ``id is None``) as Beanie's
+        ``save`` does: validation and event actions in Beanie's order, around one command (``insert``, or the
+        revision-aware ``findAndModify`` upsert of a stored document)."""
         document: Any = entity
-        async with self._operation(write=True) as session:
-            if self._is_new(document):
-                self._assign_new_id(document)
-                await document.insert(session=session)
-            else:
-                await document.save(session=session)
+        settings = self._model.get_settings()  # type: ignore[attr-defined]
+        new = self._is_new(document)
+        await _validate(document)
+        if new:
+            fields = await self._before_insert(document, settings)
+            async with self._operation(write=True) as session:
+                result = await self._collection().insert_one(fields, session=session)
+            if document.id is None:
+                document.id = _as_id(self._model, result.inserted_id)
+            document._save_state()
+            await _run_actions(document, EventTypes.INSERT, ActionDirections.AFTER)
+        else:
+            await _run_actions(document, EventTypes.SAVE, ActionDirections.BEFORE)
+            await _run_actions(document, EventTypes.UPDATE, ActionDirections.BEFORE)
+            changes: list[dict[str, Any]] = [{"$set": get_dict(document, to_db=True, keep_nulls=settings.keep_nulls)}]
+            if not settings.keep_nulls:
+                nones = get_top_level_nones(document)
+                if nones:
+                    changes.append({"$unset": dict.fromkeys(nones, "")})
+            async with self._operation(write=True) as session:
+                # Beanie's update of a stored document (its revision check and state), without its actions.
+                await document.update(*changes, session=session, upsert=True, skip_actions=_SKIP_ACTIONS)
+            await _run_actions(document, EventTypes.UPDATE, ActionDirections.AFTER)
+            await _run_actions(document, EventTypes.SAVE, ActionDirections.AFTER)
         self._collect_events((document,))
         return entity
+
+    async def _before_insert(self, entity: Any, settings: Any) -> dict[str, Any]:
+        """Ready a new document for its insert: its id made on the client, its insert actions run, a revision
+        given; returns the fields to insert."""
+        self._assign_new_id(entity)
+        await _run_actions(entity, EventTypes.INSERT, ActionDirections.BEFORE)
+        if settings.use_revision:
+            entity.revision_id = uuid.uuid4()
+        return cast(dict[str, Any], get_dict(entity, to_db=True, keep_nulls=settings.keep_nulls))
 
     async def save_all(self, entities: Iterable[T]) -> list[T]:
         """Persist *entities* with one ordered ``bulk_write`` (module documentation): validation, event actions,
@@ -781,11 +835,7 @@ class MongoRepository(Generic[T, ID]):
             new = self._is_new(entity)
             await _validate(entity)
             if new:
-                self._assign_new_id(entity)
-                await _run_actions(entity, EventTypes.INSERT, ActionDirections.BEFORE)
-                if settings.use_revision:
-                    entity.revision_id = uuid.uuid4()
-                document = get_dict(entity, to_db=True, keep_nulls=settings.keep_nulls)
+                document = await self._before_insert(entity, settings)
                 operations.append(InsertOne(document))
             else:
                 await _run_actions(entity, EventTypes.SAVE, ActionDirections.BEFORE)
@@ -829,8 +879,14 @@ class MongoRepository(Generic[T, ID]):
 
     async def delete(self, entity: T) -> None:
         """Delete a document instance (its delete event actions run)."""
+        await self._delete_document(entity)
+
+    async def _delete_document(self, entity: Any) -> None:
+        """Beanie's ``delete`` of *entity*: its delete actions, outside the guard, around one ``delete``."""
+        await _run_actions(entity, EventTypes.DELETE, ActionDirections.BEFORE)
         async with self._operation(write=True) as session:
-            await entity.delete(session=session)  # type: ignore[attr-defined]
+            await entity.delete(session=session, skip_actions=_SKIP_ACTIONS)
+        await _run_actions(entity, EventTypes.DELETE, ActionDirections.AFTER)
 
     async def delete_by_id(self, id: ID) -> None:
         """Delete the document with this id (``delete_one``; with delete event actions, load and delete it)."""
@@ -856,8 +912,7 @@ class MongoRepository(Generic[T, ID]):
             return
         if _has_delete_actions(self._model):
             for entity in items:
-                async with self._operation(write=True) as session:
-                    await entity.delete(session=session)
+                await self._delete_document(entity)
             return
         for chunk in _chunks([entity.id for entity in items if entity.id is not None]):
             await self._delete_where({ID_FIELD: {"$in": chunk}}, many=True, actions=False)
@@ -882,8 +937,7 @@ class MongoRepository(Generic[T, ID]):
         if actions and _has_delete_actions(self._model):
             documents = await self._find(filter_document, limit=None if many else 1)
             for document in documents:
-                async with self._operation(write=True) as session:
-                    await document.delete(session=session)  # type: ignore[attr-defined]
+                await self._delete_document(document)
             return len(documents)
         encoded = self._criteria(filter_document)
         async with self._operation(write=True) as session:

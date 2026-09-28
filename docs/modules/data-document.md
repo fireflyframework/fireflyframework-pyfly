@@ -301,6 +301,8 @@ A `MongoRepository` never holds a session. Every public `async def` (on `MongoRe
   - a method that sends one command runs without a transaction: `save`, `delete`, `delete_by_id`, the bulk deletes and derived `delete_by_*` when the document class has no delete event actions. MongoDB runs one command atomically on each document it touches;
   - on a standalone server (no transactions) every auto unit runs without one.
 
+**Event actions call repositories safely.** Beanie's event actions (`@before_event`/`@after_event`, `ValidateOnSave`), and so `BaseDocument`'s audit hooks and your `AuditorAware`, are your code, and Beanie runs coroutine actions in `asyncio.gather` child tasks. The repository runs them itself, in Beanie's order, around each write it sends (with `skip_actions`), and holds the operation guard for one driver command at a time, never while an action runs: an action may read or write other repositories (validate a reference, denormalize a counter, look the auditor up) without waiting for a guard its own save holds. Inside a unit of work the action's repository calls join it, so its writes commit or roll back with the save; outside one they run in auto units of their own, and are not part of the save's one command.
+
 The datasource is the one named by `datasource=` (constructor) or the class attribute `__datasource__`; without one it is the datasource of the transaction manager that serves the client the document class is bound to (`"document"`, `pyfly.data.document.datasource`). Custom methods reach the current session with `self._session`:
 
 ```python
@@ -345,7 +347,7 @@ class OrderRepository(MongoRepository[OrderDocument, PydanticObjectId]):
 
 | Method                                     | Return Type         | Description                                    |
 |--------------------------------------------|---------------------|------------------------------------------------|
-| `save(entity)`                             | `T`                 | Insert a new document, or upsert one that is not new (one command) |
+| `save(entity)`                             | `T`                 | Insert a new document, or save one that is not new (one command; Beanie's revision check) |
 | `save_all(entities)`                       | `list[T]`           | One ordered bulk write for new and existing documents |
 | `find_by_id(id: ID)`                       | `T \| None`         | Find by id (converted to the document's id type) |
 | `find_all_by_id(ids)`                      | `list[T]`           | Find all documents whose id is in `ids`        |
