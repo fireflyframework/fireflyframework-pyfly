@@ -350,6 +350,21 @@ class OutboxStoreContract:
         assert await store.claim("g", limit=10, lease=LEASE, owner="node-a") == []
         assert _numbers(await store.pending("g")) == [0, 1, 2]  # claimed ones are still owed
 
+    async def test_a_limit_of_zero_claims_and_lists_nothing(self, outbox_harness: OutboxStoreHarness) -> None:
+        """``limit=0`` asks for nothing, as ``LIMIT 0`` does on SQL: a claim of none takes none (no attempt counted,
+        nothing leased), and ``pending`` lists nothing."""
+        clock = ManualClock()
+        store = await outbox_harness.new_store(clock)
+        await store.register("g", None)
+        for n in range(3):
+            await store.append(_event("e", n))
+        clock.advance(1)
+
+        assert await store.claim("g", limit=0, lease=LEASE, owner="n") == []
+        assert await store.pending("g", limit=0) == []
+        assert [pending.attempts for pending in await store.pending("g")] == [0, 0, 0]
+        assert _numbers(await store.claim("g", limit=10, lease=LEASE, owner="n")) == [0, 1, 2]
+
     async def test_two_nodes_claiming_at_once_never_take_the_same_delivery(
         self, outbox_harness: OutboxStoreHarness
     ) -> None:
