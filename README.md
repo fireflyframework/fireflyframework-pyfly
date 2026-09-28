@@ -311,7 +311,7 @@ This bean is created only when (1) no user-provided `CacheAdapter` exists and (2
 | `server_hypercorn` | `HypercornServerAutoConfiguration` | `hypercorn` | `HypercornServerAdapter` | none |
 | `event-loop` | `EventLoopAutoConfiguration` | `uvloop` / `winloop` | Event loop policy | `asyncio` |
 | `relational` | `RelationalAutoConfiguration` | `sqlalchemy` | `Repository[T, ID]` | none |
-| `document` | `DocumentAutoConfiguration` | `motor`, `beanie` | `MongoRepository[T, ID]` | none |
+| `document` | `DocumentAutoConfiguration` | `beanie` (+ `pyfly.data.document.enabled`) | PyMongo `AsyncMongoClient`, `MongoRepository[T, ID]`, `MongoTransactionManager` | none |
 | `messaging` | `MessagingAutoConfiguration` | `aiokafka` / `aio-pika` | `KafkaAdapter` / `RabbitMQAdapter` | `InMemoryMessageBroker` |
 | `cache` | `CacheAutoConfiguration` | `redis.asyncio` | `RedisCacheAdapter` | `InMemoryCache` |
 | `client` | `ClientAutoConfiguration` | `httpx` | `HttpxClientAdapter` | none |
@@ -492,6 +492,7 @@ from pyfly.eventsourcing import (
     AggregateRoot, DomainEvent, domain_event,
     EventStore, SqlAlchemyEventStore, TransactionalOutbox,
 )
+from pyfly.eventsourcing.repository import EventSourcedRepository
 
 @domain_event
 @dataclass(frozen=True)
@@ -532,20 +533,18 @@ class Account(AggregateRoot):
     def _on_deposit(self, e: MoneyDeposited) -> None:
         self.balance += e.amount
 
-# Persisting and rebuilding
-store: EventStore = SqlAlchemyEventStore(session_factory)
+# Persisting and rebuilding. The event_store bean is a SqlAlchemyEventStore on a datasource of the
+# registry with pyfly.eventsourcing.store.provider: sqlalchemy (an InMemoryEventStore otherwise).
+store: EventStore = context.get_bean(EventStore)
+repo = EventSourcedRepository(store, factory=Account)
+
 account = Account.open("acc-42", "Alice", 100)
 account.deposit(25)
-await store.append(account.id, account.pending_events(), expected_version=account.version - len(account.pending_events()))
-account.mark_committed()
+await repo.save(account)            # appends the pending events at the version the aggregate was loaded with
 
 # Later — reconstruct from the log:
-events = await store.load("acc-42")
-rebuilt = Account()
-rebuilt.id = "acc-42"
-for envelope in events:
-    rebuilt.replay(envelope.event_type, envelope.event)
-assert rebuilt.balance == 125
+rebuilt = await repo.load("acc-42")
+assert rebuilt is not None and rebuilt.balance == 125
 ```
 
 **Highlights:** `AggregateRoot` with `when()`/`apply()`/`replay()`, optimistic concurrency via `expected_version`, snapshots (`SnapshotStore`), `TransactionalOutbox` for at-least-once publishing, `Projection` + `ProjectionRunner` for read models, `EventUpcaster` for schema evolution. Adapters: `InMemoryEventStore`, `SqlAlchemyEventStore`. See [docs/modules/eventsourcing.md](docs/modules/eventsourcing.md).
@@ -811,15 +810,14 @@ class Order(AggregateRoot[str]):
         assert self.id is not None
         self.raise_event(OrderShipped(order_id=self.id, tracking_number=tracking_number))
 
-# Application service:
+# Application service, inside @transactional:
 order = Order("o-1", Money(100, "EUR"))
 order.ship("trk-42")
-
-events = order.clear_events()      # drained by the repository
-# repository.save(order); for e in events: bus.publish(e)
+# await orders.save(order): the DomainEventPublisher (on by default) publishes OrderShipped as the
+# unit of work commits, and drops it when the unit rolls back (see docs/modules/domain.md)
 ```
 
-For domain-tier microservices, the **`@enable_domain_stack`** starter activates CQRS, the transactional engine (saga/workflow/TCC), event sourcing, the rule engine, and the relational data layer in a single decorator — mirroring `fireflyframework-starter-domain` (Java) and `AddFireflyDomain` (.NET):
+For domain-tier microservices, the **`@enable_domain_stack`** starter activates CQRS, the transactional engine (saga/workflow/TCC), event sourcing, the rule engine, and the relational data layer (set `pyfly.data.relational.url`; only the `dev` profile falls back to `./app.db`) in a single decorator — mirroring `fireflyframework-starter-domain` (Java) and `AddFireflyDomain` (.NET):
 
 ```python
 from pyfly.core import pyfly_application
@@ -840,7 +838,7 @@ from pyfly.starters.domain import (
 )
 ```
 
-See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD microservice that uses every primitive: a layered split (interfaces / models / core / web / sdk), a real `Wallet` aggregate built on a `Money` value object, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), CQRS handlers, an event-sourced ledger, domain-event publishing, and a money-transfer saga with full compensation. See [docs/modules/domain.md](docs/modules/domain.md).
+See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD microservice that uses every primitive: a layered split (interfaces / models / core / web / sdk), a real `Wallet` aggregate built on a `Money` value object, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), CQRS handlers that publish domain events on the EDA bus, an event-sourced ledger, a money-transfer saga with full compensation, and a balance invariant kept under concurrent withdrawals (a pessimistic lock, and a guarded atomic `UPDATE`). See [docs/modules/domain.md](docs/modules/domain.md).
 
 ---
 
