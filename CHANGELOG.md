@@ -397,9 +397,9 @@ section before you deploy.
   `TransactionTemplate` (`async with template.transaction(...)`); synchronizations
   (`register_synchronization`, `after_commit`, `TransactionPhase`); `detached()` and
   `outside_transaction()` for work that must not join its caller's unit; `infrastructure_unit()` for
-  framework adapters; `track_commits()` (whether a block committed anything: a single-statement write on
-  an autocommit connection that fails after its statement ran reports `UNKNOWN`, since it may have
-  committed) and `untracked()` (the framework's idempotent bookkeeping, which no tracker counts); the
+  framework adapters; `track_commits()` (whether a block committed anything: a write that commits as it
+  runs and fails after it ran reports `UNKNOWN`, since it may have committed, whether a single-statement
+  write on an autocommit connection or a MongoDB repository write without a transaction) and `untracked()` (the framework's idempotent bookkeeping, which no tracker counts); the
   `UnitOfWork` attributes `autocommit` and `operations`; the `TransactionManager` SPI
   (`SessionPort` is its deprecated alias), `TransactionManagerRegistry` (`set_default`), and the errors
   `UnexpectedRollbackError`, `IllegalTransactionStateError`, `TransactionTimedOutError`,
@@ -429,15 +429,28 @@ section before you deploy.
   every Beanie document including `Link` targets, `DocumentProperties.client_options()`,
   `MongoHealthIndicator`, `MongoMetrics`, `AggregateDocument` domain events published when a document
   unit commits, and `BaseDocument` audit fields kept current. A write concern failure at commit raises
-  `CommitOutcomeUnknownError`. `mongo_transactional` and `run_mongo_transaction` are deprecated.
+  `CommitOutcomeUnknownError`. `mongo_transactional` and `run_mongo_transaction` are deprecated. A unit's
+  transaction reads from the primary (`read_preference=ReadPreference.PRIMARY`), since MongoDB refuses any other
+  read preference in a transaction: a client configured with `readPreference=secondaryPreferred` (the URI,
+  `pyfly.data.document.options`, an `AsyncMongoClient` bean) reads in its units and keeps its preference outside
+  them.
+- **MongoDB commit tracking.** A repository write that runs without a transaction and fails after its command
+  ran completes as `UNKNOWN`. This covers `save`, `delete`, `delete_by_id`, the bulk and derived deletes, a
+  `@query` pipeline with `$out`/`$merge`, and every write on a standalone server. Failures include an
+  after-insert/after-save event action, a `WriteConcernError`, a standalone ordered `save_all` stopped at a
+  failing document, and a lost connection. `track_commits()` counts such a write as work that may have
+  committed, so a saga, TCC or workflow step is compensated instead of retried into a second write. A command
+  the server rejected (duplicate key) counts as `UNKNOWN` too, as on a PostgreSQL autocommit connection. A custom
+  repository method that takes `self._session` counts as having run an operation. Transactional units
+  (`save_all` on a replica set, `@transactional`) roll back and restore the documents.
 - **The transactional outbox as a layer of its own.** `pyfly.eda.ports.outbox.OutboxStore` (append in the
   caller's unit, claim, settle, retention), `SqlOutboxStore` on the framework tables (`Outbox` stays an
   alias), and `TransactionalEventPublisher` with `OutboxForwarder`: with `pyfly.eda.outbox.enabled` (off by
   default; the `database` and `postgres` event buses are the outbox already), any
   `EventPublisher` transport (Kafka, RabbitMQ, Redis Streams, in-process) becomes transactional, each
   publish appended in the caller's unit and forwarded after the commit at least once, with the event id
-  in `x-pyfly-event-id`, retries and dead letters (`pyfly.eda.outbox.forward.*`;
-  `pyfly.eda.outbox.store` picks the SQL store whenever the application has a relational datasource).
+  in `x-pyfly-event-id`, retries and dead letters (`pyfly.eda.outbox.forward.*`), on the SQL store or the
+  MongoDB one (`pyfly.eda.outbox.store`, below).
   `DatabaseEventBus(store=...)` and `TransactionalOutbox(store=...)` run on any store and stop the store
   they were given when they stop, and `DatabaseEventBus.outbox` and `TransactionalOutbox.outbox` are typed
   `OutboxStore` (`DatabaseEventBus.sql_store` gives the SQL store). A bus given a store of its own opens
@@ -445,6 +458,56 @@ section before you deploy.
   `OutboxRelay.alive`, and a bus health of `DOWN` when the relay task ended. The outbox stores the
   payload as JSON, so an in-process listener behind it receives a `datetime`, `Decimal` or `UUID` value
   as a string.
+- **The transactional outbox on MongoDB.** `pyfly.eda.adapters.mongo_outbox.MongoOutboxStore` (with
+  `MongoOutboxCollections`, `DEFAULT_PREFIX`, `DEFAULT_DATABASE`) is the `OutboxStore` port on MongoDB. The outbox
+  lives in five collections of the document database: `pyfly_outbox_events`, `pyfly_outbox_deliveries`,
+  `pyfly_outbox_consumers`, `pyfly_outbox_dead_letters` and `pyfly_outbox_counters`. `start()` creates their
+  indexes (idempotent), or with `create_indexes=False` only checks them. It has the `SqlOutboxStore`'s
+  guarantees, and the same outbox store contract suite runs on both. Claims are by state with a lease and a claim
+  token, every later write on a claim is fenced by that token, and retention and dead letters work alike.
+  - Each append writes one event and its deliveries in one multi-document transaction. That is the transaction
+    of the caller's `@transactional` unit of the document datasource, which the event then commits or rolls back
+    with. Outside a unit, or in a unit that runs no transaction, it is a short transaction of the store's own.
+    The atomicity is per event. Outside `@transactional`, the events of one `MongoRepository.save` are appended
+    one by one, each in its own transaction: if a later one fails, the earlier ones stand and are delivered, and
+    the save raises with its document stored. Use `@transactional` when an aggregate's events must commit
+    together.
+  - Outbox ids are integers taken from a counter document with one atomic `findAndModify` (`$inc`) outside the
+    unit's transaction. A rolled-back unit leaves a gap, and a late commit leaves a lower id behind higher ones,
+    as with a SQL identity column. Delivery order per group follows the outbox id.
+  - It needs a replica set (a single-node one is enough). `start()` refuses a standalone server with
+    `IllegalTransactionStateError`, so the publisher and the application fail to start.
+  - `stop()` releases nothing. The store never owns or closes its client (`DocumentBindings` or the caller
+    does), so the database bus, the transactional publisher and the event-sourcing outbox may share one store
+    and each stop it.
+- **`pyfly.eda.outbox.store` picks the outbox store** of the transactional publisher (`pyfly.eda.outbox.enabled`
+  with a Kafka, RabbitMQ, Redis or in-process transport) and of the database bus: `sql`, `mongo`, or `auto`, the
+  default. `mongo` builds a `MongoOutboxStore` on `pyfly.data.document.datasource` and
+  `pyfly.data.document.database`; index creation follows `pyfly.eda.outbox.auto-create-tables`. `auto` picks
+  `mongo` exactly when the document datasource is the default of `@transactional` (the document data layer on and
+  the relational one off, unless `pyfly.data.document.transaction.default` says otherwise) and no
+  `pyfly.eda.outbox.datasource`/`url` is set. That is the rule the document auto-configuration makes its
+  datasource the default by, read from the configuration alone, so the outbox and a plain `@transactional` never
+  land on two databases, whatever the `DataSourceRegistry` holds (the `dev` profile's SQLite fallback, a URL
+  another store registered, a `pyfly.data.relational.url` without the relational layer) and whatever order the
+  beans are built in. The store chosen is logged at INFO (`eda_outbox_store`). In an application with both data
+  layers `auto` keeps the SQL store, and a publish inside a document unit is then appended in a short SQL unit
+  that commits at once (a dual write); set `store: mongo` to have events commit with the document units.
+  Combinations that cannot work fail with an error that names the fix:
+  - `provider=postgres` with `outbox.store=mongo` raises a `ValueError` pointing to `provider=database`, or to a
+    broker with `outbox.enabled`;
+  - `store=mongo` with `pyfly.eda.outbox.datasource` or `pyfly.eda.outbox.url` raises a `ValueError` naming the
+    conflict;
+  - `store=mongo` without the document data layer raises a `ValueError` naming the missing setting, and without
+    pymongo installed a `ValueError` naming the `data-document` extra;
+  - the database bus with `outbox.notify=true` on the Mongo store fails at start, because the wake-ups are
+    PostgreSQL's.
+- **Domain events raised while a unit's events go out.** An event raised by a `BEFORE_COMMIT` listener (or by any
+  before-commit synchronization that runs after the events go out) is published in the same unit, before it
+  commits. Each synchronization's before-commit part runs once, in registration order, including one an earlier
+  synchronization registered as the unit began committing. Listeners or synchronizations that keep raising events
+  or registering new synchronizations roll the unit back with a `RuntimeError` after `MAX_PUBLICATION_ROUNDS` (16)
+  rounds. New API: `UnitOfWork.claim_before_commit()` and `pyfly.data.transaction.template.run_before_commit()`.
 - **Event sourcing:** `stream_all(after_position=, limit=)`, `last_position()`,
   `StoredEventEnvelope.global_position`, and a `ProjectionRunner` with durable checkpoints
   (`CheckpointStore`, the `projection_checkpoint_store` bean), a lease so one replica is active,
@@ -489,6 +552,10 @@ section before you deploy.
   persisted as failed with their steps compensated; every completed saga of a failed layer is compensated
   and each composed saga has its own correlation id (they overwrote one state row); a saga that ends
   cancelled on its own fails the composition.
+- **A failed `ApplicationContext.start()` stops the lifecycle beans it had started**, highest phase first and in
+  reverse start order within a phase, as `stop()` does and as Spring does when a refresh fails, then raises its
+  failure; a bean that fails to stop is logged and does not replace it. Through `26.09.07` they kept running
+  until the caller called `stop()`, which still releases the rest of the failed run.
 - **A handler's own `CancelledError` is a failed delivery** (retried, then dead-lettered) in the listener
   container; it no longer ends the Kafka consume loop or requeues the RabbitMQ message at once.
 - **OAuth2 grants are atomic on every token store**: refresh tokens, authorization codes and pushed
