@@ -15,6 +15,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 from pyfly.container.exceptions import NoSuchBeanError
@@ -253,3 +257,26 @@ def test_the_replica_set_container_raises_the_open_file_limit() -> None:
     container = mongodb_replica_set_container()
     (ulimit,) = container.get_wrapped_container()._kwargs["ulimits"]
     assert (ulimit.name, ulimit.soft, ulimit.hard) == ("nofile", 64000, 64000)
+
+
+def test_the_transaction_manager_translates_mongo_errors_without_the_repository_module() -> None:
+    """A unit of work's commit failure is translated to the kernel's exceptions by the translator the Mongo
+    module registers: importing the transaction manager registers it, whether or not the repository module
+    (which also imports it) was ever loaded. Checked in a fresh interpreter that cannot load the repository."""
+    script = textwrap.dedent(
+        """
+        import sys
+
+        sys.modules["pyfly.data.document.mongodb.repository"] = None  # the repository cannot be imported
+        import pyfly.data.document.mongodb.transaction_manager  # noqa: F401
+        from pymongo.errors import OperationFailure
+
+        from pyfly.data.exception_translation import translate_exception
+
+        error = OperationFailure("E11000 duplicate key error collection: t.c index: email_1", code=11000)
+        print(type(translate_exception(error)).__name__)
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "DuplicateKeyException"

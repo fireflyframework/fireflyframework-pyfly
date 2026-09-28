@@ -36,7 +36,10 @@ propagation (``REQUIRED``, ``REQUIRES_NEW``, ``SUPPORTS``,
   a transactional unit marks it rollback-only: a caught duplicate key cannot commit the rest
   (:class:`~pyfly.data.transaction.errors.UnexpectedRollbackError` at the boundary). A commit whose outcome
   the driver cannot know (the ``UnknownTransactionCommitResult`` label, after pymongo's own retry) raises
-  :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`.
+  :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError`. Importing this module registers the
+  translator of :mod:`~pyfly.data.document.mongodb.exception_translation`, so a commit failure leaves the
+  boundary as the kernel's exception (a write conflict as a transient ``ConcurrencyException``) even in an
+  application that calls Beanie directly and has no repository.
 - **Completion.** The template runs commit, abort and ``end_session`` shielded, so a cancellation (a client
   disconnect) never leaves a transaction open on the server holding its document locks until the server's
   ``transactionLifetimeLimitSeconds``.
@@ -66,6 +69,7 @@ from pymongo.errors import AutoReconnect, PyMongoError, ServerSelectionTimeoutEr
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
+from pyfly.data.document.mongodb import exception_translation as _translation  # noqa: F401 — registers it
 from pyfly.data.transaction.definition import TransactionDefinition
 from pyfly.data.transaction.errors import (
     CommitOutcomeUnknownError,
