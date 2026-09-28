@@ -53,9 +53,12 @@ runs only the ones that failed, and the other deliveries of the group go on mean
 attempted again after a back-off (:class:`~pyfly.messaging.listener_container.RetryPolicy`), and after the
 last attempt the event is copied into the dead-letter table for that subscription
 (:class:`~pyfly.eda.types.ErrorStrategy` chooses otherwise). A handler that hangs is cancelled after
-``handler_timeout``, and that counts as a failure. The deliveries every subscription handled are settled
-together, in one statement at the end of the round (or before the round gives the rest back, extends its lease
-or fails): a relay that dies in the middle of a round has them handled again, at least once.
+``handler_timeout``, and that counts as a failure; so does a ``CancelledError`` a handler raises of its own
+(it awaited something another task cancelled): only a stop cancels the relay itself. When several
+subscriptions failed one delivery, it is attempted again after the shortest of their back-offs. The deliveries
+every subscription handled are settled together, in one statement at the end of the round (or before the round
+gives the rest back, extends its lease or fails): a relay that dies in the middle of a round has them handled
+again, at least once.
 
 **Order.** A relay handles the deliveries of a claim in publication order, but a group gives no order
 guarantee: a failure is attempted again after later events, and the relays of a group on several nodes claim
@@ -63,7 +66,9 @@ side by side.
 
 **Retention.** A relay deletes, in batches, the events every group has handled (and that are older than
 :attr:`Retention.delivered`), and, when :attr:`Retention.max_age` is set, every event older than that with
-the deliveries still owed for it.
+the deliveries still owed for it. The first sweep reads past the events still owed: a group that stopped
+consuming keeps its backlog, which every sweep reads again, until the group is unregistered or the backlog
+passes ``max_age``.
 
 **Wake-ups.** A relay polls every ``poll_interval`` seconds; a publish in the same process wakes it once the
 publishing unit commits, and on PostgreSQL a ``NOTIFY`` sent in the publishing unit (delivered only if it
@@ -154,7 +159,9 @@ class StartPosition(enum.Enum):
 class Retention:
     """How long the outbox keeps events.
 
-    - *delivered*: an event every group has handled is deleted once it is older than this (``None``: never);
+    - *delivered*: an event every group has handled is deleted once it is older than this (``None``: never).
+      The sweep reads past the events some group still owes: an abandoned group's backlog is read again at
+      every sweep (unregister the group, or set *max_age*);
     - *max_age*: an event older than this is deleted with the deliveries still owed for it, whether or not
       they were made (``None``: never; a group that stops consuming then keeps its events);
     - *interval*: how often a relay sweeps, and *batch_size* how many events one statement deletes.
@@ -1672,7 +1679,8 @@ class OutboxRelay:
     ) -> bool:
         """Settle a delivery some subscriptions failed: under the error strategy, each failure is attempted
         again after its back-off, goes to the dead letters, or is let go (then the delivery is complete: returns
-        ``True``, and the round settles it with the others)."""
+        ``True``, and the round settles it with the others). The delivery row has one due time: the failed
+        subscriptions all run again after the shortest of their back-offs."""
         strategy = self._error_strategy
         for subscription, error in failures:
             level = logging.DEBUG if strategy is ErrorStrategy.IGNORE else logging.WARNING

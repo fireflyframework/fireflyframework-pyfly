@@ -126,6 +126,16 @@ An aggregate may also be an ORM-mapped entity (`class Order(Base,
 AggregateRoot[int])`): an instance the ORM loads without running
 `AggregateRoot.__init__` still collects events.
 
+**Upgrading from 26.09.07: a behavior change.** The EDA auto-configuration's
+`DomainEventPublisher` is on by default and drains the pending events as the
+unit commits. An application that collected `pending_events()` (or called
+`clear_events()`) *after* the unit and published them to the EDA bus now finds
+the buffer empty, and its integration events silently stop. Set
+`pyfly.eda.domain-events.destination` to have the publisher send them through
+the EDA bus (in the unit, with an outbox bus), or set
+`pyfly.eda.domain-events.enabled: false` to keep publishing by hand (see
+[Domain events of aggregates](events.md#domain-events-of-aggregates)).
+
 ---
 
 ## DomainEvent — something that happened

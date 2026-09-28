@@ -280,7 +280,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.outbox.retention.delivered` | duration | `1h` | An event every group handled is deleted once older than this (`none`: kept). |
 | `pyfly.eda.outbox.retention.max-age` | duration | | An event older than this is deleted with the deliveries still owed for it (a group that stopped consuming loses them; a WARNING says how many). Unset: never. |
 | `pyfly.eda.outbox.retention.interval` / `retention.batch-size` | duration / `int` | `1m` / `1000` | How often a relay prunes, and how many events one statement deletes. |
-| `pyfly.eda.outbox.notify` | `bool` | | LISTEN/NOTIFY wake-ups; unset: on when the datasource is PostgreSQL. |
+| `pyfly.eda.outbox.notify` | `bool` | | LISTEN/NOTIFY wake-ups; unset: on when the datasource is PostgreSQL and the LISTEN connection can be opened (the asyncpg driver, or `pyfly.eda.postgres.listen-dsn`); otherwise the relay polls, with a warning. |
 | `pyfly.eda.domain-events.enabled` | `bool` | `true` | Publish the events aggregates raise as their unit of work commits ([Domain events of aggregates](#domain-events-of-aggregates)). |
 | `pyfly.eda.domain-events.destination` | `str` | | Also publish them through the event publisher, to this destination. |
 | `pyfly.eda.rabbitmq.url` | `str` | `amqp://guest:guest@localhost/` | AMQP connection URL. |
@@ -370,9 +370,11 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
   datasource). An outbox on another datasource (`pyfly.eda.outbox.datasource`) is written in a unit of that
   datasource, which commits on its own: the event and the business changes are then two writes again.
   The event is owed to every consumer group registered for its destination (a row in
-  `pyfly_outbox_deliveries` per group). On PostgreSQL a publish is one statement, `NOTIFY` included, and
-  the server delivers the notification only if the unit commits. A publish never starts the bus: after
-  `stop()` (from a `@pre_destroy` method) the event is still written, for this or another process to deliver.
+  `pyfly_outbox_deliveries` per group), and to the publishing process's own group when that process consumes
+  the destination (a handler subscribed), whether or not its relay has registered the group yet. On PostgreSQL
+  a publish is one statement, `NOTIFY` included, and the server delivers the notification only if the unit
+  commits. A publish never starts the bus: after `stop()` (from a `@pre_destroy` method) the event is still
+  written, for this or another process to deliver.
 - **Deliveries are claimed by state.** A group's relay claims the delivery rows that are due, for a lease
   (`claim-timeout`), with `FOR UPDATE SKIP LOCKED` where the backend has it (PostgreSQL, MySQL 8, MariaDB
   10.6) and an optimistic update elsewhere. An event whose transaction commits after a later one's is claimed
@@ -395,14 +397,30 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
   matches; the ones that succeed are recorded, and a failing one is attempted again alone, after the retry
   policy's back-off, then dead-lettered ([ErrorStrategy](#errorstrategy-enum)). The group's other events go on
   meanwhile. A handler runs in the unit of work its `@transactional` gives it, as on the Kafka and RabbitMQ
-  buses (`pyfly.eda.listener.transactional`), and is cancelled after `handler-timeout`.
-- **Consumer groups.** A process's group is registered (for `pyfly.eda.destinations`) once a handler
-  subscribes: a process that only publishes owes nothing to its own group. A new group starts at
-  `pyfly.eda.outbox.start` (`latest`). Every process of a group must subscribe the same handlers: each event
-  goes to one of them. A group registered for every destination is never given the events of the event
-  sourcing `TransactionalOutbox` (destinations `eventsourcing.outbox:<name>`), which share the tables.
+  buses (`pyfly.eda.listener.transactional`), and is cancelled after `handler-timeout`. A handler that raises a
+  `CancelledError` of its own (it awaited a future or a task another task cancelled) fails its delivery like
+  any other exception; only a stop cancels the relay. When several handlers of one event fail, the event is
+  attempted again after the shortest of their back-offs, and each of them runs again then (a handler with a
+  longer back-off is attempted early, and its attempts are counted as usual).
+- **Consumer groups.** A process's group is registered (for `pyfly.eda.destinations`) by its relay, in a
+  short unit of its own, once a handler subscribes: a process that only publishes owes nothing to its own
+  group, and a publish never registers a group (in the publisher's unit it raced the relays registering the
+  same group, and on MariaDB failed the business unit). A new group starts at `pyfly.eda.outbox.start`
+  (`latest`); when the processes of a new `earliest` group start at once, the first registration owes it the
+  events the outbox holds, and the others find the group registered. Every process of a group must subscribe
+  the same handlers: each event goes to one of them. A group registered for every destination is never given
+  the events of the event sourcing `TransactionalOutbox` (destinations `eventsourcing.outbox:<name>`), which
+  share the tables.
+- **The `latest` boundary.** A publish owes its event to the groups its unit sees registered. On MySQL and
+  MariaDB a unit reads them in the snapshot of its first read (`REPEATABLE READ`): a group another process
+  registers for the first time while the unit runs is owed the events published after it, not that one. On
+  PostgreSQL (`READ COMMITTED`) the publish reads the groups registered when it runs. The publishing process's
+  own group is always owed its events (see above).
 - **Retention.** The relays delete, in batches, the events every group handled (`retention.delivered`), and
-  with `retention.max-age` the older ones whatever is still owed for them.
+  with `retention.max-age` the older ones whatever is still owed for them. The sweep of handled events reads
+  past the events still owed: a group that stopped consuming keeps its backlog, and every sweep (every
+  `retention.interval`, in every relay) reads it again. Remove such a group (`Outbox.unregister(group)`), or
+  bound the backlog with `retention.max-age`.
 - **Lifecycle and health.** `start()` checks (and creates) the tables, opens the LISTEN connection when a
   handler is subscribed, and starts the relay, serialized and idempotent; a failed start closes what it
   opened. A bus that only publishes opens no LISTEN connection; one whose handlers subscribe after it started
@@ -411,12 +429,14 @@ SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/
   is kept alive by the relay's polls and reopened when it is lost; meanwhile the relay polls every
   `poll-interval`, and the EDA health indicator stays `UP` (the events are still delivered, and a `DOWN` would
   pull a serving process out of its readiness and liveness probes) with `"listener": "reconnecting"` and a
-  `degraded` detail saying since when. It is `DOWN` when the bus is not running or its database does not
-  answer. The LISTEN connection uses asyncpg's listener API: on a datasource with another driver (psycopg)
-  the bus polls, with a warning, unless `pyfly.eda.postgres.listen-dsn` gives it a connection of its own
-  (`pyfly.eda.outbox.notify: true` then refuses to start). A publish after `stop()` on a `PostgresEventBus`
-  given a URL outside an application context builds its private registry for that publish and closes it
-  again.
+  `degraded` detail saying since when. It is `DOWN` when the bus is not running, its database does not
+  answer, or its relay's task ended while the bus runs (cancelled by something other than a stop: nothing more
+  is delivered in the process; the reason and the relay's last error are in the details). `stop()` never
+  raises what ended the relay's task: it logs it. The LISTEN connection uses asyncpg's listener API: on a
+  datasource with another driver (psycopg) the bus polls, with a warning, unless
+  `pyfly.eda.postgres.listen-dsn` gives it a connection of its own (`pyfly.eda.outbox.notify: true` then
+  refuses to start). A publish after `stop()` on a `PostgresEventBus` given a URL outside an application
+  context builds its private registry for that publish and closes it again.
 
 Before 26.09.08 the Postgres bus wrote on a pool of its own, outside the business transaction, and consumed
 by an id cursor: an event that committed after a higher id had been consumed was skipped for good (about 0.2 %
@@ -861,6 +881,14 @@ is logged when an event is raised outside a unit). `DomainEventPublisher.publish
 hand, inside the unit; without the EDA auto-configuration, register a
 `DomainEventPublisher(ApplicationEventPublisher)` bean (an application's own `DomainEventPublisher` bean
 replaces the auto-configured one).
+
+**Upgrading from 26.09.07: a behavior change.** The `DomainEventPublisher` is on by default and drains an
+aggregate's pending events as its unit of work commits. Without `pyfly.eda.domain-events.destination` it hands
+them to the application's listeners only. An application that published its domain events itself, collecting
+`pending_events()` (or calling `clear_events()`) after the unit and handing them to the EDA bus, now finds the
+buffer empty and silently stops publishing those integration events. Either set
+`pyfly.eda.domain-events.destination` (the publisher then sends them through the EDA bus, in the unit, and the
+application code that did it goes), or set `pyfly.eda.domain-events.enabled: false` to keep publishing by hand.
 
 ---
 

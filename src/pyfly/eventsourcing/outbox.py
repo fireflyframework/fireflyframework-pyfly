@@ -50,7 +50,10 @@ its events: they are owed to that group alone (an EDA group registered for every
 @dataclass
 class OutboxRecord:
     """One outbox delivery, as :meth:`TransactionalOutbox.pending` and :meth:`TransactionalOutbox.dead_letters`
-    read it: *attempts* made so far, *last_error* the last failure."""
+    read it: *attempts* made so far, *last_error* the last failure.
+
+    *delivered* is kept for compatibility and is always ``False``: a delivered event leaves the pending
+    deliveries (and a dead-lettered one was never delivered), so neither listing holds a delivered record."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     event: StoredEventEnvelope = field(default_factory=StoredEventEnvelope)

@@ -119,7 +119,9 @@ await outbox.dead_letters()   # failed on every attempt
 
 Before 26.09.08 the outbox was a dictionary in the process: an event enqueued by a unit that then rolled back
 was published anyway, a restart lost everything pending, and nothing was ever removed. It now needs a data
-layer: an application without one gets `IllegalTransactionStateError` from `start()`.
+layer: an application without one gets `IllegalTransactionStateError` from `start()`. A delivered event leaves
+the table rather than being flagged: `OutboxRecord.delivered` stays in the record for compatibility and is always
+`False` in what `pending()` and `dead_letters()` return.
 
 ## Projections
 
