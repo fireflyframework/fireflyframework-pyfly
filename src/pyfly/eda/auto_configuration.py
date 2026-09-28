@@ -56,6 +56,20 @@ Configuration keys (all optional, prefix ``pyfly.eda.``):
   ``handler-timeout``, ``start`` (``latest``/``earliest``), ``error-strategy``, ``retention.delivered``,
   ``retention.max-age``, ``retention.interval``, ``retention.batch-size``, ``notify`` (see
   :meth:`~pyfly.eda.outbox.OutboxSettings.from_config`).
+* ``outbox.enabled`` — make the provider's publisher transactional: a
+  :class:`~pyfly.eda.outbox_forwarding.TransactionalEventPublisher` wraps it, so a publish is appended to the
+  outbox store in the caller's unit of work and forwarded to the broker once that unit commits, at least once.
+  Default ``false``; the ``database`` and ``postgres`` providers are the outbox already.
+* ``outbox.store`` — the outbox store of the ``database``/``postgres`` buses and of the transactional publisher:
+  ``sql`` (the framework's tables on a relational datasource, ``outbox.datasource``/``outbox.url``), ``mongo``
+  (not available until the Mongo outbox store lands) or ``auto`` (the default: ``mongo`` when the application has
+  a document datasource and no relational one, else ``sql``).
+* ``outbox.forward.*`` — the forwarding relay of the transactional publisher: ``destinations`` (comma-separated;
+  unset or ``*``: every destination; a publish to another destination goes to the broker after the commit),
+  ``group`` (``pyfly.forward:<provider>``), ``poll-interval``, ``batch-size``, ``claim-timeout``,
+  ``handler-timeout``, ``start``, ``error-strategy`` and ``retention.*`` (each defaulting to its ``outbox.*``
+  value), ``retry.max-attempts``, ``retry.initial-delay``, ``retry.multiplier``, ``retry.max-delay`` (each
+  defaulting to ``listener.retry.*``); see :meth:`~pyfly.eda.outbox_forwarding.ForwardingSettings.from_config`.
 * ``domain-events.enabled`` — publish the events aggregates raise as their unit of work commits
   (:class:`~pyfly.eda.domain_events.DomainEventPublisher`). Default ``true``.
 * ``domain-events.destination`` — also publish them through the event publisher, to this destination (with
@@ -132,6 +146,24 @@ class EdaAutoConfiguration:
         destinations = [d.strip() for d in destinations_raw.split(",") if d.strip()]
         group = str(config.get("pyfly.eda.group", "pyfly-default"))
 
+        if provider in ("postgres", "database"):
+            self._outbox_store_kind(config, provider, container)  # a store it cannot run on fails here
+            return self._outbox_bus(config, provider, destinations, group, dead_letter_store, container)
+
+        transport = self._transport(config, provider, destinations, group, dead_letter_store)
+        if not self._outbox_enabled(config):
+            return transport
+        return self._transactional(config, provider, transport, dead_letter_store, container)
+
+    def _transport(
+        self,
+        config: Config,
+        provider: str,
+        destinations: list[str],
+        group: str,
+        dead_letter_store: EdaDeadLetterStore | None,
+    ) -> EventPublisher:
+        """The provider's own publisher (a broker, or the in-process bus)."""
         serializer = self._make_serializer(config)
 
         if provider == "kafka":
@@ -164,9 +196,6 @@ class EdaAutoConfiguration:
                 consumer_id=str(consumer_id) if consumer_id else None,
                 serializer=serializer,
             )
-
-        if provider in ("postgres", "database"):
-            return self._outbox_bus(config, provider, destinations, group, dead_letter_store, container)
 
         if provider == "rabbitmq":
             from pyfly.eda.adapters.rabbitmq import RabbitMqEventBus
@@ -203,6 +232,106 @@ class EdaAutoConfiguration:
         destination = str(config.get("pyfly.eda.domain-events.destination", "") or "").strip()
         return DomainEventPublisher(events, event_publisher, destination=destination or None)
 
+    @staticmethod
+    def _outbox_enabled(config: Config) -> bool:
+        """``pyfly.eda.outbox.enabled`` (default ``false``)."""
+        from pyfly.config.properties.data import parse_bool
+
+        raw = config.get("pyfly.eda.outbox.enabled")
+        if raw is None or not str(raw).strip():
+            return False
+        return parse_bool(raw, "pyfly.eda.outbox.enabled")
+
+    @staticmethod
+    def _outbox_store_kind(config: Config, provider: str, container: Container | None) -> str:
+        """The outbox store ``pyfly.eda.outbox.store`` names: ``sql``, or ``mongo`` (which raises: it is not
+        available until the Mongo outbox store lands); ``auto`` picks ``mongo`` when the application has a
+        document datasource and no relational one (nor an outbox datasource or URL of its own), else ``sql``
+        (always for ``postgres``)."""
+        from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+        kind = str(config.get("pyfly.eda.outbox.store", "auto") or "auto").strip().lower()
+        if kind not in ("sql", "mongo", "auto"):
+            raise ValueError(f"pyfly.eda.outbox.store must be sql, mongo or auto, got {kind!r}")
+
+        def configured(key: str) -> bool:
+            value = config.get(key)
+            return value is not None and str(value).strip().lower() not in ("", "false", "0", "no", "off")
+
+        if kind == "auto":
+            relational = (
+                provider == "postgres"
+                or any(
+                    configured(key)
+                    for key in (
+                        "pyfly.data.relational.enabled",
+                        "pyfly.data.relational.url",
+                        "pyfly.eda.outbox.datasource",
+                        "pyfly.eda.outbox.url",
+                    )
+                )
+                or (container is not None and container.contains_type(DataSourceRegistry))
+            )
+            document = configured("pyfly.data.document.enabled") or configured("pyfly.data.document.uri")
+            kind = "mongo" if document and not relational else "sql"
+        if kind == "mongo":
+            raise ValueError(
+                "pyfly.eda.outbox.store=mongo: the MongoDB outbox store is not available until the Mongo outbox "
+                "store lands; run the outbox on a relational datasource (pyfly.eda.outbox.store=sql)"
+            )
+        return kind
+
+    @classmethod
+    def _transactional(
+        cls,
+        config: Config,
+        provider: str,
+        transport: EventPublisher,
+        dead_letter_store: EdaDeadLetterStore | None,
+        container: Container | None,
+    ) -> EventPublisher:
+        """*transport* behind the transactional outbox (``pyfly.eda.outbox.enabled``): a
+        :class:`~pyfly.eda.outbox_forwarding.TransactionalEventPublisher` on the SQL outbox store of
+        ``outbox.datasource``/``outbox.url`` (the primary datasource by default), forwarding with
+        ``outbox.forward.*``."""
+        from pyfly.eda.outbox import SqlOutboxStore
+        from pyfly.eda.outbox_forwarding import ForwardingSettings, TransactionalEventPublisher
+
+        cls._outbox_store_kind(config, provider, container)
+        listener = cls._listener_settings(config)
+        forwarding = ForwardingSettings.from_config(config, retry=listener.retry)
+        store = SqlOutboxStore(
+            cls._outbox_datasource(config, provider, container),
+            create_tables=cls._outbox_creates_tables(config, provider, container),
+        )
+        return TransactionalEventPublisher(
+            transport,
+            store,
+            name=provider,
+            settings=listener,
+            dead_letter_store=dead_letter_store,
+            **forwarding.forwarder_options(),
+        )
+
+    @staticmethod
+    def _outbox_creates_tables(config: Config, provider: str, container: Container | None) -> bool:
+        """Whether the outbox store creates its missing tables: ``pyfly.eda.outbox.auto-create-tables`` (for
+        ``postgres`` also ``pyfly.eda.postgres.auto-create-tables``, which wins) when set; unset, what
+        ``pyfly.data.relational.ddl-auto`` lets every framework store do."""
+        from pyfly.config.properties.data import parse_bool
+        from pyfly.eda.outbox import OutboxSettings
+
+        create_raw = config.get("pyfly.eda.postgres.auto-create-tables") if provider == "postgres" else None
+        if create_raw is not None and str(create_raw).strip():
+            return parse_bool(create_raw, "pyfly.eda.postgres.auto-create-tables")
+        explicit = OutboxSettings.from_config(config).create_tables
+        if explicit is not None:
+            return explicit
+        # Unset: the outbox tables are framework tables, created where ddl-auto lets the stores create theirs.
+        from pyfly.data.relational.framework_schema import context_datasource_registry, creates_tables
+
+        return creates_tables(context_datasource_registry(config, container).properties.ddl_auto)
+
     @classmethod
     def _outbox_bus(
         cls,
@@ -216,20 +345,11 @@ class EdaAutoConfiguration:
         """The ``postgres`` or ``database`` bus: the transactional outbox on a datasource of the context's
         registry (``outbox.datasource``/``outbox.url``, for ``postgres`` also ``postgres.datasource``/
         ``postgres.dsn``; the primary datasource by default)."""
-        from pyfly.config.properties.data import parse_bool
         from pyfly.eda.outbox import OutboxSettings
 
         settings = OutboxSettings.from_config(config)
         datasource = cls._outbox_datasource(config, provider, container)
-        create_raw = config.get("pyfly.eda.postgres.auto-create-tables") if provider == "postgres" else None
-        if create_raw is not None and str(create_raw).strip():
-            create_tables = parse_bool(create_raw, "pyfly.eda.postgres.auto-create-tables")
-        elif settings.create_tables is not None:
-            create_tables = settings.create_tables
-        else:  # unset: the outbox tables are framework tables, created where ddl-auto lets the stores create theirs
-            from pyfly.data.relational.framework_schema import context_datasource_registry, creates_tables
-
-            create_tables = creates_tables(context_datasource_registry(config, container).properties.ddl_auto)
+        create_tables = cls._outbox_creates_tables(config, provider, container)
         options: dict[str, Any] = {
             "destinations": destinations,
             "group": group,

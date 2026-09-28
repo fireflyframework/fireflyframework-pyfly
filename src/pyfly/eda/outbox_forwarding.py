@@ -60,10 +60,11 @@ import contextlib
 import enum
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pyfly.eda.domain_events import EVENT_ID_HEADER
-from pyfly.eda.outbox import OutboxRelay, describe_error
+from pyfly.eda.outbox import OutboxRelay, OutboxSettings, describe_error
 from pyfly.eda.ports.outbound import EventHandler, EventPublisher
 from pyfly.eda.ports.outbox import OutboxStore, Retention, StartPosition
 from pyfly.eda.types import ErrorStrategy, EventEnvelope
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FORWARD_GROUP_PREFIX",
+    "ForwardingSettings",
     "OutboxForwarder",
     "PublisherState",
     "TransactionalEventPublisher",
@@ -92,6 +94,111 @@ FORWARD_GROUP_PREFIX = "pyfly.forward:"
 def forward_group(transport: str) -> str:
     """The consumer group of the forwarder to the transport named *transport* (``kafka``, ``rabbitmq``...)."""
     return f"{FORWARD_GROUP_PREFIX}{transport}"
+
+
+@dataclass(frozen=True)
+class ForwardingSettings:
+    """The forwarder's settings, from ``pyfly.eda.outbox.forward.*`` (see :meth:`from_config`).
+
+    *relay* holds the relay settings (poll interval, batch size, lease, handler timeout, start position, error
+    strategy, retention), *destinations* the destinations forwarded (``None``: every one), *group* the consumer
+    group (``None``: ``pyfly.forward:<provider>``) and *retry* the retry policy (``None``: the relay's default).
+    """
+
+    relay: OutboxSettings = field(default_factory=OutboxSettings)
+    destinations: tuple[str, ...] | None = None
+    group: str | None = None
+    retry: RetryPolicy | None = None
+
+    @classmethod
+    def from_config(
+        cls, config: Any, prefix: str = "pyfly.eda.outbox.forward", *, retry: RetryPolicy | None = None
+    ) -> ForwardingSettings:
+        """The settings under *prefix*:
+
+        - ``poll-interval``, ``batch-size``, ``claim-timeout``, ``handler-timeout``, ``start``,
+          ``error-strategy`` and ``retention.*``, as :meth:`~pyfly.eda.outbox.OutboxSettings.from_config` reads
+          them, each defaulting to its ``pyfly.eda.outbox.*`` value;
+        - ``destinations``: a comma-separated list (unset, empty or ``*``: every destination);
+        - ``group``: the consumer group (unset: ``pyfly.forward:<provider>``);
+        - ``retry.max-attempts``, ``retry.initial-delay``, ``retry.multiplier``, ``retry.max-delay``: the retry
+          policy, each defaulting to *retry*'s (the listener container's, ``pyfly.eda.listener.retry.*``).
+
+        A value that does not parse, or is out of range, raises ``ValueError`` naming the key.
+        """
+        base_prefix = prefix.rsplit(".", 1)[0]
+        relay = OutboxSettings.from_config(config, prefix, defaults=OutboxSettings.from_config(config, base_prefix))
+
+        def raw(key: str) -> str | None:
+            value = config.get(f"{prefix}.{key}")
+            text = "" if value is None else str(value).strip()
+            return text or None
+
+        listed = [part.strip() for part in (raw("destinations") or "").split(",") if part.strip()]
+        destinations = None if not listed or "*" in listed else tuple(dict.fromkeys(listed))
+        return cls(
+            relay=relay,
+            destinations=destinations,
+            group=raw("group"),
+            retry=_retry_policy(config, f"{prefix}.retry", retry),
+        )
+
+    def forwarder_options(self) -> dict[str, Any]:
+        """The :class:`OutboxForwarder` keyword arguments these settings give."""
+        relay = self.relay
+        options: dict[str, Any] = {
+            "destinations": list(self.destinations) if self.destinations is not None else None,
+            "group": self.group,
+            "start_position": relay.start_position,
+            "error_strategy": relay.error_strategy,
+            "poll_interval": relay.poll_interval,
+            "batch_size": relay.batch_size,
+            "claim_timeout": relay.claim_timeout,
+            "handler_timeout": relay.handler_timeout,
+            "retention": relay.retention,
+        }
+        if self.retry is not None:
+            options["retry"] = self.retry
+        return options
+
+
+def _retry_policy(config: Any, prefix: str, default: RetryPolicy | None) -> RetryPolicy | None:
+    """The retry policy under *prefix* (``max-attempts``, ``initial-delay``, ``multiplier``, ``max-delay``), each key
+    defaulting to *default*'s; *default* itself when none is set."""
+    from dataclasses import replace
+
+    from pyfly.config.properties.data import parse_float, parse_int
+    from pyfly.messaging.listener_container import ExponentialBackOff, RetryPolicy
+
+    def raw(key: str) -> Any:
+        value = config.get(f"{prefix}.{key}")
+        return None if value is None or (isinstance(value, str) and not value.strip()) else value
+
+    def number(key: str, fallback: float) -> float:
+        value = raw(key)
+        parsed = fallback if value is None else parse_float(value, f"{prefix}.{key}")
+        if parsed < 0:
+            raise ValueError(f"{prefix}.{key} must not be negative, got {parsed:g}")
+        return parsed
+
+    keys = ("max-attempts", "initial-delay", "multiplier", "max-delay")
+    if all(raw(key) is None for key in keys):
+        return default
+    policy = default or RetryPolicy()
+    attempts = raw("max-attempts")
+    max_attempts = policy.max_attempts if attempts is None else parse_int(attempts, f"{prefix}.max-attempts")
+    if max_attempts < 1:
+        raise ValueError(f"{prefix}.max-attempts must be at least 1, got {max_attempts}")
+    backoff = policy.backoff if isinstance(policy.backoff, ExponentialBackOff) else ExponentialBackOff()
+    return replace(
+        policy,
+        max_attempts=max_attempts,
+        backoff=ExponentialBackOff(
+            initial=number("initial-delay", backoff.initial),
+            multiplier=number("multiplier", backoff.multiplier),
+            max_delay=number("max-delay", backoff.max_delay),
+        ),
+    )
 
 
 class OutboxForwarder(OutboxRelay):

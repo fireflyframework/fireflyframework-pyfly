@@ -184,18 +184,22 @@ class OutboxSettings:
     notify: bool | None = None
 
     @classmethod
-    def from_config(cls, config: Any, prefix: str = "pyfly.eda.outbox") -> OutboxSettings:
+    def from_config(
+        cls, config: Any, prefix: str = "pyfly.eda.outbox", *, defaults: OutboxSettings | None = None
+    ) -> OutboxSettings:
         """The settings under *prefix*: ``poll-interval`` (``5s``), ``batch-size`` (``100``), ``claim-timeout``
         (``300s``), ``handler-timeout`` (``60s``; ``0`` or ``none``: unbounded), ``start`` (``latest`` or
         ``earliest``), ``error-strategy`` (``DEAD_LETTER``), ``retention.delivered`` (``1h``; ``none``: keep),
         ``retention.max-age`` (unset: never), ``retention.interval`` (``1m``), ``retention.batch-size``
         (``1000``), ``auto-create-tables`` and ``notify`` (unset: the provider decides). Durations are seconds
         or ``500ms``, ``90s``, ``5m``, ``2h``. A value that does not parse raises ``ValueError`` naming the key.
+        A key that is not set takes its value from *defaults* (the forwarder's ``pyfly.eda.outbox.forward.*``
+        default to ``pyfly.eda.outbox.*``), or the default above.
         """
         from pyfly.config.properties.data import parse_bool, parse_int
         from pyfly.resilience.registry import parse_duration
 
-        defaults = cls()
+        defaults = defaults or cls()
 
         def raw(key: str) -> Any:
             value = config.get(f"{prefix}.{key}")
@@ -219,9 +223,9 @@ class OutboxSettings:
             value = seconds(key, None if default is None else default.total_seconds(), optional=True)
             return None if value is None else timedelta(seconds=value)
 
-        def flag(key: str) -> bool | None:
+        def flag(key: str, default: bool | None) -> bool | None:
             value = raw(key)
-            return None if value is None else parse_bool(value, f"{prefix}.{key}")
+            return default if value is None else parse_bool(value, f"{prefix}.{key}")
 
         strategy = raw("error-strategy")
         try:
@@ -246,7 +250,7 @@ class OutboxSettings:
             error_strategy=error_strategy,
             retention=Retention(
                 delivered=span("retention.delivered", defaults.retention.delivered),
-                max_age=span("retention.max-age", None),
+                max_age=span("retention.max-age", defaults.retention.max_age),
                 interval=interval if interval is not None else defaults.retention.interval,
                 batch_size=(
                     defaults.retention.batch_size
@@ -254,8 +258,8 @@ class OutboxSettings:
                     else parse_int(prune_batch, f"{prefix}.retention.batch-size")
                 ),
             ),
-            create_tables=flag("auto-create-tables"),
-            notify=flag("notify"),
+            create_tables=flag("auto-create-tables", defaults.create_tables),
+            notify=flag("notify", defaults.notify),
         )
 
 

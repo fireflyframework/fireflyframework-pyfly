@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry
@@ -242,3 +243,204 @@ async def test_an_application_s_own_domain_event_publisher_replaces_the_auto_con
     finally:
         await context.stop()
     assert active_domain_event_publisher() is None
+
+
+# -- pyfly.eda.outbox.enabled: the transactional outbox over any provider (WP09b) ----------------------------------
+
+
+def _outbox_config(tmp_path: Path, **values: object) -> Any:
+    base: dict[str, object] = {"pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"}
+    base.update(values)
+    return pyfly_config(base=base)
+
+
+class TestTransactionalOutboxConfiguration:
+    def test_the_outbox_layer_is_off_by_default_and_when_disabled(self, tmp_path: Path) -> None:
+        from pyfly.eda.adapters.kafka import KafkaEventBus
+
+        assert isinstance(
+            EdaAutoConfiguration().event_publisher(_outbox_config(tmp_path, **{"pyfly.eda.provider": "kafka"})),
+            KafkaEventBus,
+        )
+        disabled = _outbox_config(tmp_path, **{"pyfly.eda.provider": "memory", "pyfly.eda.outbox.enabled": "false"})
+        assert isinstance(EdaAutoConfiguration().event_publisher(disabled), InMemoryEventBus)
+
+    def test_enabled_wraps_the_providers_publisher_in_the_outbox(self, tmp_path: Path) -> None:
+        from pyfly.eda.adapters.kafka import KafkaEventBus
+        from pyfly.eda.outbox import SqlOutboxStore
+        from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
+
+        config = _outbox_config(
+            tmp_path,
+            **{
+                "pyfly.eda.provider": "kafka",
+                "pyfly.eda.kafka.bootstrap-servers": "kafka:9092",
+                "pyfly.eda.outbox.enabled": "true",
+                "pyfly.eda.outbox.poll-interval": "2s",
+            },
+        )
+        publisher = EdaAutoConfiguration().event_publisher(config)
+
+        assert isinstance(publisher, TransactionalEventPublisher)
+        assert isinstance(publisher.transport, KafkaEventBus)
+        assert publisher.transport._bootstrap_servers == "kafka:9092"
+        assert isinstance(publisher.store, SqlOutboxStore)
+        assert publisher.store.datasource is DataSourceRegistry.for_config(config).primary
+        assert publisher.group == "pyfly.forward:kafka"
+        forwarder = publisher.forwarder
+        assert forwarder.destinations is None  # every destination
+        assert forwarder.poll_interval == 2.0  # pyfly.eda.outbox.* is the default of the forwarder's settings
+        assert forwarder._retry.max_attempts == 5  # the listener container's retry policy (pyfly.eda.listener.*)
+
+    def test_the_forward_keys_override_the_outbox_settings(self, tmp_path: Path) -> None:
+        from pyfly.eda.outbox import StartPosition
+        from pyfly.eda.types import ErrorStrategy
+        from pyfly.messaging.listener_container import ExponentialBackOff
+
+        config = _outbox_config(
+            tmp_path,
+            **{
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+                "pyfly.eda.outbox.poll-interval": "2s",
+                "pyfly.eda.outbox.batch-size": "50",
+                "pyfly.eda.listener.retry.max-attempts": "9",
+                "pyfly.eda.outbox.forward.poll-interval": "250ms",
+                "pyfly.eda.outbox.forward.claim-timeout": "2m",
+                "pyfly.eda.outbox.forward.handler-timeout": "15s",
+                "pyfly.eda.outbox.forward.start": "earliest",
+                "pyfly.eda.outbox.forward.error-strategy": "retry",
+                "pyfly.eda.outbox.forward.destinations": "orders, payments",
+                "pyfly.eda.outbox.forward.group": "orders-to-kafka",
+                "pyfly.eda.outbox.forward.retry.initial-delay": "0.5",
+                "pyfly.eda.outbox.forward.retry.max-delay": "60",
+                "pyfly.eda.outbox.forward.retention.delivered": "10m",
+            },
+        )
+        forwarder = EdaAutoConfiguration().event_publisher(config).forwarder  # type: ignore[attr-defined]
+
+        assert forwarder.group == "orders-to-kafka"
+        assert forwarder.destinations == ["orders", "payments"]
+        assert (forwarder.poll_interval, forwarder._batch_size) == (0.25, 50)
+        assert forwarder._claim_timeout.total_seconds() == 120.0
+        assert forwarder._handler_timeout == 15.0
+        assert forwarder._start_position is StartPosition.EARLIEST
+        assert forwarder._error_strategy is ErrorStrategy.RETRY
+        assert forwarder._retention.delivered.total_seconds() == 600.0
+        retry = forwarder._retry
+        assert retry.max_attempts == 9  # pyfly.eda.listener.retry.* where the forward keys say nothing
+        assert isinstance(retry.backoff, ExponentialBackOff)
+        assert (retry.backoff.initial, retry.backoff.multiplier, retry.backoff.max_delay) == (0.5, 2.0, 60.0)
+
+    def test_every_destination_is_forwarded_when_the_list_says_so(self, tmp_path: Path) -> None:
+        for value in ("*", " "):
+            config = _outbox_config(
+                tmp_path,
+                **{
+                    "pyfly.eda.provider": "memory",
+                    "pyfly.eda.outbox.enabled": "true",
+                    "pyfly.eda.outbox.forward.destinations": value,
+                },
+            )
+            assert EdaAutoConfiguration().event_publisher(config).forwarder.destinations is None  # type: ignore[attr-defined]
+
+    def test_the_outbox_store_follows_the_schema_strategy_unless_told(self, tmp_path: Path) -> None:
+        for ddl_auto, explicit, creates in (
+            ("create", None, True),
+            ("none", None, False),
+            ("none", "true", True),
+            ("create", "false", False),
+        ):
+            values: dict[str, object] = {
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+                "pyfly.data.relational.ddl-auto": ddl_auto,
+            }
+            if explicit is not None:
+                values["pyfly.eda.outbox.auto-create-tables"] = explicit
+            publisher = EdaAutoConfiguration().event_publisher(_outbox_config(tmp_path, **values))
+            assert publisher.store.creates_tables is creates, (ddl_auto, explicit)  # type: ignore[attr-defined]
+
+    def test_the_outbox_datasource_can_be_named(self, tmp_path: Path) -> None:
+        config = _outbox_config(
+            tmp_path,
+            **{
+                "pyfly.data.relational.datasources.reporting.url": f"sqlite+aiosqlite:///{tmp_path / 'r.db'}",
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+                "pyfly.eda.outbox.datasource": "reporting",
+            },
+        )
+        publisher = EdaAutoConfiguration().event_publisher(config)
+        assert publisher.store.datasource is DataSourceRegistry.for_config(config).get("reporting")  # type: ignore[attr-defined]
+
+    def test_the_database_and_postgres_providers_are_the_outbox_already(self, tmp_path: Path) -> None:
+        from pyfly.eda.adapters.database import DatabaseEventBus
+
+        config = _outbox_config(tmp_path, **{"pyfly.eda.provider": "database", "pyfly.eda.outbox.enabled": "true"})
+        assert type(EdaAutoConfiguration().event_publisher(config)) is DatabaseEventBus
+
+    def test_the_mongo_store_is_not_available_until_it_lands(self, tmp_path: Path) -> None:
+        import pytest
+
+        for provider in ("memory", "database", "postgres"):
+            config = _outbox_config(
+                tmp_path,
+                **{
+                    "pyfly.eda.provider": provider,
+                    "pyfly.eda.outbox.enabled": "true",
+                    "pyfly.eda.outbox.store": "mongo",
+                },
+            )
+            with pytest.raises(ValueError, match="not available until the Mongo outbox store lands"):
+                EdaAutoConfiguration().event_publisher(config)
+
+    def test_auto_picks_the_store_of_the_applications_datasource(self, tmp_path: Path) -> None:
+        import pytest
+
+        from pyfly.eda.outbox import SqlOutboxStore
+
+        document_only = pyfly_config(
+            base={
+                "pyfly.data.document.enabled": "true",
+                "pyfly.data.document.uri": "mongodb://localhost:27017",
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+            }
+        )
+        with pytest.raises(ValueError, match="not available until the Mongo outbox store lands"):
+            EdaAutoConfiguration().event_publisher(document_only)
+
+        both = _outbox_config(
+            tmp_path,
+            **{
+                "pyfly.data.document.enabled": "true",
+                "pyfly.eda.provider": "memory",
+                "pyfly.eda.outbox.enabled": "true",
+                "pyfly.eda.outbox.store": "AUTO",
+            },
+        )
+        assert isinstance(EdaAutoConfiguration().event_publisher(both).store, SqlOutboxStore)  # type: ignore[attr-defined]
+
+    def test_values_that_do_not_parse_name_their_key(self, tmp_path: Path) -> None:
+        import pytest
+
+        for key, value, message in (
+            ("pyfly.eda.outbox.enabled", "maybe", "pyfly.eda.outbox.enabled"),
+            ("pyfly.eda.outbox.store", "redis", "pyfly.eda.outbox.store must be sql, mongo or auto"),
+            ("pyfly.eda.outbox.forward.retry.max-attempts", "0", "pyfly.eda.outbox.forward.retry.max-attempts"),
+            ("pyfly.eda.outbox.forward.poll-interval", "soon", "pyfly.eda.outbox.forward.poll-interval"),
+        ):
+            config = _outbox_config(
+                tmp_path, **{"pyfly.eda.provider": "memory", "pyfly.eda.outbox.enabled": "true", key: value}
+            )
+            with pytest.raises(ValueError, match=message):
+                EdaAutoConfiguration().event_publisher(config)
+
+    def test_command_and_domain_events_publish_in_the_unit_through_it(self, tmp_path: Path) -> None:
+        from pyfly.cqrs.event.publisher import EdaCommandEventPublisher
+
+        config = _outbox_config(tmp_path, **{"pyfly.eda.provider": "memory", "pyfly.eda.outbox.enabled": "true"})
+        publisher = EdaAutoConfiguration().event_publisher(config)
+        assert getattr(publisher, "joins_transactions", False) is True
+        assert EdaCommandEventPublisher(publisher).joins_transactions is True

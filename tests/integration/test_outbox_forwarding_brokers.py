@@ -23,7 +23,9 @@ testcontainer, with SQLite file and PostgreSQL as the application database, read
   more, when its lease ends, with the same ``x-pyfly-event-id``;
 - a broker that cannot be reached is retried, then the event is dead-lettered, and forwarding resumes when the
   broker is back;
-- two instances forwarding from one database publish each event once.
+- two instances forwarding from one database publish each event once;
+- in an application context (``pyfly.eda.outbox.enabled``), a committed ``@transactional`` method's event goes
+  through the broker to the ``@event_listener`` once, and a rolled-back one's never.
 """
 
 from __future__ import annotations
@@ -45,11 +47,17 @@ import pytest
 from sqlalchemy import Identity, Integer, String, func, select
 from sqlalchemy.orm import Mapped, mapped_column
 
+from pyfly.container.stereotypes import repository, service
+from pyfly.context.application_context import ApplicationContext
+from pyfly.data.relational.auto_configuration import RelationalAutoConfiguration
 from pyfly.data.relational.sqlalchemy.entity import Base
+from pyfly.data.relational.sqlalchemy.repository import Repository
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
-from pyfly.data.transaction import TransactionTemplate
+from pyfly.data.transaction import TransactionTemplate, transactional
+from pyfly.eda.auto_configuration import EdaAutoConfiguration
+from pyfly.eda.decorators import event_listener
 from pyfly.eda.domain_events import EVENT_ID_HEADER
-from pyfly.eda.outbox import SqlOutboxStore
+from pyfly.eda.outbox import OutboxTables, SqlOutboxStore
 from pyfly.eda.outbox_forwarding import OutboxForwarder, TransactionalEventPublisher
 from pyfly.eda.ports.outbound import EventPublisher
 from pyfly.eda.serializers import JsonEventSerializer
@@ -65,6 +73,11 @@ class BrokerOrder(Base):
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(String(64))
+
+
+@repository
+class BrokerOrderRepository(Repository[BrokerOrder, int]):
+    pass
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -512,3 +525,75 @@ async def test_two_instances_forward_each_event_once(relational_backend: Relatio
     assert sorted(message.payload["n"] for message in messages) == list(range(30))  # none twice, none lost
     assert len(set(_event_ids(messages))) == 30
     assert await instances[0].pending() == []
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# In an application context
+# ---------------------------------------------------------------------------------------------------------------
+
+
+@service
+class OrderDesk:
+    def __init__(self, orders: BrokerOrderRepository, events: EventPublisher) -> None:
+        self.orders = orders
+        self.events = events
+        self.destination = ""
+
+    @transactional
+    async def place(self, name: str, *, fail: bool = False) -> None:
+        await self.orders.save(BrokerOrder(name=name))
+        await self.events.publish(self.destination, "order.placed", {"n": name})
+        if fail:
+            raise RuntimeError("payment declined")
+
+
+@service
+class OrderEvents:
+    def __init__(self) -> None:
+        self.received: list[EventEnvelope] = []
+
+    @event_listener(["order.*"])
+    async def on_order(self, envelope: EventEnvelope) -> None:
+        self.received.append(envelope)
+
+
+async def test_the_auto_configured_publisher_carries_a_committed_unit_through_the_broker_to_the_listeners(
+    relational_backend: RelationalBackend, broker: Broker
+) -> None:
+    await relational_backend.create_tables(BrokerOrder, *OutboxTables.named().all())
+    group = f"wp09b-app-{uuid.uuid4().hex[:8]}"
+    broker.queues.append(f"{group}.{broker.destination}")
+    url_key = "pyfly.eda.kafka.bootstrap-servers" if broker.name == "kafka" else "pyfly.eda.rabbitmq.url"
+    config = relational_backend.config(
+        {
+            "pyfly.eda.provider": broker.name,
+            url_key: broker.url,
+            "pyfly.eda.destinations": broker.destination,
+            "pyfly.eda.group": group,
+            "pyfly.eda.outbox.enabled": "true",
+            "pyfly.eda.outbox.poll-interval": "0.2",
+        }
+    )
+    ctx = ApplicationContext(config)
+    for bean in (RelationalAutoConfiguration, EdaAutoConfiguration, BrokerOrderRepository, OrderDesk, OrderEvents):
+        ctx.register_bean(bean)
+    await ctx.start()
+    try:
+        publisher = ctx.get_bean(EventPublisher)
+        assert isinstance(publisher, TransactionalEventPublisher)
+        assert publisher.group == f"pyfly.forward:{broker.name}"
+        desk = ctx.get_bean(OrderDesk)
+        desk.destination = broker.destination
+        received = ctx.get_bean(OrderEvents).received
+
+        with pytest.raises(RuntimeError, match="payment declined"):
+            await desk.place("rolled back", fail=True)
+        await desk.place("committed")
+
+        await _eventually(lambda: len(received) >= 1, timeout=60)
+        await asyncio.sleep(1.5)  # a copy too many would arrive meanwhile
+        assert [envelope.payload for envelope in received] == [{"n": "committed"}]
+        assert received[0].headers[EVENT_ID_HEADER]
+        assert publisher.relay.counters.delivered == 1
+    finally:
+        await ctx.stop()
