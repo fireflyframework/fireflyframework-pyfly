@@ -17,12 +17,15 @@ With ``pyfly.data.document.enabled`` and no relational datasource, ``pyfly.eda.o
 store: the in-process transport made transactional (``pyfly.eda.outbox.enabled``) and the ``database`` bus keep
 their outbox in the document database, on the document datasource's units of work. A ``@transactional`` method
 that saves a document and publishes an event commits both or neither: a rolled-back one reaches no listener, a
-committed one reaches it once. (The Kafka and RabbitMQ lanes are ``test_mongo_outbox_forwarding_brokers.py``.)
+committed one reaches it once. The events a MongoDB aggregate raises (``pyfly.eda.domain-events.destination``) are
+appended in the unit that saves it, as an outbox bus appends a relational aggregate's. (The Kafka and RabbitMQ lanes
+are ``test_mongo_outbox_forwarding_brokers.py``.)
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -30,9 +33,11 @@ from beanie import Document, PydanticObjectId
 
 from pyfly.container.stereotypes import repository, service
 from pyfly.context.application_context import ApplicationContext
+from pyfly.data.document.mongodb.document import AggregateDocument
 from pyfly.data.document.mongodb.repository import MongoRepository
 from pyfly.data.document.mongodb.transaction_manager import MongoTransactionManager
 from pyfly.data.transaction import transactional
+from pyfly.domain import DomainEvent
 from pyfly.eda.adapters.database import DatabaseEventBus
 from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
 from pyfly.eda.auto_configuration import EdaAutoConfiguration
@@ -79,6 +84,50 @@ class AppOrderEvents:
 
     @event_listener(["order.*"])
     async def on_order(self, envelope: EventEnvelope) -> None:
+        self.received.append(envelope)
+
+
+@dataclass(frozen=True)
+class AppOrderShipped(DomainEvent):
+    order: str = ""
+
+
+class ShippedOrder(AggregateDocument):
+    reference: str
+
+    class Settings:
+        name = "wp06b_shipped_orders"
+
+    def ship(self) -> None:
+        self.raise_event(AppOrderShipped(order=self.reference))
+
+
+@repository
+class ShippedOrderRepository(MongoRepository[ShippedOrder, PydanticObjectId]):
+    pass
+
+
+@service
+class Shipping:
+    def __init__(self, orders: ShippedOrderRepository) -> None:
+        self.orders = orders
+
+    @transactional
+    async def ship(self, reference: str, *, fail: bool = False) -> None:
+        order = ShippedOrder(reference=reference)
+        order.ship()
+        await self.orders.save(order)
+        if fail:
+            raise RuntimeError("carrier unavailable")
+
+
+@service
+class ShippedEvents:
+    def __init__(self) -> None:
+        self.received: list[EventEnvelope] = []
+
+    @event_listener(["AppOrderShipped"])
+    async def on_shipped(self, envelope: EventEnvelope) -> None:
         self.received.append(envelope)
 
 
@@ -135,5 +184,42 @@ async def test_a_document_only_application_keeps_its_outbox_in_mongodb(
         assert await database["wp06b_app_orders"].count_documents({}) == 1
         assert await database[store.collections.events].count_documents({}) == 1
         assert await store.pending(publisher.relay.group) == []  # type: ignore[attr-defined]  # settled once handled
+    finally:
+        await ctx.stop()
+
+
+async def test_the_events_of_a_mongodb_aggregate_go_through_the_outbox_in_the_unit_that_saves_it(
+    mongo_backend: MongoBackend,
+) -> None:
+    config = mongo_backend.config(
+        {
+            "pyfly.eda.provider": "memory",
+            "pyfly.eda.outbox.enabled": "true",
+            "pyfly.eda.outbox.poll-interval": "0.2",
+            "pyfly.eda.domain-events.destination": "shipping",
+        }
+    )
+    ctx = ApplicationContext(config)
+    for bean in (EdaAutoConfiguration, ShippedOrderRepository, Shipping, ShippedEvents):
+        ctx.register_bean(bean)
+    await ctx.start()
+    try:
+        publisher = ctx.get_bean(EventPublisher)
+        assert isinstance(publisher, TransactionalEventPublisher)
+        assert isinstance(publisher.store, MongoOutboxStore)
+        shipping = ctx.get_bean(Shipping)
+        received = ctx.get_bean(ShippedEvents).received
+
+        with pytest.raises(RuntimeError, match="carrier unavailable"):
+            await shipping.ship("s-1", fail=True)
+        assert await publisher.pending() == []  # the rolled-back unit appended nothing
+        await shipping.ship("s-2")
+
+        await _eventually(lambda: len(received) >= 1)
+        await asyncio.sleep(1.0)  # a copy too many would arrive meanwhile
+        assert [(envelope.destination, envelope.payload["order"]) for envelope in received] == [("shipping", "s-2")]
+        assert received[0].headers[EVENT_ID_HEADER] == received[0].payload["event_id"]  # the domain event's id
+        database = publisher.store.client[mongo_backend.database]
+        assert await database["wp06b_shipped_orders"].count_documents({}) == 1
     finally:
         await ctx.stop()

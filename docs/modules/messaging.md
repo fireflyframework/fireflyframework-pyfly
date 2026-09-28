@@ -421,8 +421,11 @@ adapters of `pyfly.messaging` do not remove it.
 The transactional outbox of `pyfly.eda` does, for events published through the EDA
 `EventPublisher` (see [Any broker, transactional](events.md#any-broker-transactional-pyflyedaoutboxenabled)).
 With `pyfly.eda.outbox.enabled: true`, a publish on the Kafka, RabbitMQ or Redis bus
-is appended to the outbox tables in the caller's unit of work and forwarded to the
-broker after the commit:
+is appended to the outbox in the caller's unit of work and forwarded to the broker
+after the commit. The outbox is the `pyfly_outbox_*` tables on a relational datasource,
+or, in a MongoDB application, the `pyfly_outbox_*` collections of the document database,
+written in the document unit's transaction (`pyfly.eda.outbox.store`, see
+[The outbox on MongoDB](events.md#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)):
 
 * **A unit that rolls back publishes nothing.**
 * **A unit that commits publishes at least once**: once in the normal path, again
