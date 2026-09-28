@@ -435,7 +435,8 @@ broker after the commit:
   several processes forward side by side.
 * **Several instances share the forwarding** of one outbox and one group, each event
   forwarded by one of them; after the last attempt of a broker outage the event waits
-  in the outbox's dead letters.
+  in the outbox's dead letters (in the application's `EdaDeadLetterStore` when it
+  defines one as a bean).
 
 A message published through `MessageBrokerPort` itself has none of this: publish it
 after the commit (`pyfly.data.transaction.after_commit`) where losing it on a crash is
