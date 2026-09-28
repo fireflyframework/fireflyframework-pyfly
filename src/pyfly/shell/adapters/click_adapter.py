@@ -28,6 +28,8 @@ the Mongo client were created on:
   ``run()`` returns its exit code: 1, or the one a command that ends on purpose chose (``SystemExit``,
   Click's ``Exit``, a ``ClickException`` such as ``UsageError``), async commands included. Such an exit ends
   the command, never the REPL nor the application.
+- An async command is awaited once Click has parsed its arguments and popped its context, so
+  ``click.get_current_context()`` is not available inside it: it takes what it needs as parameters.
 
 The synchronous :meth:`ClickShellAdapter.invoke` is for loop-less use (a script, a sync test): it runs an async
 command with ``asyncio.run()``, and refuses one while a loop is running (use :meth:`ClickShellAdapter.ainvoke`

@@ -564,7 +564,7 @@ first use and added to the root `click.Group`.
 | Method | Return Type | Description |
 |--------|-------------|-------------|
 | `invoke(args)` | `tuple[int, str]` | Synchronous invocation without a running loop. Returns `(exit_code, output)`. Catches `SystemExit` (from `--help`), `UsageError`, and general exceptions; an async command runs with `asyncio.run()`, and raises `RuntimeError` while a loop is running. |
-| `ainvoke(args)` | `tuple[int, str]` | Invocation on the running loop: an async command is awaited there. A failing command returns exit code 1 and its message, and its traceback is logged (`shell_command_failed`). A command that ends on purpose (`SystemExit`, Click's `Exit`, a `ClickException` such as `UsageError`) returns the exit code it chose, as a synchronous command does; it ends the command, never the REPL. |
+| `ainvoke(args)` | `tuple[int, str]` | Invocation on the running loop: an async command is awaited there. A failing command returns exit code 1 and its message, and its traceback is logged (`shell_command_failed`). A command that ends on purpose (`SystemExit`, Click's `Exit`, a `ClickException` such as `UsageError`) returns the exit code it chose, as a synchronous command does; it ends the command, never the REPL. An async command is awaited once Click has popped its context: `click.get_current_context()` is not available inside it. |
 | `run(args)` | `int` | One command through `ainvoke()`: prints its output (a failure's message to stderr) and returns the exit code. |
 | `run_interactive()` | `None` | REPL loop: reads `input("> ")` off the loop → split → `ainvoke()` → print output. Exits on `EOF` or `Ctrl+C`. |
 
