@@ -127,3 +127,34 @@ async def test_session_store_get_missing_returns_none(redis_url: str) -> None:
         assert result is None
     finally:
         await client.aclose()
+
+
+@requires_docker
+@pytest.mark.asyncio
+async def test_session_store_replace_changes_only_a_session_redis_holds(redis_url: str) -> None:
+    """replace() writes only over a session Redis still holds (``SET ... XX``) and moves its expiry on: a session
+    deleted (logged out, evicted) or expired is not brought back."""
+    import uuid
+
+    import redis.asyncio as aioredis
+
+    from pyfly.session.adapters.redis import RedisSessionStore
+
+    client = aioredis.from_url(redis_url)
+    try:
+        store = RedisSessionStore(client)
+        sid = f"sess-replace-{uuid.uuid4().hex}"
+
+        assert await store.replace(sid, {"a": 1}, ttl=60) is False
+        assert await store.exists(sid) is False
+
+        await store.save(sid, {"a": 1}, ttl=10)
+        assert await store.replace(sid, {"a": 2}, ttl=60) is True
+        assert await store.get(sid) == {"a": 2}
+        assert await client.ttl(f"pyfly:session:{sid}") > 10
+
+        await store.delete(sid)
+        assert await store.replace(sid, {"a": 3}, ttl=60) is False
+        assert await store.exists(sid) is False
+    finally:
+        await client.aclose()

@@ -50,6 +50,19 @@ class InMemorySessionStore:
             expires_at = time.monotonic() + ttl
             self._store[session_id] = (data, expires_at)
 
+    async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Replace the session's data and TTL only if the store holds it and it has not expired (under the
+        lock); ``False`` otherwise, and nothing is written."""
+        async with self._lock:
+            entry = self._store.get(session_id)
+            if entry is None:
+                return False
+            if time.monotonic() > entry[1]:
+                del self._store[session_id]
+                return False
+            self._store[session_id] = (data, time.monotonic() + ttl)
+            return True
+
     async def delete(self, session_id: str) -> None:
         """Remove a session."""
         async with self._lock:

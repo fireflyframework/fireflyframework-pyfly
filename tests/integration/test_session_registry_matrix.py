@@ -25,6 +25,9 @@
 - Through the whole login request (``SessionFilter`` plus ``OAuth2LoginHandler``) on two replicas, an evicted
   session stayed evicted only if its own login's request did not save it again when the handler returned; it
   did, and concurrent evict-oldest logins left more logged-in sessions in ``pyfly_sessions`` than the cap.
+- Any request of a session that changes it and ends after the session was evicted or logged out saved it back
+  (an upsert): the revoked session authenticated again. The filter replaces a session the store held only
+  while the store still holds it (one conditional UPDATE).
 """
 
 from __future__ import annotations
@@ -142,6 +145,32 @@ async def test_concurrent_logins_through_the_login_flow_keep_the_cap(
             concurrent=concurrent,
             rounds=3,
         )
+
+
+@pytest.mark.parametrize("strategy", ["evict-oldest", "reject-new"])
+async def test_a_session_write_after_the_login_keeps_the_cap(
+    relational_backend: RelationalBackend, strategy: str
+) -> None:
+    """The application changes the session after the login handler returned, on two replicas."""
+    async with _replicas(relational_backend) as replicas:
+        flows = [
+            logins.Replica(
+                store, _controller(store, registry, max_sessions=2, strategy=strategy), write_after_login=True
+            )
+            for store, registry, _ in replicas
+        ]
+
+        await logins.concurrent_logins_keep_the_cap(
+            flows, max_sessions=2, evict_oldest=strategy == "evict-oldest", concurrent=16, rounds=3
+        )
+
+
+@pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
+async def test_a_revoked_session_stays_revoked(relational_backend: RelationalBackend, revocation: str) -> None:
+    async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
+        replica = logins.Replica(store, _controller(store, registry, max_sessions=1))
+
+        await logins.a_revoked_session_stays_revoked(replica, revocation)
 
 
 async def test_one_login_at_a_time_through_the_login_flow_keeps_the_latest_sessions(
@@ -355,6 +384,25 @@ async def test_the_session_store_round_trip(relational_backend: RelationalBacken
         assert await store.get("sid") == {"n": 2}
         await store.delete("sid")
         assert await store.get("sid") is None and not await store.exists("sid")
+
+
+async def test_replace_changes_only_a_session_the_store_holds(relational_backend: RelationalBackend) -> None:
+    now = [datetime.now(UTC)]
+    async with repository_datasources(relational_backend) as datasources:
+        store = SqlSessionStore(datasources.registry.primary, clock=lambda: now[0], purge_interval=None)
+        assert await store.replace("gone", {"a": 1}, ttl=60) is False
+        assert await store.get("gone") is None
+
+        await store.save("sid", {"a": 1}, ttl=10)
+        assert await store.replace("sid", {"a": 2}, ttl=60) is True
+        assert await store.replace("sid", {"a": 2}, ttl=60) is True  # the same values again still count
+        assert await store.get("sid") == {"a": 2}
+
+        now[0] = now[0] + timedelta(seconds=30)
+        assert await store.exists("sid")  # the replace moved the expiry 60 seconds on
+        now[0] = now[0] + timedelta(seconds=31)
+        assert await store.replace("sid", {"a": 3}, ttl=60) is False  # expired: not brought back
+        assert await store.get("sid") is None
 
 
 async def test_expired_sessions_are_not_read_and_are_purged(relational_backend: RelationalBackend) -> None:

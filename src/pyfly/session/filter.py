@@ -15,14 +15,17 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE
-from pyfly.session.ports.outbound import SessionStore
+from pyfly.session.ports.outbound import ConditionalSessionStore, SessionStore
 from pyfly.session.session import HttpSession
 from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_COOKIE_NAME = "PYFLY_SESSION"
 _DEFAULT_TTL = 1800  # 30 minutes
@@ -35,15 +38,26 @@ class SessionFilter(OncePerRequestFilter):
     from the ``SessionStore``, attaches the ``HttpSession`` to
     ``request.state.session``, and persists changes after the response.
 
+    **What is saved.** A new session, and a session changed through the ``HttpSession`` API
+    (``set_attribute``, ``remove_attribute``, ``rotate_id``; ``invalidate`` deletes it). A value
+    mutated in place (an item appended to a list attribute, say) is saved only along with such a
+    change; once the session was saved, an in-place mutation alone is not saved again.
+
+    **A revoked session stays revoked.** A session the store is known to hold
+    (:attr:`HttpSession.stored_id`: loaded by this request, or already saved by it) is written back
+    through the store's ``replace`` (:class:`~pyfly.session.ports.outbound.ConditionalSessionStore`),
+    only while the store still holds it. When it was logged out, evicted or expired while the request
+    ran, the change is dropped, the session counts as invalidated and its cookie is cleared: the
+    request neither brings it back nor sends its cookie again. A new or rotated id is inserted with
+    ``save``. A store without ``replace`` gets every change through ``save``, an insert-or-replace,
+    and cannot tell a revoked session from a live one.
+
     ``request.state.persist_session`` saves the session at once (a coroutine function taking no
     arguments): the OAuth2 login handler saves the session it has just logged in before it registers
-    the session with the concurrency controller, which counts a session while the store has it.
-
-    A save leaves the session unmodified (:meth:`HttpSession.mark_persisted`), so the persist that runs
-    when the handler returns saves it again only for a change made after ``persist_session``. That keeps
-    the login's save its last write of the session: a concurrent login of the same principal may evict
-    the session (delete it from the store) in the meantime, and saving it again would bring it back,
-    logged in and no longer counted by the cap.
+    the session with the concurrency controller, which counts a session while the store has it. A
+    save leaves the session unmodified (:meth:`HttpSession.mark_persisted`), so the persist that runs
+    when the handler returns writes it again only for a later change, and then only while the store
+    still holds it: a concurrent login of the same principal may have evicted it meanwhile.
     """
 
     __pyfly_order__ = HIGHEST_PRECEDENCE + 150
@@ -56,6 +70,8 @@ class SessionFilter(OncePerRequestFilter):
         secure: bool = False,
     ) -> None:
         self._store = store
+        # Writes a session only while the store holds it; None for a store that cannot.
+        self._replace = store.replace if isinstance(store, ConditionalSessionStore) else None
         self._cookie_name = cookie_name
         self._ttl = ttl
         self._secure = secure
@@ -113,8 +129,8 @@ class SessionFilter(OncePerRequestFilter):
         return HttpSession(new_id, is_new=True)
 
     async def _persist_session(self, session: HttpSession) -> None:
-        """Save or delete the session in the store based on its state; a saved session is left unmodified
-        until its next change."""
+        """Save or delete the session in the store based on its state (see the class documentation); a saved
+        session is left unmodified until its next change."""
         # If the id was rotated (e.g. on login), drop the pre-rotation entry so a
         # fixed/stale id can no longer resolve to this session (anti-fixation).
         if session.previous_id is not None and session.previous_id != session.id:
@@ -122,9 +138,18 @@ class SessionFilter(OncePerRequestFilter):
 
         if session.invalidated:
             await self._store.delete(session.id)
-        elif session.modified:
+            return
+        if not session.modified:
+            return
+        if self._replace is not None and session.stored_id == session.id:
+            if not await self._replace(session.id, session.get_data(), self._ttl):
+                # Logged out, evicted or expired while this request ran: never bring it back.
+                logger.debug("session_ended_during_request")
+                session.invalidate()
+                return
+        else:
             await self._store.save(session.id, session.get_data(), self._ttl)
-            session.mark_persisted()
+        session.mark_persisted()
 
     @staticmethod
     def _is_secure_request(request: Any) -> bool:

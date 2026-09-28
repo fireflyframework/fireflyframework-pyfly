@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -66,6 +67,15 @@ class TestHttpSession:
         assert s.id == "old-id"
         assert s.previous_id is None
 
+    def test_stored_id_is_the_id_the_store_is_known_to_hold(self) -> None:
+        assert HttpSession("fresh", is_new=True).stored_id is None
+        loaded = HttpSession("loaded", {"k": "v"})
+        assert loaded.stored_id == "loaded"
+        loaded.rotate_id()
+        assert loaded.stored_id == "loaded"  # the new id is not saved yet
+        loaded.mark_persisted()
+        assert loaded.stored_id == loaded.id
+
     def test_mark_persisted_clears_the_pending_change_until_the_next_one(self) -> None:
         s = HttpSession("old-id", {"k": "v"})
         s.rotate_id()
@@ -95,6 +105,23 @@ class TestInMemorySessionStore:
         assert await InMemorySessionStore().get("nope") is None
 
     @pytest.mark.asyncio
+    async def test_replace_changes_only_a_session_the_store_holds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = InMemorySessionStore()
+        assert await store.replace("gone", {"a": 1}, ttl=60) is False
+        assert await store.get("gone") is None
+
+        await store.save("sid", {"a": 1}, ttl=10)
+        assert await store.replace("sid", {"a": 2}, ttl=60) is True
+        assert await store.get("sid") == {"a": 2}
+
+        now = time.monotonic()
+        monkeypatch.setattr("pyfly.session.adapters.memory.time.monotonic", lambda: now + 30)
+        assert await store.exists("sid")  # the replace moved the expiry 60 seconds on
+        monkeypatch.setattr("pyfly.session.adapters.memory.time.monotonic", lambda: now + 120)
+        assert await store.replace("sid", {"a": 3}, ttl=60) is False  # expired: not brought back
+        assert await store.get("sid") is None
+
+    @pytest.mark.asyncio
     async def test_expired_entry_is_evicted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         store = InMemorySessionStore()
         await store.save("sid", {"a": 1}, ttl=10)
@@ -107,6 +134,25 @@ class TestInMemorySessionStore:
 # ---------------------------------------------------------------------------
 # SessionFilter
 # ---------------------------------------------------------------------------
+class _PlainStore:
+    """A custom store with only the four ``SessionStore`` operations (no ``replace``)."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, dict[str, Any]] = {}
+
+    async def get(self, session_id: str) -> dict[str, Any] | None:
+        return self._data.get(session_id)
+
+    async def save(self, session_id: str, data: dict[str, Any], ttl: int) -> None:
+        self._data[session_id] = dict(data)
+
+    async def delete(self, session_id: str) -> None:
+        self._data.pop(session_id, None)
+
+    async def exists(self, session_id: str) -> bool:
+        return session_id in self._data
+
+
 class _CopyingStore(InMemorySessionStore):
     """The in-memory store, keeping a copy of what it saves as a store over a network does (the in-memory store
     keeps the session's own dict, so a later change shows through without a save)."""
@@ -247,6 +293,41 @@ class TestSessionFilter:
 
         await f.do_filter(request, call_next)
         assert (await store.get("existing"))["step"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_changed_session_ended_during_the_request_is_not_saved_back(self) -> None:
+        """A logout or an eviction deleted the session while one of its requests was changing it: the request's
+        persist saved it back (an upsert), and the revoked session was live again, its cookie sent anew."""
+        store = InMemorySessionStore()
+        await store.save("s1", {"user": "ada"}, ttl=60)
+        f = SessionFilter(store=store)
+        request = _request(cookies={"PYFLY_SESSION": "s1"})
+        response = _Response()
+
+        async def call_next(req: Any) -> _Response:
+            req.state.session.set_attribute("cart", ["book"])
+            await store.delete("s1")  # logged out or evicted meanwhile
+            return response
+
+        await f.do_filter(request, call_next)
+        assert await store.get("s1") is None
+        assert response.set_cookie_calls == []
+        assert "PYFLY_SESSION" in response.deleted
+
+    @pytest.mark.asyncio
+    async def test_a_store_without_replace_keeps_saving_changed_sessions(self) -> None:
+        """A custom store implementing only the four ``SessionStore`` operations: a changed session is saved
+        (an upsert), as before; such a store cannot tell a revoked session from a live one."""
+        store = _PlainStore()
+        await store.save("s1", {"user": "ada"}, ttl=60)
+        f = SessionFilter(store=store)
+
+        async def call_next(req: Any) -> _Response:
+            req.state.session.set_attribute("step", 1)
+            return _Response()
+
+        await f.do_filter(_request(cookies={"PYFLY_SESSION": "s1"}), call_next)
+        assert (await store.get("s1"))["step"] == 1
 
     @pytest.mark.asyncio
     async def test_a_session_ended_after_persist_session_is_not_saved_again(self) -> None:

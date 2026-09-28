@@ -32,3 +32,19 @@ class SessionStore(Protocol):
     async def delete(self, session_id: str) -> None: ...
 
     async def exists(self, session_id: str) -> bool: ...
+
+
+@runtime_checkable
+class ConditionalSessionStore(SessionStore, Protocol):
+    """A :class:`SessionStore` that can write over a session only while it holds it (the shipped stores: the
+    in-memory, Redis and SQL ones).
+
+    The ``SessionFilter`` saves a session the store already holds through :meth:`replace`, so a request that
+    ends after its session was logged out, evicted or expired does not bring it back. A store without it gets
+    every change through ``save``, an insert-or-replace, and cannot tell a revoked session from a live one.
+    """
+
+    async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Replace the session's data and expire it *ttl* seconds from now, only if the store holds it and it
+        has not expired, in one atomic step; ``False`` (and nothing written) otherwise."""
+        ...

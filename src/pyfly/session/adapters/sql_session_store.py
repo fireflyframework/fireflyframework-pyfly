@@ -24,6 +24,10 @@ provider's name; the store runs on every backend SQLAlchemy supports, on the fra
   (:func:`~pyfly.session.adapters.redis.allow_session_type` covers both stores).
 - **Expiry is an instant.** ``expires_at`` is a UTC instant: a session is read only before it, whatever the
   process's time zone.
+- **Replaced only while held.** :meth:`SqlSessionStore.replace` (the
+  :class:`~pyfly.session.ports.outbound.ConditionalSessionStore` operation) is one conditional ``UPDATE``
+  that writes over a session only while the table holds it unexpired, so the ``SessionFilter`` never brings
+  back a session that was logged out, evicted or expired while one of its requests ran.
 - **Purged.** At most once per *purge_interval* a write deletes a batch of expired sessions, after its
   commit; :meth:`SqlSessionStore.purge_expired` deletes them all.
 - **Joins the unit of work** bound for its datasource, as the other framework stores: outside one each
@@ -177,6 +181,26 @@ class SqlSessionStore:
         async with infrastructure_unit(self._datasource(), single_statement=native_upsert(self._backend())) as session:
             await upsert(session, self._table, values, key=["session_id"])
         await self._purge_if_due()
+
+    async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Replace the session's attributes and expire it *ttl* seconds from now, only while the table holds it
+        unexpired: one conditional ``UPDATE`` (a matched row counts on MySQL and MariaDB too, whose dialects
+        report matched rows). ``False`` when the session is gone (deleted or expired), and nothing is written."""
+        from sqlalchemy import update
+
+        await self.start()
+        table = self._table
+        now = self._clock()
+        statement = (
+            update(table)
+            .where(table.c.session_id == session_id, table.c.expires_at > now)
+            .values(data=json.dumps(data, default=_json_default), expires_at=now + timedelta(seconds=ttl))
+        )
+        async with infrastructure_unit(self._datasource(), single_statement=True) as session:
+            replaced = int((await session.execute(statement)).rowcount) == 1
+        if replaced:
+            await self._purge_if_due()
+        return replaced
 
     async def delete(self, session_id: str) -> None:
         from sqlalchemy import delete

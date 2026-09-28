@@ -26,6 +26,7 @@ class HttpSession:
     Attributes:
         id: The unique session identifier.
         is_new: ``True`` if the session was created during the current request.
+        stored_id: The id the store is known to hold the session under (``None`` until a new session is saved).
     """
 
     def __init__(
@@ -41,6 +42,8 @@ class HttpSession:
         self._invalidated = False
         self._modified = is_new
         self._previous_id: str | None = None
+        # A session that is not new was loaded from the store under its id.
+        self._stored_id: str | None = None if is_new else session_id
 
         now = time.time()
         if "_created_at" not in self._data:
@@ -59,6 +62,14 @@ class HttpSession:
     @property
     def is_new(self) -> bool:
         return self._is_new
+
+    @property
+    def stored_id(self) -> str | None:
+        """The id the store is known to hold this session under: the id it was loaded with, then the id of its
+        last save (``None`` for a new session not saved yet). The ``SessionFilter`` writes a change of a session
+        under that id only while the store still holds it (a revoked session is not brought back); a new or
+        rotated id is inserted."""
+        return self._stored_id
 
     @property
     def created_at(self) -> float:
@@ -115,12 +126,14 @@ class HttpSession:
         self._modified = True
 
     def mark_persisted(self) -> None:
-        """Record that the store holds the session as it is now: :attr:`modified` is ``False`` until the next
-        change, so the ``SessionFilter`` saves it again only for a change made afterwards.
+        """Record that the store holds the session as it is now, under its current id: :attr:`modified` is
+        ``False`` until the next change (made through :meth:`set_attribute`, :meth:`remove_attribute`,
+        :meth:`rotate_id` or :meth:`invalidate`), and :attr:`stored_id` is the current id.
 
         :attr:`previous_id` is kept: it still tells the request's other filters that the id was rotated.
         """
         self._modified = False
+        self._stored_id = self._id
 
     def get_data(self) -> dict[str, Any]:
         """Return the raw session data dictionary."""

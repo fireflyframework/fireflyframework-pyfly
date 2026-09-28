@@ -59,6 +59,10 @@ class _YieldingStore(InMemorySessionStore):
         await asyncio.sleep(0)
         return await super().exists(session_id)
 
+    async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
+        await asyncio.sleep(0)
+        return await super().replace(session_id, data, ttl)
+
 
 def _controller(store: InMemorySessionStore, *, max_sessions: int, strategy: str) -> SessionConcurrencyController:
     return SessionConcurrencyController(
@@ -101,6 +105,34 @@ async def test_concurrent_logins_keep_the_cap(strategy: str, max_sessions: int, 
         concurrent=concurrent,
         rounds=5,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy", ["evict-oldest", "reject-new"])
+@pytest.mark.parametrize(("max_sessions", "concurrent"), [(1, 8), (2, 16)])
+async def test_a_session_write_after_the_login_keeps_the_cap(strategy: str, max_sessions: int, concurrent: int) -> None:
+    """The application changes the session after the login handler returned: the filter's final persist must
+    not bring back a session a concurrent login evicted meanwhile."""
+    store = _YieldingStore()
+    controller = _controller(store, max_sessions=max_sessions, strategy=strategy)
+    replicas = [logins.Replica(store, controller, write_after_login=True) for _ in range(2)]
+
+    await logins.concurrent_logins_keep_the_cap(
+        replicas,
+        max_sessions=max_sessions,
+        evict_oldest=strategy == "evict-oldest",
+        concurrent=concurrent,
+        rounds=5,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
+async def test_a_revoked_session_stays_revoked(revocation: str) -> None:
+    store = _YieldingStore()
+    replica = logins.Replica(store, _controller(store, max_sessions=1, strategy="evict-oldest"))
+
+    await logins.a_revoked_session_stays_revoked(replica, revocation)
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,8 @@ logins all got in. The Redis registry checks the cap, evicts and registers in on
 
 Through the whole login request (``SessionFilter`` plus ``OAuth2LoginHandler``, on the Redis session store), a
 session a concurrent login evicted came back when its own login's request ended, and stayed live uncounted.
+Any request of a session that changed it and ended after the session was evicted or logged out saved it back
+too; the filter now replaces such a session only while Redis still holds it (``SET ... XX``).
 """
 
 from __future__ import annotations
@@ -116,6 +118,40 @@ async def test_concurrent_logins_through_the_login_flow_keep_the_cap(
     finally:
         await redis_client.delete(f"{registries[0].key_prefix}{principal}")
         await other_client.aclose()
+
+
+@requires_docker
+@pytest.mark.parametrize("strategy", ["evict-oldest", "reject-new"])
+async def test_a_session_write_after_the_login_keeps_the_cap(redis_client: Any, strategy: str) -> None:
+    """The application changes the session after the login handler returned."""
+    principal = f"alice-{uuid.uuid4().hex[:8]}"
+    registry = _registries(redis_client)[0]
+    store = RedisSessionStore(redis_client)
+    policy = ConcurrencyControlPolicy(max_sessions=2, strategy=strategy)
+    controller = SessionConcurrencyController(registry, policy, session_store=store)
+    flows = [logins.Replica(store, controller, principal=principal, write_after_login=True) for _ in range(2)]
+    try:
+        await logins.concurrent_logins_keep_the_cap(
+            flows, max_sessions=2, evict_oldest=strategy == "evict-oldest", concurrent=16, rounds=3
+        )
+    finally:
+        await redis_client.delete(f"{registry.key_prefix}{principal}")
+
+
+@requires_docker
+@pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
+async def test_a_revoked_session_stays_revoked(redis_client: Any, revocation: str) -> None:
+    principal = f"alice-{uuid.uuid4().hex[:8]}"
+    registry = _registries(redis_client)[0]
+    store = RedisSessionStore(redis_client)
+    policy = ConcurrencyControlPolicy(max_sessions=1, strategy="evict-oldest")
+    replica = logins.Replica(
+        store, SessionConcurrencyController(registry, policy, session_store=store), principal=principal
+    )
+    try:
+        await logins.a_revoked_session_stays_revoked(replica, revocation)
+    finally:
+        await redis_client.delete(f"{registry.key_prefix}{principal}")
 
 
 @requires_docker

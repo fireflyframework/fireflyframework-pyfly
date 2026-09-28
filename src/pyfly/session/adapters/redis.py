@@ -109,6 +109,12 @@ class RedisSessionStore:
         raw = json.dumps(data, default=_json_default)
         await self._client.set(self._key(session_id), raw.encode(), ex=ttl)
 
+    async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
+        """Serialize and store the session data with a TTL in seconds only if the key exists (``SET ... XX``,
+        one atomic command); ``False`` when the session is gone (deleted or expired), and nothing is written."""
+        raw = json.dumps(data, default=_json_default)
+        return bool(await self._client.set(self._key(session_id), raw.encode(), ex=ttl, xx=True))
+
     async def delete(self, session_id: str) -> None:
         """Remove a session."""
         await self._client.delete(self._key(session_id))

@@ -80,6 +80,7 @@ from pyfly.session import HttpSession
 |---|---|
 | `id` | Unique session identifier (UUID hex string) |
 | `is_new` | `True` if the session was created during this request |
+| `stored_id` | The id the store is known to hold the session under: the id it was loaded with, then the id of its last save (`None` for a new session not saved yet) |
 | `created_at` | Unix timestamp of session creation (`float`) |
 | `last_accessed` | Unix timestamp of the most recent access (`float`) |
 | `invalidated` | `True` if `invalidate()` has been called |
@@ -89,7 +90,7 @@ from pyfly.session import HttpSession
 | `remove_attribute(name)` | Remove an attribute if present |
 | `get_attribute_names()` | List of all user-set attribute names (excludes internal `_*` keys) |
 | `invalidate()` | Mark the session for deletion; filter will delete cookie and store entry |
-| `mark_persisted()` | Record that the store holds the session as it is now: `modified` is `False` until the next change (the filter calls it after each save; `previous_id` is kept) |
+| `mark_persisted()` | Record that the store holds the session as it is now, under its current id: `modified` is `False` until the next change and `stored_id` is the current id (the filter calls it after each save; `previous_id` is kept) |
 | `get_data()` | Raw session dict (includes internal metadata) |
 
 ### `SessionStore` protocol
@@ -107,6 +108,22 @@ class SessionStore(Protocol):
     async def delete(self, session_id: str) -> None: ...
     async def exists(self, session_id: str) -> bool: ...
 ```
+
+`save` inserts or replaces. A store that can also write over a session only while it holds it is a
+`ConditionalSessionStore` (`from pyfly.session import ConditionalSessionStore`), with one more method:
+
+```python
+class ConditionalSessionStore(SessionStore, Protocol):
+    async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool: ...
+```
+
+`replace` writes the data and moves the expiry *ttl* seconds on only if the store holds the session and it has
+not expired, in one atomic step, and returns `False` (writing nothing) otherwise. The three shipped stores
+implement it: the in-memory store under its lock, Redis with `SET ... XX`, the SQL store with one conditional
+`UPDATE`. The `SessionFilter` uses it so that a request never brings back a session that was logged out,
+evicted or expired while the request ran (see [`SessionFilter`](#sessionfilter)). A custom store without
+`replace` keeps working: every change goes through `save`, and such a store cannot tell a revoked session from a
+live one.
 
 ### `InMemorySessionStore`
 
@@ -182,11 +199,25 @@ Cookie properties set by the filter:
 
 On invalidation, the filter deletes the cookie and removes the store entry.
 
+**What the filter saves.** A new session, and a session changed through the `HttpSession` API
+(`set_attribute`, `remove_attribute`, `rotate_id`; `invalidate` deletes it). A value mutated in place (an item
+appended to a list attribute, say) is saved only along with such a change: once the session was saved, an
+in-place mutation alone is not saved again. Call `set_attribute` with the mutated value to save it.
+
+**A revoked session stays revoked.** A session the store is known to hold (`stored_id`: loaded by the request,
+or already saved by it) is written back through the store's `replace`, only while the store still holds it.
+When the session was logged out (by another request of the same browser), evicted (by a login elsewhere under
+`evict-oldest`) or expired while the request ran, its change is dropped, the session counts as invalidated and
+the response clears its cookie: the request neither brings the session back nor sends its cookie again. A new
+or rotated id is inserted with `save`. With a custom store that has no `replace`, every change goes through
+`save`, which brings such a session back.
+
 `request.state.persist_session` (a coroutine function taking no arguments) saves the session at once. Every
 save leaves the session unmodified (`mark_persisted()`), so the persist that runs when the handler returns
-saves it again only for a change made after that call. The OAuth2 login handler relies on it: its save before
-registering the session is the login's last write of the session, so a concurrent login that evicts the
-session meanwhile is not undone when the login's request ends.
+writes it again only for a later change, and then only while the store still holds it. The OAuth2 login
+handler relies on it: it saves the session it logs in before registering it, and a concurrent login that evicts
+that session meanwhile is not undone when the login's request ends, even if the application changes the
+session after the handler returned (the change is dropped with the session).
 
 ---
 
@@ -274,11 +305,13 @@ pyfly:
   application, lost in a restart), as Spring's `getAllSessions(principal, false)` leaves expired ones out, so
   a user whose sessions ended without a logout is never locked out. The login handler saves the session it
   logs in (`request.state.persist_session`, set by the `SessionFilter`) before registering it, so a
-  concurrent login never takes it for a dead one. That save is the login's last write of the session: the
-  handler makes every change (the security context, the redirect it consumes) before it, and the filter does
-  not save the unchanged session again, so a session a concurrent login evicted stays evicted. If the save or
-  the registration fails, the handler invalidates the session and the filter deletes it, so no logged-in
-  session is left that the cap does not count. This needs a store that holds every session the registry
+  concurrent login never takes it for a dead one. The handler makes every change (the security context, the
+  redirect it consumes) before that save; afterwards the filter writes the session only for a change made
+  through the `HttpSession` API, and only while the store still holds it (`replace`, see
+  [`SessionFilter`](#sessionfilter)). So a session a concurrent login evicted stays evicted, and so does one
+  evicted or logged out while any other request of it was running. If the save or the registration fails, the
+  handler invalidates the session and the filter deletes it, so no logged-in session is left that the cap does
+  not count. This needs a store that holds every session the registry
   counts: beside a cross-process registry (`redis` or `postgres`), only a shared store (`store=postgres` or
   `redis`) does. With the in-memory store there, the auto-configuration does not give the store to the
   controller (it would take the other instances' live sessions for dead ones and admit logins over the cap),
@@ -302,7 +335,10 @@ pyfly:
 > concurrent logins all in), and no registration was ever removed but by logout or eviction: with
 > `reject-new`, a user whose sessions expired could never log in again. With `evict-oldest`, the filter
 > also saved each login's session again when its request ended, bringing back the sessions concurrent logins
-> had evicted: eight concurrent logins under a cap of one left eight logged-in sessions.
+> had evicted: eight concurrent logins under a cap of one left eight logged-in sessions. And any request that
+> changed its session saved it back when it ended (an insert-or-replace), so a session logged out or evicted
+> while one of its requests ran was live again, authenticated its cookie, and the response sent that cookie
+> anew.
 
 ### Registry Backends
 
