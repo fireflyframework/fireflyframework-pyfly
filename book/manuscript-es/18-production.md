@@ -1050,8 +1050,11 @@ pegar en una plantilla de pull request.
 - [ ] El logging estructurado está habilitado (`pyfly[observability]`) y el
       nivel de log es `INFO` en producción, no `DEBUG`.
 - [ ] El exportador de OpenTelemetry apunta al colector de producción.
-- [ ] Las migraciones de base de datos (`pyfly db upgrade`) se ejecutan en un
-      paso previo al despliegue, no al arranque de la aplicación.
+- [ ] Las migraciones de base de datos se ejecutan antes de que llegue el
+      tráfico: `pyfly db upgrade` en un paso previo al despliegue, o
+      `pyfly.data.relational.migrations.enabled: true`, que las serializa entre
+      instancias al arrancar. `ddl-auto` vale `none` (su valor por defecto en un
+      servidor de base de datos) o `validate`.
 - [ ] La especificación OpenAPI generada está versionada en CI y los paquetes
       SDK posteriores se fijan a una revisión concreta de la especificación.
 - [ ] `pyfly doctor` pasa en cada máquina de desarrollo y en cada runner de CI.

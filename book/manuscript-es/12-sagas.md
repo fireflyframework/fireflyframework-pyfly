@@ -205,13 +205,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Annotated
 
-from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
+from lumen.core.mappers.wallet_mapper import to_aggregate
 from lumen.core.services.transfers.transfer_request import TransferRequest
 from lumen.interfaces.enums.v1.currency import Currency
 from lumen.models.entities.v1.money import Money
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
-from pyfly.domain import AggregateNotFound
+from pyfly.domain import AggregateNotFound, BusinessRuleViolation
 from pyfly.transactional.saga.annotations import (
     FromStep,
     Input,
@@ -253,16 +253,25 @@ class MoneyTransferSaga:
         if entity is None:
             raise AggregateNotFound("Wallet", request.source_wallet_id)
         wallet = to_aggregate(entity)
+        # The aggregate checks amount, currency and the loaded balance.
         wallet.withdraw(
             Money(amount=request.amount, currency=request.currency)
         )
-        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
+        # One guarded UPDATE: refused if a concurrent debit got there first.
+        balance = await self._repository.debit(
+            request.source_wallet_id, request.amount
+        )
+        if balance is None:
+            raise BusinessRuleViolation(
+                "wallet-insufficient-funds",
+                "a concurrent debit spent the funds",
+            )
         return DebitResult(
             wallet_id=request.source_wallet_id,
             amount=request.amount,
             currency=request.currency,
-            balance=wallet.balance.amount,
+            balance=balance,
         )
 
     async def recredit_source(
@@ -271,16 +280,12 @@ class MoneyTransferSaga:
     ) -> int:
         """Compensation: put the money back. Receives the forward step's
         result via FromStep — NOT the saga input."""
-        entity = await self._repository.find_by_id(debit.wallet_id)
-        if entity is None:
-            raise AggregateNotFound("Wallet", debit.wallet_id)
-        wallet = to_aggregate(entity)
-        wallet.deposit(
-            Money(amount=debit.amount, currency=debit.currency)
+        balance = await self._repository.credit(
+            debit.wallet_id, debit.amount
         )
-        await self._repository.upsert(to_entity(wallet))
-        wallet.clear_events()
-        return wallet.balance.amount
+        if balance is None:
+            raise AggregateNotFound("Wallet", debit.wallet_id)
+        return balance
 
     # -- Step 2: credit the destination ----------------------------------
 
@@ -301,9 +306,15 @@ class MoneyTransferSaga:
         wallet.deposit(
             Money(amount=request.amount, currency=request.currency)
         )
-        await self._repository.upsert(to_entity(wallet))
         wallet.clear_events()
-        return wallet.balance.amount
+        balance = await self._repository.credit(
+            request.destination_wallet_id, request.amount
+        )
+        if balance is None:
+            raise AggregateNotFound(
+                "Wallet", request.destination_wallet_id
+            )
+        return balance
 :::
 
 **Cómo funciona, paso a paso:**
@@ -331,25 +342,35 @@ correctamente `await` de la llamada. El parámetro
 invoca al deshacer este paso. Omitir `depends_on` (o pasar `[]`) significa
 que el paso puede ejecutarse en cuanto el motor arranca.
 
-**Interacción con el repositorio: el ciclo cargar-mutar-guardar.** Cada
-paso sigue el mismo patrón de tres fases, usando el repositorio del
-framework `WalletRepository(Repository[WalletEntity, str])`:
+**Interacción con el repositorio: comprobar y cambiar en una sola sentencia.**
+Cada paso hacia delante usa el repositorio del framework
+`WalletRepository(Repository[WalletEntity, str])` de la misma forma:
 
 1. `find_by_id(id)` — carga la fila cruda `WalletEntity` desde la base de datos.
 2. `to_aggregate(entity)` — rehidrata la rica raíz de agregado `Wallet` a
-   partir de esa fila; el agregado impone todas las invariantes
-   (`balance >= 0`, coincidencia de moneda).
-3. Mutar — llama a `wallet.withdraw(...)` o `wallet.deposit(...)` sobre el
-   agregado, dejando que lance `BusinessRuleViolation` si se rompe una
+   partir de esa fila; el agregado impone sus invariantes (un importe
+   positivo, la misma moneda, `balance >= 0` para el saldo con el que se
+   cargó).
+3. Comprobar — llama a `wallet.withdraw(...)` o `wallet.deposit(...)` sobre
+   el agregado, dejando que lance `BusinessRuleViolation` si se rompe una
    invariante antes de que ocurra ninguna escritura.
-4. `upsert(to_entity(wallet))` — aplana el agregado mutado de vuelta a un
-   `WalletEntity` y llama a `session.merge` + `flush`, de modo que la
-   escritura es visible para los pasos posteriores en la misma
-   `AsyncSession` sin confirmar.
+4. `debit(...)` o `credit(...)` — cambia el saldo guardado con una sola
+   sentencia con guarda: `debit` ejecuta `UPDATE … SET balance_minor =
+   balance_minor - :amount WHERE id = :id AND balance_minor >= :amount` y
+   devuelve el nuevo saldo, o `None` cuando el saldo ya no cubre el importe.
 
-Como los pasos de la saga comparten una `AsyncSession`, `upsert` hace flush
-para que cada paso vea la escritura del anterior; la frontera de aplicación
-que los rodea posee el commit final.
+¿Por qué no cargar, mutar y hacer `upsert` como los manejadores de
+comandos? Porque un paso de saga nunca se une a la transacción de quien lo
+llama. Desde la v26.09.08 cada paso se ejecuta en una tarea propia con el
+estado transaccional limpio, así que confirma por su cuenta y se compensa
+exactamente una vez si un paso posterior falla. Sin una unidad alrededor del
+paso, cada llamada al repositorio es una unidad breve propia: la carga y la
+escritura son dos unidades, y la comprobación del agregado por sí sola
+podría pasar para dos transferencias en carrera. El `UPDATE` con guarda
+convierte la comprobación y el cambio en una sola sentencia, así que dos
+transferencias concurrentes nunca pueden gastar los mismos fondos, y un
+abono nunca pisa un cambio concurrente. (Hasta la v26.09.07 los pasos
+compartían la sesión de quien llamaba y confirmaban o revertían con ella.)
 
 **Paso 3: cablea los parámetros.**
 La inyección de parámetros usa `typing.Annotated` con **instancias de
@@ -368,9 +389,8 @@ mediante `typing.get_type_hints(func, include_extras=True)`.
 **Los métodos de compensación no reciben la entrada de la saga.**
 `recredit_source` toma `Annotated[DebitResult, FromStep("debit-source")]`
 —el valor que devolvió el paso hacia delante— no la `TransferRequest`.
-Recarga la entidad mediante `find_by_id`, rehidrata el agregado, deposita de
-vuelta la cantidad original y hace upsert: el mismo ciclo
-cargar-mutar-guardar que los pasos hacia delante. Las compensaciones siempre
+Devuelve la cantidad original con el mismo `credit` con guarda que usa el
+abono hacia delante. Las compensaciones siempre
 leen de `ctx.step_results` mediante `FromStep`, nunca de la entrada
 original.
 
@@ -1064,16 +1084,25 @@ Usa esta tabla para elegir entre los dos enfoques:
 ## Persistencia: sobrevivir a una caída
 
 El motor almacena el estado de la saga y de TCC a través del protocolo
-`TransactionalPersistencePort`. El adaptador por defecto mantiene el estado
-en memoria —rápido para desarrollo, pero perdido al reiniciar el proceso—.
-Los despliegues de producción cambian por un adaptador duradero.
+`TransactionalPersistencePort`, que implementa el bean
+`transactional_persistence_port` sobre el proveedor que elige
+`pyfly.transactional.persistence.provider`. El valor por defecto, `memory`,
+es rápido para desarrollo pero se pierde al reiniciar el proceso; los
+despliegues de producción eligen uno duradero (`redis`, `sqlalchemy` o
+`cache`). Con `sqlalchemy`, una saga iniciada dentro de `@transactional`
+escribe su registro en la transacción de quien llama, así que inicia la
+saga fuera de la transacción de negocio cuando su registro deba
+sobrevivirla. (Antes de la v26.09.08 los motores de saga y de TCC guardaban
+siempre su estado en memoria, fuera cual fuera el proveedor.)
 
 ### Cómo fluye el estado
 
-Cada vez que un paso se completa —con éxito o no— el motor llama a:
+El motor registra cuándo empieza una ejecución y cómo termina:
 
-1. `persistence_port.update_step_status(correlation_id, step_id, status)` — registra el desenlace del paso.
-2. `persistence_port.mark_completed(correlation_id, successful)` — registra el resultado final de la saga.
+1. `persistence_port.persist_state(state)` — el registro `IN_FLIGHT` de la ejecución, al empezar.
+2. `persistence_port.mark_completed(correlation_id, successful)` — el resultado final de la saga.
+
+Los desenlaces de los pasos viajan en el `SagaResult`; `update_step_status` está ahí para el código que registra por sí mismo el progreso de los pasos.
 
 En el arranque, `SagaRecoveryService` consulta
 `persistence_port.get_stale(before)` para encontrar ejecuciones que
@@ -1106,8 +1135,8 @@ reintento automático.
 
 Para persistir en una base de datos real, implementa
 `TransactionalPersistencePort` y registra tu implementación como un `@bean`
-o `@component`. La autoconfiguración detecta tu bean en el arranque y lo usa
-con preferencia sobre `InMemoryPersistenceAdapter`:
+o `@component`. Tu bean sustituye al `transactional_persistence_port`
+autoconfigurado:
 
 ::: listing lumen/infra/persistence/saga_postgres_adapter.py | Listado 12.11 — Esqueleto de un adaptador de persistencia para PostgreSQL
 from __future__ import annotations

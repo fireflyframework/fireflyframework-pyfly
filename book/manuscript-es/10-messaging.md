@@ -313,12 +313,16 @@ Cada manejador de comandos conecta `EventPublisher` mediante el constructor y ll
 ::: listing lumen/core/services/wallets/deposit_funds_handler.py | Listado 10.2 — DepositFundsHandler drena eventos mediante EventPublisher
 from __future__ import annotations
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.deposit_funds_command import DepositFunds
 from lumen.core.services.wallets.event_publishing import publish_domain_events
 from lumen.models.entities.v1.money import Money
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -332,21 +336,27 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         self,
         repository: WalletRepository,
         events: EventPublisher,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         super().__init__()
         self._repository = repository
         self._events = events
+        self._session_factory = session_factory
 
+    @transactional()
     async def do_handle(self, command: DepositFunds) -> int:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.deposit(Money(
             amount=command.amount,     # integer minor units (e.g. 5000 = €50.00)
             currency=wallet.currency,
         ))
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
 
         # Drain pending events and forward them to the EDA bus.
         await publish_domain_events(
@@ -378,7 +388,7 @@ Cuando `publish_domain_events` publica este evento, `event_type` es el nombre de
 
 ### Publicar un evento de integración directamente en el broker
 
-Cuando un servicio independiente que se ejecuta en un proceso distinto necesita recibir los eventos de monedero de Lumen, el bus EDA debe estar respaldado por un adaptador de broker real. La carga útil que circula por el cable es el mismo dict que ven los oyentes en proceso. Un `OutboxRelay` dedicado (tratado en la sección de resiliencia) o un `EventPublisher` respaldado por broker se encargan del transporte.
+Cuando un servicio independiente que se ejecuta en un proceso distinto necesita recibir los eventos de monedero de Lumen, el bus EDA debe estar respaldado por un adaptador de broker real. La carga útil que circula por el cable es el mismo dict que ven los oyentes en proceso. Un `EventPublisher` respaldado por broker se encarga del transporte, y el outbox transaccional (`pyfly.eda.outbox.enabled`, Capítulo 8) hace que espere al commit.
 
 Ayuda ver la publicación primero en su forma más pequeña posible. El siguiente listado es una sencilla función `async` —sin clase, sin decorador— que toma un `MessageBrokerPort`, construye la carga útil y llama a `publish`. Constrúyela en tres movimientos:
 
@@ -432,12 +442,14 @@ async def publish_deposit_event(
 
 !!! warning "Publica después de guardar, no antes"
     Drena y publica siempre los eventos *después* de
-    `repository.add(wallet)`. Si el guardado falla, ningún mensaje llega al
-    broker y los consumidores externos nunca ven un hecho que nunca persistió.
-    El patrón de outbox transaccional (donde la fila del outbox y la fila del
-    agregado se escriben en la misma transacción de base de datos) ofrece la
-    garantía atómica más fuerte para producción; la publicación directa que se
-    muestra aquí es un punto de partida razonable para servicios más simples.
+    `repository.upsert(...)`. Si el guardado falla, ningún mensaje llega al
+    broker. Aun así, una publicación directa se ejecuta antes de que la
+    unidad de trabajo haga commit, y el broker conserva el mensaje si la
+    unidad se revierte después. El outbox transaccional
+    (`pyfly.eda.outbox.enabled: true`, Capítulo 8) añade cada publicación en
+    la unidad de quien llama y la reenvía tras el commit: la garantía atómica
+    para producción. La publicación directa que se muestra aquí es un punto
+    de partida razonable para servicios más simples.
 
 ---
 
@@ -826,18 +838,18 @@ class ResilientWalletConsumer:
 
 **Los tres parámetros:**
 
-`retries=3` reinvoca `on_wallet_event` hasta tres veces más tras el primer fallo. Los reintentos son apropiados para fallos *transitorios* (un único nodo de base de datos reiniciándose); mantén el conteo bajo y deja que la DLQ gestione los fallos sostenidos.
+`retries=3` permite hasta tres entregas más del mensaje tras el primer fallo (cuatro en total). Los reintentos son apropiados para fallos *transitorios* (un único nodo de base de datos reiniciándose); mantén el conteo bajo y deja que la DLQ gestione los fallos sostenidos.
 
-`retry_delay=0.5` aplica un retroceso lineal: el intento 1 espera 0,5 s, el intento 2 espera 1,0 s, el intento 3 espera 1,5 s. Con `retry_delay=0.0` (el valor por defecto), los reintentos son inmediatos.
+`retry_delay=0.5` aplica un retroceso lineal: el intento 1 espera 0,5 s, el intento 2 espera 1,0 s, el intento 3 espera 1,5 s. Si omites ambos, el oyente recibe la política del contenedor (`pyfly.messaging.listener.retry.*`): cinco intentos, separados 1 s y duplicándose, como máximo 30 s.
 
-`dead_letter_topic="wallet.events.DLQ"` es la red de seguridad. Cuando se agotan todos los reintentos, el framework republica el mensaje original en el topic de la DLQ, preservando el `value` y la `key` originales, y añade dos cabeceras de diagnóstico:
+`dead_letter_topic="wallet.events.DLQ"` es la red de seguridad. Cuando se agotan todos los reintentos, el framework republica el mensaje original en el topic de la DLQ, preservando el `value` y la `key` originales, y añade cabeceras de diagnóstico, entre ellas:
 
 | Cabecera | Valor |
 |---|---|
 | `x-original-topic` | El topic del que se consumió originalmente el mensaje. |
 | `x-exception` | El nombre de la clase de la excepción (p. ej., `RuntimeError`). |
 
-La excepción se traga entonces para que el consumidor siga funcionando: el mensaje queda aparcado, no perdido, y el siguiente mensaje del topic se procesa con normalidad.
+En Kafka y RabbitMQ el contenedor añade también `x-exception-message`, `x-dlt-attempts` y de dónde venía el registro. Después el mensaje se confirma para que el consumidor siga funcionando: queda aparcado, no perdido, y el siguiente mensaje del topic se procesa con normalidad.
 
 !!! tip "Ejecútalo"
     Puedes ver cómo un mensaje envenenado aterriza en la DLQ sin un broker
@@ -927,7 +939,15 @@ async def on_dead_letter(msg: Message) -> None:
     clave de idempotencia: antes de procesar, comprueba si ese ID ya se ha
     registrado en una tabla `processed_events` y omite el trabajo si así es.
     El paso de comprobar-y-registrar debería estar en la misma transacción de
-    base de datos que la escritura de negocio.
+    base de datos que la escritura de negocio, que es justo lo que te da la
+    unidad de trabajo de la entrega (siguiente sección).
+
+
+### Transacciones de los oyentes: confirmación tras el commit
+
+En Kafka y RabbitMQ, el contenedor de oyentes ejecuta cada entrega en una unidad de trabajo y confirma el mensaje —hace commit del offset de Kafka, envía el ack de AMQP— solo después de que esa unidad haga commit. Cada llamada al repositorio que hace el oyente se une a la unidad, así que lo que escribe una entrega se confirma de una vez o nada, y un proceso que cae antes del commit recibe el mensaje de nuevo. La unidad toma los ajustes del propio `@transactional` del oyente: un oyente declarado `@transactional(isolation=Isolation.SERIALIZABLE)` se ejecuta en `SERIALIZABLE`, uno con `read_only=True` no puede escribir, y uno declarado `REQUIRES_NEW` o `NESTED` se ejecuta en la unidad que empieza su propio decorador.
+
+Un servicio `@transactional` al que llama el oyente también se une a la unidad de la entrega. Cuando ese servicio falla, la unidad queda marcada solo-rollback aunque el oyente capture la excepción: la entrega se revierte con `UnexpectedRollbackError` y se vuelve a intentar, y después va a la cola de mensajes muertos. Para un paso de mejor esfuerzo, como un registro de auditoría, declara el servicio `@transactional(propagation=Propagation.NESTED)`: su fallo revierte hasta su propio punto de guardado, y la entrega hace commit. Dos ajustes lo completan. Dimensiona `pyfly.messaging.listener.retry.max-attempts` y `retry.max-delay` para que duren más que una conmutación por error de la base de datos: con los valores por defecto, una caída de más de unos 15 segundos manda a mensajes muertos lo que se consume durante ella. Y fija `pyfly.messaging.listener.transactional: false` para un oyente de alto rendimiento que nunca toca la base de datos, de modo que no se abra una unidad por mensaje.
 
 ---
 
@@ -937,7 +957,7 @@ async def on_dead_letter(msg: Message) -> None:
 
 Un broker sano no está garantizado. Las particiones de red, las actualizaciones progresivas (rolling upgrades) y el agotamiento de recursos pueden hacer que el broker quede temporalmente no disponible. Si el manejador de comandos llama a `broker.publish(...)` y el broker está caído, te enfrentas a dos malas opciones sin una capa de resiliencia: fallar el comando entero (negarte a depositar fondos porque el broker es inalcanzable) o descartar silenciosamente el evento (el depósito tiene éxito pero el evento de integración se pierde).
 
-Ninguna es aceptable. El outbox transaccional (Capítulo 9) es la solución atómica: el evento se captura en la base de datos y un relay lo publica de forma asíncrona, de modo que una caída del broker solo añade latencia, no pérdida de datos. Junto al outbox, los **cortacircuitos** (circuit breakers) y los **reintentos** protegen el relay y cualquier código que llame al broker frente a los fallos en cascada.
+Ninguna es aceptable. El outbox transaccional es la solución atómica: con `pyfly.eda.outbox.enabled: true` (Capítulo 8) cada evento se captura en la unidad de trabajo de quien llama y un reenviador lo publica tras el commit, con sus propios reintentos y mensajes muertos (`pyfly.eda.outbox.forward.*`), de modo que una caída del broker solo añade latencia, no pérdida de datos. Junto al outbox, los **cortacircuitos** (circuit breakers) y los **reintentos** protegen cualquier código que llame al broker y que escribas tú mismo frente a los fallos en cascada.
 
 Un **cortacircuitos** es la metáfora eléctrica convertida en código: tras demasiados fallos seguidos "salta" y deja de dejar pasar llamadas durante un periodo de enfriamiento, de modo que un broker con dificultades no se vea machacado por miles de intentos de reconexión condenados al fracaso. Un **reintento** es la táctica complementaria: vuelve a probar la misma llamada unas cuantas veces, porque muchos fallos son momentáneos.
 
@@ -963,9 +983,9 @@ logger = logging.getLogger(__name__)
 
 
 @service
-class OutboxRelay:
+class ResilientForwarder:
     """
-    Drains pending outbox records and forwards them to the broker.
+    Forwards records to the broker from code you write yourself.
     Applies retry and circuit-breaker protection on every publish call.
     """
 

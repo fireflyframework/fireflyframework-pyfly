@@ -298,7 +298,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 from pyfly.observability import MetricsRegistry, timed
@@ -331,7 +331,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
     @timed(registry, "lumen.deposit.duration", "Deposit handler latency")
     @transactional()
     async def do_handle(self, command: DepositFunds) -> int:
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
         wallet = to_aggregate(entity)
@@ -427,7 +429,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 from pyfly.observability import MetricsRegistry, counted, timed
@@ -461,7 +463,9 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
     @counted(registry, "lumen.withdrawals", "Withdrawal attempts")
     @transactional()
     async def do_handle(self, command: WithdrawFunds) -> int:
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
         wallet = to_aggregate(entity)
@@ -918,9 +922,12 @@ desarrollo.
 
 ### HealthIndicator personalizado
 
-Cualquier bean `@component` con un método `async def health(self) -> HealthStatus` se descubre y registra automáticamente como indicador de salud. El `WalletRepository` de Lumen es un buen candidato: `count()` emite un ligero `SELECT COUNT(*)` contra la sesión de base de datos en vivo sin mutar ningún dato:
+Cualquier bean `@component` con un método `async def health(self) -> HealthStatus` se descubre y registra automáticamente como indicador de salud. El `WalletRepository` de Lumen es un buen candidato: `count()` emite un ligero `SELECT COUNT(*)` en una unidad de lectura breve propia, sin mutar ningún dato:
 
 ::: listing lumen/health/indicators.py | Listado 15.9 — Beans HealthIndicator
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from pyfly.actuator import HealthStatus
 from pyfly.container import component
 
@@ -953,13 +960,15 @@ class WalletRepositoryHealthIndicator:
 class DatabaseHealthIndicator:
     """Checks database connectivity via a lightweight SELECT 1."""
 
-    def __init__(self, session_factory) -> None:
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
         self._factory = session_factory
 
     async def health(self) -> HealthStatus:
         try:
             async with self._factory() as session:
-                await session.execute("SELECT 1")
+                await session.execute(text("SELECT 1"))
             return HealthStatus(
                 status="UP",
                 details={"type": "postgresql", "pool_active": 3},
@@ -970,6 +979,8 @@ class DatabaseHealthIndicator:
                 details={"error": str(exc)},
             )
 :::
+
+PyFly ya aporta un indicador de base de datos propio a la sonda de preparación (readiness): `SqlAlchemyHealthIndicator`, el bean `db_health_indicator`, que comprueba cada origen de datos del registro con un `SELECT 1` acotado por `pyfly.data.relational.health.timeout` (2 s). `DatabaseHealthIndicator`, más arriba, muestra el contrato; en una aplicación real quédate con el integrado.
 
 `HealthStatus.status` admite cuatro valores: `"UP"`, `"DOWN"`, `"OUT_OF_SERVICE"` o `"UNKNOWN"`. El agregador aplica un orden de severidad (`DOWN > OUT_OF_SERVICE > UP > UNKNOWN`) y devuelve el estado del peor caso entre todos los indicadores. Si el método `health()` de algún indicador lanza, ese indicador se trata como `"DOWN"` con `details={"error": "check failed"}`; la excepción se registra pero no hace caer el endpoint de salud.
 
@@ -1488,7 +1499,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 from pyfly.logging import get_logger
@@ -1533,7 +1544,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
     async def do_handle(self, command: DepositFunds) -> int:
         logger.info("deposit_started", wallet_id=command.wallet_id,
                     amount=command.amount)
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
         wallet = to_aggregate(entity)
@@ -1563,8 +1576,8 @@ uv run --extra dev pytest -q
 Todas las pruebas deberían seguir en verde:
 
 ```
-.........................................                        [100%]
-41 passed in 0.3s
+..s.s........................................                    [100%]
+43 passed, 2 skipped in 0.3s
 ```
 
 Luego da una vuelta manual completa con la aplicación en marcha: lanza un depósito

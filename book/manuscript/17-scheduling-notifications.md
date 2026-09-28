@@ -159,7 +159,7 @@ committing — the every-minute cron was only a probe.
 
 ### fixed_rate vs. fixed_delay
 
-**`fixed_rate`** measures from the **start** of one execution to the start of the next. **`fixed_delay`** measures from the **end** of one execution to the start of the next. Use `fixed_rate` for heartbeats and metrics where you need a steady cadence regardless of execution time. Use `fixed_delay` when you need a guaranteed breathing gap — for example, when polling an upstream API that rate-limits on request frequency.
+**`fixed_rate`** measures from the **start** of one execution to the start of the next. **`fixed_delay`** measures from the **end** of one execution to the start of the next. Use `fixed_rate` for heartbeats and metrics where you need a steady cadence regardless of execution time. Use `fixed_delay` when you need a guaranteed breathing gap — for example, when polling an upstream API that rate-limits on request frequency. Since v26.09.08 a `fixed_rate` or `cron` job never overlaps itself: when a run outlasts its period, the next one waits for it (`@scheduled(concurrent=N)` lets up to *N* runs overlap), and `cron` computes its next fire time once a run has ended.
 
 ::: listing lumen/health/monitor.py | Listing 17.2 — fixed_rate heartbeat and fixed_delay poll
 from datetime import timedelta
@@ -316,7 +316,7 @@ class LockConfig:
 
 ### @async_method
 
-**`@async_method`** marks a method for fire-and-forget execution via the `TaskExecutorPort`. The caller returns immediately; the framework routes the coroutine through the configured executor in the background:
+**`@async_method`** marks a method for background execution via the `TaskExecutorPort`, Spring `@Async` style. Awaiting the call submits it and returns at once with the `asyncio.Task` running it; await that task when you need the result:
 
 ```python
 from pyfly.scheduling import async_method
@@ -327,11 +327,17 @@ class AlertService:
 
     @async_method
     async def send_alert(self, msg: str) -> None:
-        """Caller does not await — AlertService dispatches asynchronously."""
+        """Runs in a task of its own, outside the caller's transaction."""
         ...
+
+
+async def notify(alerts: AlertService) -> None:
+    # The call returns the asyncio.Task at once; await it for the result.
+    task = await alerts.send_alert("funds received")
+    await task
 ```
 
-Under the hood `@async_method` sets `__pyfly_async__ = True` on the function; the framework detects this flag and submits the coroutine to the `TaskExecutorPort`.
+Under the hood `@async_method` sets `__pyfly_async__ = True` on the function; the application context replaces the bean's method with a dispatcher that submits the call to the `TaskExecutorPort`. The task starts with the transaction state cleared: a `@transactional` method opens its own unit of work, so its failure never rolls the caller back and the caller's commit does not wait for it. An uncaught exception goes to the `AsyncUncaughtExceptionHandler` bean, which logs it by default. (Through v26.09.07 awaiting the call returned the method's result.)
 
 !!! spring "Spring parity"
     `@scheduled(fixed_rate=...)` mirrors Spring's
@@ -351,7 +357,7 @@ pyfly:
       type: asyncio        # 'asyncio' (default, in-loop) or 'thread'
       max-workers: 4       # worker threads when type is 'thread'
     lock:
-      provider: none       # none | memory | redis | postgres
+      provider: none       # none | memory | redis | database | postgres
 ```
 
 When `enabled` is `false`, `TaskScheduler` starts no loops and all `@scheduled` methods are silently skipped.
@@ -364,10 +370,13 @@ job does heavy CPU work or calls a blocking library, so it cannot stall the loop
 !!! tip "Choosing a lock provider"
     `lock.provider` selects the backend behind `@scheduled(lock=...)`, described
     next: `none` (the default — no coordination), `memory` (mutual exclusion
-    within one process), `redis`, or `postgres` (true cross-instance
-    coordination with no code change). On `redis`/`postgres` PyFly builds the
-    `DistributedLock` bean for you from `pyfly.scheduling.lock.redis.url` or the
-    app's existing `AsyncEngine`; the hand-rolled `@bean` in Listing 17.4 is the
+    within one process), `redis`, `database`, or `postgres` (true cross-instance
+    coordination with no code change). `database` — and `postgres`, which is
+    the same lock — is a portable lease table (`LeaseLock`, the `pyfly_locks`
+    table) on the application's database, whatever its backend; PostgreSQL
+    advisory locks are an opt-in (`pyfly.scheduling.lock.postgres.advisory:
+    true`). On `redis` PyFly builds the lock from
+    `pyfly.scheduling.lock.redis.url`; the hand-rolled `@bean` in Listing 17.4 is the
     do-it-yourself alternative when you need custom semantics.
 
 ---
@@ -1131,8 +1140,8 @@ uv run --extra dev pytest -q
 You should see every existing test still pass:
 
 ```text
-.........................................                                [100%]
-41 passed in 0.28s
+..s.s........................................                            [100%]
+43 passed, 2 skipped in 0.28s
 ```
 
 The three exercises below add scheduling, notification, and webhook tests of

@@ -56,12 +56,13 @@ uv run --extra dev pytest -q
 Deberías ver una hilera de puntos —uno por prueba— seguida de una línea de resumen:
 
 ```text
-.........................................                                [100%]
-41 passed in 0.28s
+..s.s........................................                            [100%]
+43 passed, 2 skipped in 0.28s
 ```
 
-Cuarenta y una pruebas superadas, en menos de un tercio de segundo, sin Docker ni proceso
-externo alguno. Esa velocidad es el sentido entero de la pirámide: la base rápida atrapa la mayoría
+Cuarenta y tres pruebas superadas, en menos de un tercio de segundo, sin Docker ni proceso
+externo alguno. (Las dos omitidas son las ejecuciones sobre PostgreSQL de la prueba de
+concurrencia del Capítulo 5; necesitan `LUMEN_TEST_POSTGRES_URL`.) Esa velocidad es el sentido entero de la pirámide: la base rápida atrapa la mayoría
 de las regresiones antes de que lleguen a ejecutarse las capas de integración más lentas. Si en cambio ves
 `No module named pytest`, es que olvidaste `--extra dev`; vuelve a ejecutarlo con esa opción.
 
@@ -519,7 +520,7 @@ async def query_bus(
 
 Cada fixture se declara con `@pytest_asyncio.fixture` (no con el `@pytest.fixture` pelado) para que pytest-asyncio gestione el ciclo de vida del iterador asíncrono. `asyncio_mode = "auto"` en `pyproject.toml` hace que los fixtures y las pruebas asíncronas funcionen sin decoradores por función, pero el propio decorador del fixture debe seguir siendo `pytest_asyncio.fixture`.
 
-El fixture `session_factory` es compartido. Tanto `repository` como `command_bus` lo reciben, así que el mismo motor SQLite en memoria respalda las lecturas, las escrituras y la frontera `@transactional` que abren los manejadores. Los fixtures `audit_listener` y `command_bus` reciben ambos `event_bus`; pytest lo instancia una vez por prueba y lo comparte entre ellos, así que los eventos publicados por los manejadores de comandos son visibles para el listener.
+El fixture `session_factory` es compartido. Tanto `repository` como `command_bus` lo reciben, así que el mismo motor SQLite en memoria respalda las lecturas, las escrituras y la frontera `@transactional` que abren los manejadores. El repositorio se construye con una sesión propia —su *modo manual*— y usa esa única sesión dentro y fuera de `@transactional`, que es lo que mantiene una base de datos `:memory:` (viva solo en una conexión) compartida entre los manejadores y las consultas. La aplicación arrancada construye el repositorio sin sesión, así que cada llamada se une a la unidad de trabajo del manejador que la hace; `test_app_context_integration.py` y `test_concurrent_balance_changes.py` ejercitan ese camino. Los fixtures `audit_listener` y `command_bus` reciben ambos `event_bus`; pytest lo instancia una vez por prueba y lo comparte entre ellos, así que los eventos publicados por los manejadores de comandos son visibles para el listener.
 
 *Qué acaba de pasar.* Has cableado un stack de pruebas completo, con forma de producción —motor,
 repositorio, bus de eventos, listener y ambos buses de CQRS— enteramente desde fixtures, sin
@@ -691,9 +692,9 @@ Salida esperada:
 
 *Qué acaba de pasar.* Esta es la primera capa que toca infraestructura real, y
 aun así se ejecuta en milisegundos. El comando pasó por el bus real, el manejador
-real abrió una unidad de trabajo `@transactional` real sobre una sesión SQLite real,
-la confirmó (commit), y la consulta la leyó de vuelta: el camino exacto que se ejecuta en producción,
-menos la capa HTTP. Como el manejador se registra en el fixture en lugar de
+real abrió una unidad de trabajo `@transactional` real sobre una base de datos SQLite real,
+la confirmó (commit), y la consulta la leyó de vuelta: el camino que se ejecuta en producción,
+menos la capa HTTP y con la sesión compartida del fixture. Como el manejador se registra en el fixture en lugar de
 construirse en la prueba, estás probando el *despacho* además de la lógica: si el
 enrutamiento de comando a manejador se rompiera, estas pruebas lo atraparían.
 
@@ -1301,7 +1302,7 @@ Las pruebas de arriba cubren la pirámide completa de Lumen con primitivas está
 
 **`assert_event_published(events, event_type, payload_contains=...)`** rastrea una lista capturada de `EventEnvelope` en busca del primer sobre del tipo dado, opcionalmente comprueba claves del payload y devuelve el sobre para aserciones posteriores. `assert_no_events_published(events)` falla si la lista no está vacía.
 
-**Integración con Testcontainers** (`postgres_container()`, `redis_container()`, `pyfly_config(container, base={...})`) es el equivalente de PyFly a `@Testcontainers` + `@ServiceConnection` de Spring Boot. Arranca un contenedor Postgres real; `pyfly_config` reescribe la URL síncrona `psycopg2://` a `postgresql+asyncpg://` y la fusiona en un `Config` listo para arrancar un `ApplicationContext`. Instala el soporte con:
+**Integración con Testcontainers** (`postgres_container()`, `redis_container()`, `pyfly_config(container, base={...})`) es el equivalente de PyFly a `@Testcontainers` + `@ServiceConnection` de Spring Boot. Arranca un contenedor Postgres real; `pyfly_config` reescribe la URL síncrona `psycopg2://` a `postgresql+asyncpg://`, activa la capa relacional y la fusiona en un `Config` listo para arrancar un `ApplicationContext`. En un servidor de base de datos `ddl-auto` vale `none` por defecto, así que pasa `create` en `base` cuando la prueba necesite las tablas de sus modelos. Instala el soporte con:
 
 ```bash
 pip install 'pyfly[testcontainers]'
@@ -1315,12 +1316,44 @@ from pyfly.testing import postgres_container, pyfly_config, requires_docker
 @requires_docker
 async def test_wallet_round_trip_against_real_postgres():
     with postgres_container() as pg:
-        config = pyfly_config(pg, base={"pyfly.data.enabled": True})
+        config = pyfly_config(
+            pg, base={"pyfly.data.relational.ddl-auto": "create"}
+        )
         assert config.get("pyfly.data.relational.url").startswith(
             "postgresql+asyncpg://"
         )
         ...
 ```
+
+**`@DataTest`** es el `@DataJpaTest` de PyFly. Ejecuta cada prueba de una clase en un slice de datos arrancado con los beans que indiques, entrega el contexto a la prueba como el fixture `data_context` y **revierte todas las unidades de trabajo de la prueba** al terminar, de modo que las pruebas que comparten una base de datos nunca ven las filas de las demás:
+
+```python
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from lumen.models.repositories.wallet_repository import WalletRepository
+
+from pyfly.context.application_context import ApplicationContext
+from pyfly.testing import DataTest
+
+
+@DataTest(beans=[WalletRepository])
+class TestWalletRepositorySlice:
+    async def test_upsert_then_count(
+        self, data_context: ApplicationContext
+    ) -> None:
+        wallets = data_context.get_bean(WalletRepository)
+        await wallets.upsert(
+            WalletEntity(id="wlt-1", owner_id="alice", currency="EUR")
+        )
+        assert await wallets.count() == 1
+
+    async def test_starts_empty(
+        self, data_context: ApplicationContext
+    ) -> None:
+        # The row of the test above was rolled back.
+        assert await data_context.get_bean(WalletRepository).count() == 0
+```
+
+Por defecto cada prueba recibe un fichero SQLite en su `tmp_path` con la capa relacional activada. Sobrescribe el fixture `pyfly_data_config` en `conftest.py` para ejecutar todas las pruebas de datos sobre PostgreSQL, MySQL (`mysql_container()`, con el driver asyncmy de `pyfly[mysql]`) o MariaDB (`mariadb_container()`), y la reversión mantiene separadas las pruebas en el servidor compartido; `data_slice(..., rollback=True)` da la misma reversión a una sola prueba. Dos cosas difieren de producción por construcción: el trabajo desacoplado (los pasos de una saga, las llamadas `@async_method`) se rechaza mientras hay abierta una unidad de la prueba, y solo se revierten los orígenes de datos relacionales. Las transacciones de MongoDB se prueban sobre `mongodb_replica_set_container()` (Apéndice B). Hasta la v26.09.07 `@DataTest` solo marcaba la clase.
 
 Lumen no usa estos ayudantes: SQLite cubre la capa de persistencia sin Docker, y el bus en memoria cubre el enrutamiento de eventos. Recurre a ellos cuando tu proyecto tenga infraestructura que no pueda reproducirse sin un demonio real.
 
@@ -1331,19 +1364,19 @@ más para confirmar que la pirámide completa está en verde en conjunto:
 uv run --extra dev pytest -q
 ```
 
-Salida esperada: el mismo `41 passed` con el que empezaste, ahora con un modelo mental de
+Salida esperada: el mismo `43 passed` con el que empezaste, ahora con un modelo mental de
 exactamente lo que demuestra cada punto:
 
 ```text
-.........................................                                [100%]
-41 passed in 0.28s
+..s.s........................................                            [100%]
+43 passed, 2 skipped in 0.28s
 ```
 
 ---
 
 ## Lo que construiste {.recap}
 
-Los seis archivos de prueba que construyó este capítulo suman 26 pruebas superadas, ejercitando cada capa de la pirámide. Junto con las pruebas de la saga del Capítulo 12 y las pruebas de event sourcing del Capítulo 9, la suite completa de Lumen son **41 pruebas superadas**: el recuento que viste cuando ejecutaste `uv run --extra dev pytest -q` al principio.
+Los seis archivos de prueba que construyó este capítulo suman 26 pruebas superadas, ejercitando cada capa de la pirámide. Junto con las pruebas de la saga del Capítulo 12, las pruebas de event sourcing del Capítulo 9 y la prueba de concurrencia del Capítulo 5, la suite completa de Lumen son **43 pruebas superadas** (y dos casos de PostgreSQL que se omiten sin servidor): el recuento que viste cuando ejecutaste `uv run --extra dev pytest -q` al principio.
 
 En la base, `test_money.py` y `test_wallet_aggregate.py` demuestran la aritmética, la inmutabilidad y las reglas de invariante del modelo de dominio. Todas las pruebas son funciones síncronas de Python puro, sin fixtures, sin inyección de dependencias, sin `async`. El atributo `BusinessRuleViolation.rule` hace que cada aserción sea específica del invariante exacto incumplido.
 
@@ -1389,6 +1422,9 @@ En concreto, aprendiste:
 - **Perfil de prueba (v26.6.110)**: para un bloque de ajustes solo de prueba, añade un
   superpuesto `pyfly-test.yaml` y actívalo con `PYFLY_PROFILES_ACTIVE=test`
   (equivalencia con el `application-test.yaml` de Spring).
+- **`@DataTest`** — un slice de datos cuyas pruebas revierten todas sus unidades
+  de trabajo, sobre SQLite por defecto o sobre un servidor compartido mediante
+  `pyfly_data_config`.
 - **Ayudantes del framework** (`PyFlyTestCase`, `mock_bean`, `create_test_container`,
   Testcontainers): disponibles en `pyfly.testing` para proyectos que los necesiten;
   Lumen lo mantiene simple con componentes reales.

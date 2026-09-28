@@ -280,7 +280,7 @@ from datetime import UTC, datetime
 from sqlalchemy import String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from pyfly.data.relational.sqlalchemy import Base
+from pyfly.data.relational.sqlalchemy import Base, UtcDateTime
 
 
 class WalletEntity(Base):
@@ -299,7 +299,7 @@ class WalletEntity(Base):
         nullable=False, default=0
     )
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC)
+        UtcDateTime(), default=lambda: datetime.now(UTC)
     )
 :::
 
@@ -317,8 +317,8 @@ uv run pyfly run --server uvicorn
 ```
 
 ```text
-pyfly.data.relational.auto_configuration: Initializing database schema (ddl-auto=create)
-pyfly.data.relational.auto_configuration: Database schema initialized (1 tables)
+pyfly.data.relational.schema: Initializing database schema (ddl-auto=create)
+pyfly.data.relational.schema: Database schema initialized (1 tables)
 ```
 
 `1 tables` es tu tabla `wallets` — creada puramente porque
@@ -344,8 +344,8 @@ argumentos de tipo le dicen al framework el *tipo de entidad*
 (`WalletEntity`) y el *tipo de la clave primaria* (`str`); a partir de
 ahí genera e inyecta una superficie CRUD asíncrona completa —
 `find_by_id`, `save`, `find_all`, `find_all(pageable)`, `delete`,
-`delete_by_id`, `count` y más — respaldada por la `AsyncSession`
-transaccional de la autoconfiguración relacional:
+`delete_by_id`, `count` y más —, en la que cada llamada usa la
+sesión de la unidad de trabajo en curso:
 
 ::: listing lumen/models/repositories/wallet_repository.py | Listado 2.2b — WalletRepository: subclase del Repository del framework
 from __future__ import annotations
@@ -528,7 +528,7 @@ from lumen.models.entities.v1.money import Money
 from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.domain import AggregateNotFound
 from pyfly.eda import EventPublisher
 
@@ -554,7 +554,7 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         self, command: DepositFunds
     ) -> int:
         entity = await self._repository.find_by_id(
-            command.wallet_id
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
         )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
@@ -588,9 +588,13 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
   tres se resuelven por tipo; `DepositFundsHandler` nunca importa una
   clase concreta.
 - `@transactional()` sobre `do_handle` envuelve todo el cuerpo en una
-  única unidad de trabajo confirmada. El decorador abre una sesión
-  desde `session_factory`, la vincula al repositorio durante la
-  llamada y confirma en caso de éxito (o revierte en caso de error).
+  única unidad de trabajo confirmada. El decorador liga una unidad de
+  trabajo a la tarea en curso, en el origen de datos de
+  `session_factory`; cada llamada al repositorio del cuerpo se une a
+  ella, y confirma en caso de éxito (o revierte en caso de error).
+  `lock=LockMode.PESSIMISTIC_WRITE` retiene la fila del monedero hasta
+  entonces, así que dos cambios del mismo monedero nunca se pisan (el
+  Capítulo 5 explica por qué).
 - La lógica de negocio sigue la secuencia estándar CQRS/DDD: cargar la
   entidad, rehidratar el agregado mediante el mapeador, mutar a través
   de métodos de dominio que imponen invariantes, persistir mediante

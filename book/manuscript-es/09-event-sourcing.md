@@ -335,7 +335,7 @@ El protocolo `EventStore` expone dos operaciones centrales:
 - **`append(aggregate_id, aggregate_type, events, *, expected_version)`** — persiste un lote de eventos para un flujo. Lanza `ConcurrencyError` si la versión real del flujo no coincide con `expected_version`.
 - **`load(aggregate_id, *, after_sequence=0)`** — devuelve la secuencia ordenada de objetos `StoredEventEnvelope` desde el primer evento (o desde `after_sequence`) hasta el más reciente.
 
-**`InMemoryEventStore`** es la implementación lista para usar. Al igual que `InMemoryEventBus` en el Capítulo 8, se ejecuta enteramente en el proceso, sin E/S: ideal para desarrollo y pruebas. Un despliegue de producción cambia a un adaptador respaldado por PostgreSQL o EventStoreDB.
+**`InMemoryEventStore`** es la implementación lista para usar. Al igual que `InMemoryEventBus` en el Capítulo 8, se ejecuta enteramente en el proceso, sin E/S: ideal para desarrollo y pruebas. Un despliegue de producción cambia a un adaptador duradero como el `SqlAlchemyEventStore` de PyFly, que desde la v26.09.08 anexa en la unidad de trabajo de quien llama: dentro de `@transactional`, los eventos y la instantánea de un agregado se confirman o se revierten con el resto de la transacción de negocio.
 
 `EventSourcedRepository` envuelve el `EventStore` y gestiona el ciclo completo de guardado/carga. El código de aplicación nunca llama al almacén directamente; llama a `repo.save(aggregate)` y `repo.load(aggregate_id)`, y el repositorio se encarga del resto.
 
@@ -611,7 +611,7 @@ uv run --extra dev pytest tests/test_ledger_event_sourcing.py -q -k continues_ap
 **Qué acaba de ocurrir.** Un libro mayor recargado recordó su versión, de modo que el siguiente guardado se alineó limpiamente detrás de los eventos ya presentes en el flujo: sin conflicto, números de secuencia en orden, saldo correcto. Esta es la *ruta feliz* de la concurrencia optimista: un escritor cada vez. En el momento en que dos escritores compiten, el `expected_version` del segundo ya no coincidiría y el almacén lanzaría `ConcurrencyError` en su lugar, que es el caso que la advertencia de abajo te dice cómo manejar.
 
 !!! warning "Maneja siempre ConcurrencyError"
-    Cuando dos escritores compiten, el guardado perdedor lanza `ConcurrencyError`. Tu servicio de aplicación debe capturarlo y decidir qué hacer: reintentar el ciclo completo de cargar-mutar-guardar (apropiado para escrituras de baja contención), o exponer un 409 Conflict al llamante (apropiado cuando el llamante debería reenviar con datos frescos). Nunca tragues el error en silencio: un error de concurrencia tragado deja el flujo en un estado inconsistente.
+    Cuando dos escritores compiten, el guardado perdedor lanza `ConcurrencyError`. Desde la v26.09.08 es la `OptimisticLockingFailureException` del núcleo, así que uno no capturado se convierte en un HTTP 409 y un oyente de mensajes lo reintenta. Tu servicio de aplicación aún debe decidir qué hacer: reintentar el ciclo completo de cargar-mutar-guardar (apropiado para escrituras de baja contención), o exponer un 409 Conflict al llamante (apropiado cuando el llamante debería reenviar con datos frescos). Nunca tragues el error en silencio: un error de concurrencia tragado deja el flujo en un estado inconsistente.
 
 ---
 
@@ -823,11 +823,11 @@ async def demo_projection(store: InMemoryEventStore) -> None:
     print(f"Balance read model: {balance}")
 :::
 
-**Cómo funciona.** `FunctionProjection("balance_ledger", _handle_envelope)` envuelve el manejador asíncrono. `ProjectionRunner(projection, store)` lo enlaza con el `InMemoryEventStore`. `await runner.start()` lanza una tarea de sondeo en segundo plano y retorna *de inmediato*; no se bloquea hasta que el almacén se drena. La tarea itera sobre `store.stream_all(...)`, llamando a `_handle_envelope` para cada sobre nuevo en orden y avanzando un cursor (`_last_event_id`) para no reprocesar nunca un evento. Como la población ocurre asíncronamente, la demo sondea `_balance_store` hasta que la proyección se ha puesto al día, y luego llama a `await runner.stop()` para detener el bucle antes de leer el resultado. Solo después de que la proyección haya procesado los sobres, `_balance_store` refleja el estado actual de cada libro mayor del almacén.
+**Cómo funciona.** `FunctionProjection("balance_ledger", _handle_envelope)` envuelve el manejador asíncrono. `ProjectionRunner(projection, store)` lo enlaza con el `InMemoryEventStore`. `await runner.start()` lanza una tarea de sondeo en segundo plano y retorna *de inmediato*; no se bloquea hasta que el almacén se drena. La tarea itera sobre `store.stream_all(...)`, llamando a `_handle_envelope` para cada sobre nuevo en orden y avanzando su posición en el flujo global del almacén para no reprocesar nunca un evento. Como la población ocurre asíncronamente, la demo sondea `_balance_store` hasta que la proyección se ha puesto al día, y luego llama a `await runner.stop()` para detener el bucle antes de leer el resultado. Solo después de que la proyección haya procesado los sobres, `_balance_store` refleja el estado actual de cada libro mayor del almacén.
 
 La proyección es deliberadamente sin estado: solo lee `envelope.event_type` y `envelope.payload`. No se carga ningún agregado; no se llama a ningún repositorio. El modelo de lectura es barato de reconstruir: detén el runner, limpia `_balance_store`, llama a `start()` de nuevo. Esta propiedad de reconstruir-desde-la-historia es exclusiva del event sourcing; los modelos de almacenamiento de estado ya han descartado la historia.
 
-En producción, `_handle_envelope` escribiría en una base de datos real (PostgreSQL, Redis, Elasticsearch). El `ProjectionRunner` persistiría un cursor en una tabla de checkpoints para que los reinicios continúen desde el último evento procesado en lugar de reproducir todo desde el principio. El patrón de proyección es idéntico con independencia del almacenamiento subyacente.
+En producción, `_handle_envelope` escribiría en una base de datos real (PostgreSQL, Redis, Elasticsearch). Pasa al `ProjectionRunner` un `CheckpointStore` (`checkpoints=`, como el bean `projection_checkpoint_store`) para que los reinicios continúen desde el último evento procesado en lugar de reproducir todo desde el principio; con `SqlAlchemyCheckpointStore` en la base de datos del modelo de lectura, cada lote y su checkpoint se confirman en una sola unidad de trabajo. El patrón de proyección es idéntico con independencia del almacenamiento subyacente.
 
 !!! note "Proyecciones frente a listeners del Capítulo 8"
     La `BalanceProjection` del Capítulo 8 (Listado 8.4) era un suscriptor `@event_listener` sobre el `InMemoryEventBus`: reaccionaba a los eventos a medida que se publicaban. La `BalanceLedgerProjection` de este capítulo lee directamente del `EventStore`: puede reproducir la historia desde el principio, ponerse al día con el presente y continuar consumiendo eventos futuros. Ambas mantienen un modelo de lectura de saldos; la proyección sobre el almacén de eventos es reconstruible desde la historia; el listener del bus no lo es.
@@ -838,26 +838,28 @@ En producción, `_handle_envelope` escribiría en una base de datos real (Postgr
 
 Considera la llamada `repo.save(account)` del Listado 9.4: tres eventos se anexan al almacén de eventos. Ahora supón que esos eventos también necesitan llegar a un broker externo: Kafka, RabbitMQ, otro microservicio. El enfoque ingenuo es llamar a `broker.publish(envelope)` inmediatamente después de `store.append(...)`. Pero ¿y si el proceso se cae entre el anexado y la publicación? Los eventos están en el almacén, pero el broker nunca los recibió. El servicio aguas abajo nunca se enteró del crédito.
 
-El patrón del **outbox transaccional** resuelve esto. En lugar de publicar directamente, encolas el evento en un *outbox*: un intermediario duradero. El outbox persiste el evento junto a los eventos del agregado en la misma operación de almacén. Un trabajador en segundo plano separado (el *relay*) drena el outbox y reenvía cada evento al broker con semántica de al menos una vez. Si el relay se cae, reinicia y reintenta desde el último evento no confirmado.
+El patrón del **outbox transaccional** resuelve esto. En lugar de publicar directamente, encolas el evento en un *outbox*: un intermediario duradero. El outbox persiste el evento en la misma transacción de base de datos que el cambio que lo produjo. Un trabajador en segundo plano separado (el *relay*) drena el outbox y reenvía cada evento al broker con semántica de al menos una vez. Si el relay se cae, reinicia y reintenta desde el último evento no confirmado.
 
-El `TransactionalOutbox` de PyFly vive en `pyfly.eventsourcing`. Acepta una corrutina `publish` y un límite `max_attempts`, y expone dos métodos:
+El `TransactionalOutbox` de PyFly vive en `pyfly.eventsourcing`. Está respaldado por tablas (las tablas `pyfly_outbox_*` del framework), así que necesita un origen de datos: un nombre del registro, un `AsyncEngine` como aquí, o el origen por defecto de la aplicación. Acepta una corrutina `publish` y un límite `max_attempts`, y expone dos métodos:
 
-- **`enqueue(envelope)`** — añade un sobre de evento al outbox para su entrega.
-- **`start()`** — arranca el bucle de relay en segundo plano que llama a `publish(envelope)` por cada elemento encolado, reintentando hasta `max_attempts` veces en caso de fallo.
+- **`enqueue(envelope)`** — escribe un sobre de evento en el outbox, en la unidad de trabajo ligada al origen de datos del outbox (o en una unidad breve propia).
+- **`start()`** — comprueba (o crea) las tablas del outbox y arranca el relay en segundo plano que llama a `publish(envelope)` por cada elemento confirmado, reintentando hasta `max_attempts` veces en caso de fallo.
 
 ::: listing lumen/eventsourcing/outbox_demo.py | Listado 9.10 — TransactionalOutbox: entrega fiable de al menos una vez a un broker
 from __future__ import annotations
 
-from pyfly.eventsourcing import (
-    InMemoryEventStore,
-    InMemorySnapshotStore,
-    TransactionalOutbox,
-)
-from pyfly.eventsourcing.repository import EventSourcedRepository
+import asyncio
 
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from pyfly.eventsourcing import InMemoryEventStore, TransactionalOutbox
+
+from lumen.interfaces.enums.v1.currency import Currency
 from lumen.models.entities.v1.ledger_account import LedgerAccount
 from lumen.models.entities.v1.money import Money
-from lumen.interfaces.enums.v1.currency import Currency
+from lumen.models.repositories.ledger_repository import (
+    LedgerAccountRepository,
+)
 
 
 # Simulated broker: collect published envelopes for inspection.
@@ -869,29 +871,39 @@ async def _broker_publish(envelope: object) -> None:
 
 
 async def demo_outbox() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///./ledger.db")
     store = InMemoryEventStore()
     repo = LedgerAccountRepository(store)
-    outbox = TransactionalOutbox(publish=_broker_publish, max_attempts=5)
-    await outbox.start()
+    outbox = TransactionalOutbox(
+        publish=_broker_publish, datasource=engine, max_attempts=5
+    )
+    await outbox.start()  # creates the pyfly_outbox_* tables if missing
+    try:
+        account = LedgerAccount.open("led-004", "u-11", Currency.EUR)
+        account.credit(Money(5000, Currency.EUR))
+        await repo.save(account)
 
-    account = LedgerAccount.open("led-004", "u-11", Currency.EUR)
-    account.credit(Money(5000, Currency.EUR))
-    await repo.save(account)
+        # Write the stored envelopes into the outbox table.
+        for envelope in await store.load("led-004"):
+            await outbox.enqueue(envelope)
 
-    # Enqueue the stored envelopes into the outbox.
-    for envelope in await store.load("led-004"):
-        await outbox.enqueue(envelope)
-
-    # The relay has delivered all envelopes to the broker.
-    assert len(_published) == 2   # LedgerOpened + Credited
+        # The relay publishes each one once its enqueue has committed.
+        for _ in range(50):
+            if len(_published) == 2:  # LedgerOpened + Credited
+                break
+            await asyncio.sleep(0.05)
+        assert len(_published) == 2
+    finally:
+        await outbox.stop()
+        await engine.dispose()
 :::
 
-**Cómo funciona.** El outbox mantiene los sobres en una cola duradera. `_broker_publish` es la función de entrega; sustitúyela por tu productor de Kafka o RabbitMQ. `max_attempts=5` significa que el relay reintenta una entrega fallida hasta cinco veces antes de mandar el sobre a la cola de mensajes muertos (dead-letter).
+**Cómo funciona.** El outbox mantiene los sobres en una tabla, así que los eventos pendientes sobreviven a un reinicio. `_broker_publish` es la función de entrega; sustitúyela por tu productor de Kafka o RabbitMQ. `max_attempts=5` significa que el relay reintenta una entrega fallida hasta cinco veces antes de mandar el sobre a la cola de mensajes muertos (dead-letter). El relay trabaja en segundo plano: la demo espera a que lleguen los dos sobres y luego detiene el outbox. Un `enqueue` dentro de un método `@transactional` sobre el origen de datos del outbox forma parte de esa unidad: su evento existe exactamente cuando la unidad se confirma, y un rollback lo retira. (Hasta la v26.09.07 el outbox era un diccionario en el proceso: un evento encolado por una unidad que se revertía se publicaba igualmente, y un reinicio perdía lo pendiente. Ahora necesita una capa de datos; sin ella, `start()` lanza `IllegalTransactionStateError`.)
 
 La garantía crítica: el outbox se drena de forma independiente de la petición que creó los eventos. Si el proceso se cae después de `repo.save(account)` pero antes de que el outbox termine de vaciarse, el siguiente reinicio retoma desde donde lo dejó y completa la entrega. El estado del agregado en el almacén de eventos ya es correcto; solo se interrumpió la entrega del lado del broker.
 
 !!! warning "Al menos una vez, no exactamente una vez"
-    El outbox garantiza que cada evento llega al broker *al menos una vez*. Si el relay entrega un evento y luego se cae antes de marcarlo como confirmado, el evento se entrega de nuevo en el reinicio. Tus consumidores del broker —y los servicios aguas abajo— deben ser idempotentes: usa el `envelope.event_id` como clave de deduplicación. El Capítulo 10 muestra cómo los adaptadores de consumidor de Kafka y RabbitMQ manejan la deduplicación automáticamente.
+    El outbox garantiza que cada evento llega al broker *al menos una vez*. Si el relay entrega un evento y luego se cae antes de marcarlo como confirmado, el evento se entrega de nuevo en el reinicio. Tus consumidores del broker —y los servicios aguas abajo— deben ser idempotentes: usa el `envelope.event_id` como clave de deduplicación. El Capítulo 10 muestra dónde encuentra un consumidor de Kafka o RabbitMQ un id estable con el que deduplicar.
 
 El outbox transaccional es el puente entre el event sourcing y la mensajería orientada a eventos. El Capítulo 10 retoma exactamente aquí, presentando los productores de Kafka y los exchanges de RabbitMQ y mostrando cómo configurar el relay para una entrega fiable a cada uno.
 

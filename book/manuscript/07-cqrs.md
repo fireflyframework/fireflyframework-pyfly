@@ -147,10 +147,10 @@ A command handler inherits from `CommandHandler[C, R]` and implements exactly on
 
 **Both decorators on every handler are required.** `@command_handler` registers the class with the `HandlerRegistry` by introspecting the first generic type argument — no manual registration needed. `@service` wires the handler into PyFly's DI container so constructor arguments are resolved and injected automatically at startup. The order matters: `@command_handler` on top, `@service` directly below. Without `@service`, the DI container never instantiates the class and the bus cannot find the handler; without `@command_handler`, the registry never maps the command type to the class. Omitting either decorator is a silent failure — the bus raises "no handler found" at dispatch time.
 
-**`@transactional()` turns `do_handle` into a committed unit of work.** Command handlers inject `session_factory: async_sessionmaker[AsyncSession]` and store it as `self._session_factory`. When `@transactional()` runs `do_handle` it opens a fresh session from that factory, swaps it onto the repository for the duration of the call, commits on success, and rolls back on any exception. Without `@transactional()` the framework's shared session only flushes — the write survives within the request but is never committed to the database.
+**`@transactional()` turns `do_handle` into a committed unit of work.** Command handlers inject `session_factory: async_sessionmaker[AsyncSession]` and store it as `self._session_factory`. When `@transactional()` runs `do_handle` it binds a unit of work to the running task on that factory's datasource; every repository call in the method joins it, and it commits on success and rolls back on any exception. Without `@transactional()` each repository call would commit on its own, so a handler that loads, checks, saves, and publishes would no longer succeed or fail as one step.
 
 !!! note "Flush vs. commit, in plain terms"
-    A **flush** pushes your pending changes into the database connection so later queries in the *same* session can see them — but they are still inside an open transaction that can be rolled back. A **commit** makes them permanent. Without `@transactional()` your deposit would flush (visible mid-request) but never commit (gone after the request). The decorator is what makes the change stick.
+    A **flush** pushes your pending changes into the database connection so later queries in the *same* session can see them — but they are still inside an open transaction that can be rolled back. A **commit** makes them permanent. Inside `@transactional()` the repository only flushes, and the unit commits once, at the end of the handler. Outside it, each repository call is a short unit that commits by itself. The decorator is what makes the whole handler stick, or fail, together.
 
 **Step 3 — Write `OpenWalletHandler`.** Now build the worker for the first command. Create `open_wallet_handler.py`, stack `@command_handler` over `@service`, inject the repository, the event publisher, and the session factory, and implement the single `do_handle` method.
 
@@ -202,7 +202,7 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
         return wallet_id
 :::
 
-Walk through `do_handle` step by step. `f"wlt-{uuid4()}"` generates a stable prefixed identifier. `Wallet.open(...)` calls the factory, which enforces the non-empty owner pre-condition and buffers a `WalletOpened` event. `to_entity(wallet)` maps the aggregate to a flat `WalletEntity` row. `repository.upsert(...)` calls `session.merge` — a single call that inserts if no row exists or updates if one does — then flushes. Using `upsert` instead of `save` avoids an `IntegrityError` on the primary key: the aggregate owns its id, so both INSERT and UPDATE key on the same stable string. `wallet.clear_events()` drains the buffer and `publish_domain_events` forwards each event to the EDA bus. The `@transactional()` decorator commits the session on the way out. The handler returns the wallet ID, which flows back to the controller as the `send` return value.
+Walk through `do_handle` step by step. `f"wlt-{uuid4()}"` generates a stable prefixed identifier. `Wallet.open(...)` calls the factory, which enforces the non-empty owner pre-condition and buffers a `WalletOpened` event. `to_entity(wallet)` maps the aggregate to a flat `WalletEntity` row. `repository.upsert(...)` calls `session.merge` — a single call that inserts if no row exists or updates if one does — then flushes. The aggregate owns its id, so both INSERT and UPDATE key on the same stable string. (Through v26.09.07 `save` always inserted and a second save of the same id raised `IntegrityError`; since v26.09.08 `save` merges an entity whose key is set too, and `upsert` stays as the explicit spelling.) `wallet.clear_events()` drains the buffer and `publish_domain_events` forwards each event to the EDA bus. The `@transactional()` decorator commits the unit of work on the way out. The handler returns the wallet ID, which flows back to the controller as the `send` return value.
 
 Note the constructor requirement: `super().__init__()` is mandatory on `CommandHandler`. Skip it and the base-class bookkeeping — correlation context, lifecycle hooks — is never initialized. The repository, `EventPublisher`, and `session_factory` are all injected by the DI container from type hints; no factory configuration is needed.
 
@@ -221,7 +221,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.eda import EventPublisher
 
 
@@ -243,7 +243,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 
     @transactional()
     async def do_handle(self, command: DepositFunds) -> int:  # type: ignore[override]
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -268,7 +270,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.eda import EventPublisher
 
 
@@ -290,7 +292,9 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
 
     @transactional()
     async def do_handle(self, command: WithdrawFunds) -> int:  # type: ignore[override]
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -302,7 +306,7 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
         return wallet.balance.amount
 :::
 
-`DepositFundsHandler` and `WithdrawFundsHandler` follow the classic pattern: **find → to_aggregate → act → to_entity → upsert → drain**. `repository.find_by_id` returns the flat `WalletEntity` row; `to_aggregate(entity)` rehydrates the rich domain object so the aggregate's invariants are in scope. `Money` is constructed from the command's `amount` and the *wallet's* currency — never a currency from the command itself — because the wallet owns that invariant. If `wallet.withdraw` refuses (balance would go negative), it raises `BusinessRuleViolation`, which propagates as HTTP 422 without a single line of error-handling code in the handler.
+`DepositFundsHandler` and `WithdrawFundsHandler` follow the classic pattern: **find → to_aggregate → act → to_entity → upsert → drain**. `repository.find_by_id` returns the flat `WalletEntity` row, read with a pessimistic lock (`LockMode.PESSIMISTIC_WRITE`) so a concurrent change of the same wallet waits for this unit to end (Chapter 5); `to_aggregate(entity)` rehydrates the rich domain object so the aggregate's invariants are in scope. `Money` is constructed from the command's `amount` and the *wallet's* currency — never a currency from the command itself — because the wallet owns that invariant. If `wallet.withdraw` refuses (balance would go negative), it raises `BusinessRuleViolation`, which propagates as HTTP 422 without a single line of error-handling code in the handler.
 
 Notice what is absent: no try/except blocks, no logging calls, no tracing setup. All of that belongs to the bus pipeline. The handler is a pure expression of business intent.
 
@@ -360,7 +364,7 @@ balance: int = await command_bus.send(
 ::: figure art/figures/07-cqrs.svg | Figure 7.1 — Commands flow to the write model; queries to the read model.
 
 !!! spring "Spring parity"
-    `CommandBus.send(command)` is the Python equivalent of Axon Framework's `CommandGateway.send(command)` or `CommandGateway.sendAndWait(command)`. Each command handler class corresponds to a method annotated with `@CommandHandler` in Axon, or a `@MessageHandler` in Spring Modulith's ApplicationEventPublisher model. The `@command_handler` decorator is PyFly's counterpart of `@CommandHandler`: it registers the handler with the registry by introspecting the generic type parameter, exactly as Axon resolves handler methods by parameter type. The `@service` stacking mirrors the fact that in Spring every `@CommandHandler` bean is also a Spring `@Component` — registration and injection are inseparable. The `@transactional()` decorator maps directly to Spring's `@Transactional`: both open a unit-of-work session, commit on success, and roll back on any exception — so `upsert` (backed by `session.merge`) is the Python analogue of `repository.save()` inside a `@Transactional` method.
+    `CommandBus.send(command)` is the Python equivalent of Axon Framework's `CommandGateway.send(command)` or `CommandGateway.sendAndWait(command)`. Each command handler class corresponds to a method annotated with `@CommandHandler` in Axon, or a `@MessageHandler` in Spring Modulith's ApplicationEventPublisher model. The `@command_handler` decorator is PyFly's counterpart of `@CommandHandler`: it registers the handler with the registry by introspecting the generic type parameter, exactly as Axon resolves handler methods by parameter type. The `@service` stacking mirrors the fact that in Spring every `@CommandHandler` bean is also a Spring `@Component` — registration and injection are inseparable. The `@transactional()` decorator maps directly to Spring's `@Transactional`: both open a unit of work, commit on success, and roll back on any exception, with the same propagation and rollback rules. `save()` follows Spring Data's `save` (persist a new entity, merge an existing one); Lumen's `upsert` spells the merge out with `session.merge`.
 
 ---
 
@@ -912,9 +916,9 @@ The three headers — `X-Correlation-ID`, `X-Trace-ID`, and `X-Span-ID` — foll
 
 Part II is complete. Lumen now has a full vertical slice from HTTP to domain and back — one built on architectural decisions that will scale without rewriting.
 
-In Chapter 5 you gave the system persistence: a `WalletRepository` subclassing `Repository[WalletEntity, str]` — the framework's Spring-Data-style generic repository that provides `find_by_id`, `find_all(pageable)`, `find_all_by_spec_paged`, and more out of the box, with the `AsyncSession` injected by relational auto-configuration. In Chapter 6 you promoted the wallet to a proper DDD aggregate: `Money` as an immutable value object, `Wallet(AggregateRoot[str])` as the consistency boundary enforcing the overdraft, currency-match, and positive-amount invariants, with `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` domain events buffered in the aggregate and drained to the event bus after a successful save.
+In Chapter 5 you gave the system persistence: a `WalletRepository` subclassing `Repository[WalletEntity, str]` — the framework's Spring-Data-style generic repository that provides `find_by_id`, `find_all(pageable)`, `find_all_by_spec_paged`, and more out of the box, each call running in the caller's unit of work or in a short one of its own. In Chapter 6 you promoted the wallet to a proper DDD aggregate: `Money` as an immutable value object, `Wallet(AggregateRoot[str])` as the consistency boundary enforcing the overdraft, currency-match, and positive-amount invariants, with `WalletOpened`, `FundsDeposited`, and `FundsWithdrawn` domain events buffered in the aggregate and drained to the event bus after a successful save.
 
-In this chapter you separated the write model from the read model. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` are frozen, validated command messages that flow through `DefaultCommandBus` — a pipeline that runs validation, authorization, handler execution, domain event publishing, and distributed tracing automatically for every command. Each command handler carries `@transactional()` on `do_handle`: the decorator opens a committed unit of work from `self._session_factory`, swaps the session onto the repository, commits on success, and rolls back on failure. Persistence goes through `repository.upsert` — backed by `session.merge` — so INSERT and UPDATE share a single code path keyed on the aggregate's own id.
+In this chapter you separated the write model from the read model. `OpenWallet`, `DepositFunds`, and `WithdrawFunds` are frozen, validated command messages that flow through `DefaultCommandBus` — a pipeline that runs validation, authorization, handler execution, domain event publishing, and distributed tracing automatically for every command. Each command handler carries `@transactional()` on `do_handle`: the decorator binds a unit of work on the datasource of `self._session_factory`, every repository call joins it, and it commits on success and rolls back on failure. The deposit and withdrawal handlers read the wallet with a pessimistic lock, so concurrent changes of one wallet queue up instead of overwriting each other. Persistence goes through `repository.upsert` — backed by `session.merge` — so INSERT and UPDATE share a single code path keyed on the aggregate's own id.
 
 `GetWallet` and `GetBalance` are query messages that flow through `DefaultQueryBus` — the same pipeline without the event-publishing step, and without `@transactional()` because reads do not commit. `GetBalanceHandler` projects through a `@projection`-marked `BalanceView` interface and `Mapper.project`, copying only the declared fields and applying a registered major-unit transform. `ListWallets` and `ListRichWallets` round out the query side: `find_all(pageable)` returns a counted, sorted, offset-limited `Page[WalletEntity]`; `find_all_by_spec_paged` runs a composable `Specification` predicate on top of the same pagination machinery. Both use `Page.map(entity_to_dto)` to project items without touching the metadata.
 
@@ -944,7 +948,7 @@ Those last four cases are worth pausing on: each one exercises the *pipeline*, n
 
 1. **Trace the full lifecycle in the test suite.** Open `samples/lumen/tests/test_cqrs_flow.py` and run it against a real database using Testcontainers (Chapter 11). The test `test_full_wallet_lifecycle` opens a wallet, deposits 1 500 minor units, withdraws 500, then queries both `GetWallet` and `GetBalance`. Step through it with a debugger: confirm that `wallet.clear_events()` drains the `FundsDeposited` and `FundsWithdrawn` events after each `upsert` call, and that `GetWallet` returns a `WalletDto` with `balance_minor == 1000` and `balance == 10.0`.
 
-2. **Observe `upsert` vs `save`.** In a test, call `DepositFunds` twice on the same wallet without `@transactional()` and observe the `IntegrityError`. Then restore `@transactional()` and verify both deposits commit. Open `WalletRepository.upsert` and trace how `session.merge` resolves the primary-key conflict that a plain `INSERT` would raise.
+2. **Observe `upsert` vs `save`.** In a test, replace `upsert` with `save` in `DepositFundsHandler` and deposit twice into the same wallet: since v26.09.08 `save()` merges an entity whose key is already set, so both deposits commit (through v26.09.07 the second one raised `IntegrityError`). Restore `upsert`, open `WalletRepository.upsert`, and trace how `session.merge` resolves the existing primary key the same way.
 
 3. **Add a `ListByOwner` query.** Define `ListByOwner(Query[list[WalletDto]])` with an `owner_id: str` field. Implement `ListByOwnerHandler` — decorated with `@query_handler` + `@service` — that calls `WalletRepository.find_by_owner_id(query.owner_id)` (the derived query stub already exists) and maps the result list with `entity_to_dto`. Add a `GET /api/v1/wallets/by-owner/{owner_id}` endpoint to `WalletController`. Ensure the new endpoint method name sorts before `wallet_detail` so Starlette matches the literal `/by-owner/…` segment first.
 

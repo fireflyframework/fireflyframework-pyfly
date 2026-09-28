@@ -149,7 +149,7 @@ Imports: `from pyfly.data.relational.sqlalchemy import (Repository, BaseEntity, 
 
 | Spring Boot | PyFly | Notes |
 |---|---|---|
-| `JpaRepository<E, ID>` / `CrudRepository` | `Repository[E, ID]` | `from pyfly.data.relational.sqlalchemy import Repository`; decorate with `@repository`. Subclass with concrete type params; `AsyncSession` is injected automatically at startup. |
+| `JpaRepository<E, ID>` / `CrudRepository` | `Repository[E, ID]` | `from pyfly.data.relational.sqlalchemy import Repository`; decorate with `@repository`. Subclass with concrete type params. No session is injected: each call joins the running task's unit of work, or commits in a short unit of its own. |
 | `@Repository interface WalletRepo extends JpaRepository<…>` | `@repository class WalletRepository(Repository[WalletEntity, str])` | Class, not interface; body holds derived-query stubs and custom methods only. |
 | `findByOwnerId(String id)` | `async def find_by_owner_id(self, owner_id: str) -> list[WalletEntity]: ...` | Stub body `...` triggers compilation by `RepositoryBeanPostProcessor` at startup. Prefixes: `find_by_`, `count_by_`, `exists_by_`, `delete_by_`. |
 | `@Query("SELECT u FROM User u WHERE …")` | `@query("SELECT u FROM User u WHERE …")` (JPQL-like) or `@query("SELECT …", native=True)` (raw SQL) | `from pyfly.data.query import query`. Params use `:name` syntax. |
@@ -163,7 +163,7 @@ Imports: `from pyfly.data.relational.sqlalchemy import (Repository, BaseEntity, 
 | `@Entity` + surrogate UUID PK + audit columns | `class Order(BaseEntity)` | `from pyfly.data.relational.sqlalchemy import BaseEntity`. Inherits `id: UUID`, `created_at`, `updated_at`, `created_by`, `updated_by` — all mapped as SQLAlchemy 2.0 `Mapped`/`mapped_column`. |
 | `@Column` / `@Id` | `id: Mapped[str] = mapped_column(String(64), primary_key=True)` | SQLAlchemy 2.0 typed columns. `Base` (no audit) lets the entity own its own PK type, as Lumen's `WalletEntity` does with a `str` id. |
 | `@SoftDelete` (Hibernate 6) | `SoftDeleteMixin` + `SoftDeleteRepository` | `from pyfly.data.relational.sqlalchemy import SoftDeleteMixin`. Adds `deleted_at`; repository filters it automatically. |
-| Optimistic locking `@Version` | `VersionedMixin` | Adds a `version: int` column; SQLAlchemy raises `StaleDataError` on conflict. |
+| Optimistic locking `@Version` | `VersionedMixin` | Adds a `version: int` column; a conflict raises `OptimisticLockingFailureException` (HTTP 409). |
 
 ### Pagination & Sorting
 
@@ -179,13 +179,15 @@ Imports: `from pyfly.data.relational.sqlalchemy import (Repository, BaseEntity, 
 
 | Spring Boot | PyFly | Notes |
 |---|---|---|
-| `@Transactional` | `@transactional()` | `from pyfly.data.relational.sqlalchemy import transactional`. Resolves `_session_factory` from `self`, patches injected `Repository` instances, commits on success, rolls back on exception. |
-| `@Transactional(propagation = REQUIRES_NEW)` | `@transactional(propagation=Propagation.REQUIRES_NEW)` | Full `Propagation` enum: `REQUIRED`, `REQUIRES_NEW`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `MANDATORY`. |
-| `@Transactional(isolation = READ_COMMITTED)` | `@transactional(isolation=Isolation.READ_COMMITTED)` | Full `Isolation` enum mirrors JDBC levels. |
-| `@Transactional(readOnly = true)` | `@transactional(read_only=True)` | Routes to read replica via `RoutingSessionFactory` and marks session `read_only`. |
-| `repo.save(entity)` | `await repo.save(entity)` | Calls `session.add` + `flush` + `refresh` — flushes but does **not** commit; the surrounding `@transactional` commits. |
-| `session.merge(entity)` (upsert) | `await repo.upsert(entity)` *(extend)* or `session.merge(entity)` + flush | No built-in `upsert` — add it as a method on your repository (as Lumen's `WalletRepository` does). `session.merge` handles both INSERT and UPDATE keyed on the PK. |
-| `AbstractRoutingDataSource` | `RoutingSessionFactory` | `factory.primary()` / `factory.replica()` to force a side. |
+| `@Transactional` | `@transactional()` | `from pyfly.data.relational.sqlalchemy import transactional`. Binds a unit of work to the running task (on `datasource=`, the datasource of `self._session_factory`, or the default one); every repository call joins it. Any `Exception` rolls back; `rollback_for`/`no_rollback_for` add rules; a caught participant failure makes the commit raise `UnexpectedRollbackError`. |
+| `@Transactional(propagation = REQUIRES_NEW)` | `@transactional(propagation=Propagation.REQUIRES_NEW)` | Full `Propagation` enum: `REQUIRED`, `REQUIRES_NEW`, `NESTED` (a savepoint), `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `MANDATORY`. |
+| `@Transactional(isolation = READ_COMMITTED)` | `@transactional(isolation=Isolation.READ_COMMITTED)` | Full `Isolation` enum mirrors JDBC levels; an unsupported level for the dialect raises at `begin`. `timeout=` rolls back with `TransactionTimedOutError`. |
+| `@Transactional(readOnly = true)` | `@transactional(read_only=True)` | A new read-only unit runs on the read replica when one is configured, and refuses every write. |
+| `TransactionTemplate` | `TransactionTemplate` | `from pyfly.data.transaction import TransactionTemplate`; `async with template.transaction(): ...` or `await template.execute(fn)`. |
+| `repo.save(entity)` | `await repo.save(entity)` | Spring's `save`: persists a new entity, merges any other, and returns the managed instance. Inside `@transactional` it flushes and the unit commits; outside one it commits in its own unit. |
+| `session.merge(entity)` (upsert) | `await repo.upsert(entity)` *(extend)* or `session.merge(entity)` + flush | No built-in `upsert`; `save()` already merges an entity whose key is set. Lumen's `WalletRepository` adds one to spell the intent out; `session.merge` handles both INSERT and UPDATE keyed on the PK. |
+| `AbstractRoutingDataSource` | `@transactional(read_only=True)` or `RoutingSessionFactory` | A read-only unit routes to the replica; `factory.primary()` / `factory.replica()` force a side. |
+| `@Lock(PESSIMISTIC_WRITE)` | `find_by_id(id, lock=LockMode.PESSIMISTIC_WRITE)` | `SELECT … FOR UPDATE` inside a read-write `@transactional`; SQLite takes its write lock at `BEGIN IMMEDIATE`. |
 | Multiple `DataSource` beans | `NamedDataSources` | Config: `pyfly.data.relational.datasources.<name>`; inject `NamedDataSources`, call `.get("<name>")`. |
 
 ### Projections & Mapper
@@ -220,12 +222,14 @@ Imports: `from pyfly.data.relational.sqlalchemy import (Repository, BaseEntity, 
 
 | Spring Boot | PyFly | Notes |
 |---|---|---|
-| `@KafkaListener(topics=…, groupId=…)` | `@message_listener(topic=…, group_id=…)` | Handler is `async def`. |
+| `@KafkaListener(topics=…, groupId=…)` | `@message_listener(topic=…, group=…)` | Handler is `async def`. Each delivery runs in a unit of work and is acknowledged after it commits. |
 | `KafkaTemplate.send(topic, event)` | `await publisher.publish(dest, event_type, payload)` | `EventPublisher` port (`from pyfly.eda import EventPublisher`); swap adapters via config. |
 | `@RetryableTopic` / DLT | `@message_listener(retries=3, retry_delay=1.0, dead_letter_topic="…")` | Linear-backoff retry; exhausted messages routed to DLQ with `x-original-topic` / `x-exception` headers. |
 | `ApplicationEvent` | `EventEnvelope` | Domain event container. |
 | `@EventListener` | `@event_listener(event_types=["TypeName"])` | In-process EDA handler; `event_type` is the class name string. No `@domain_event_listener`. |
 | `ApplicationEventPublisher` | `ApplicationEventPublisher` (injectable) | `await publisher.publish(event)` for Spring-style app events. |
+| `@TransactionalEventListener(phase = AFTER_COMMIT)` | `@app_event_listener(phase=TransactionPhase.AFTER_COMMIT)` | Runs once the unit the event was published in commits. |
+| Transactional outbox (Spring Modulith) | `pyfly.eda.outbox.enabled: true` | Each publish is appended in the caller's unit and forwarded after the commit, on any broker. |
 
 !!! tip "Messaging vs EDA"
     PyFly separates **broker messaging** (`pyfly.messaging` — Kafka/RabbitMQ transport) from **domain events** (`pyfly.eda` — `EventEnvelope` + `EventBus`). Start with `InMemoryEventBus` inside a monolith; switch to a Kafka adapter later by changing one configuration key, not your handlers.
@@ -342,12 +346,13 @@ Data: `from pyfly.data.relational.sqlalchemy import Base` (requires `pyfly[data-
 |---|---|---|
 | `@SpringBootTest` | `service_slice(*beans)` / `slice_context(...)` | Minimal started context; `overrides` accept a class or pre-built instance. |
 | `@WebMvcTest` | `web_slice(*controllers, overrides=…)` → `(context, client)` | Starts minimal context + `PyFlyTestClient`. |
-| `@DataJpaTest` | `data_slice(*beans)` → `context` | Data-layer slice. |
+| `@DataJpaTest` | `@DataTest(beans=[...])` or `data_slice(*beans, rollback=True)` → `context` | Data-layer slice; every unit of work of the test rolls back. |
 | `@Testcontainers` + `@Container` | `with postgres_container() as pg:` | Python context manager handles lifecycle. |
 | `@ServiceConnection` | `pyfly_config(pg)` / `pyfly_config_for(pg)` | Maps container connection details into PyFly config keys. |
 | `@DynamicPropertySource` | `pyfly_config(*containers, base=…)` | One-call `Config` for several containers. |
 | `PostgreSQLContainer` | `postgres_container()` | URL auto-rewritten to `asyncpg`. |
-| `MySQLContainer` | `mysql_container()` | URL rewritten to `aiomysql`. |
+| `MySQLContainer` | `mysql_container()` / `mariadb_container()` | URL rewritten to `mysql+asyncmy://` / `mariadb+asyncmy://` (`pyfly[mysql]`). |
+| `MongoDBContainer` (replica set) | `mongodb_replica_set_container()` | Single-node `rs0` replica set that runs transactions. |
 | `GenericContainer` (Redis) | `redis_container()` | Cache + session URLs wired. |
 | `KafkaContainer` | `kafka_container()` | |
 | `@requires_docker` | `@requires_docker` | Skips test cleanly when Docker daemon is absent. |

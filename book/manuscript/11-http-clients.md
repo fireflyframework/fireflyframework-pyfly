@@ -309,6 +309,7 @@ Here is the handler.
 ::: listing lumen/core/services/wallets/settle_transfer_handler.py | Listing 11.2 — CommandHandler injecting PaymentsClient
 from __future__ import annotations
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.settle_transfer_command import (
     SettleTransfer,
 )
@@ -335,14 +336,15 @@ class SettleTransferHandler(CommandHandler[SettleTransfer, dict]):
         self._payments = payments
 
     async def do_handle(self, command: SettleTransfer) -> dict:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.withdraw(
             Money(amount=command.amount, currency=wallet.currency)
         )
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
 
         payment = await self._payments.create_payment({
             "wallet_id": command.wallet_id,
@@ -362,8 +364,11 @@ fully operational. The handler calls `await self._payments.create_payment(...)`
 exactly as if it were a local async method. Connection pooling, header
 propagation, and error mapping are all invisible to the handler.
 
-`wallet.withdraw(Money(...))` runs before the network call, so the wallet
-state is committed before Payments is contacted. If Payments is
+`wallet.withdraw(Money(...))` runs before the network call, and the
+handler has no `@transactional`, so the `upsert` commits in a unit of work
+of its own before Payments is contacted. (The load and the save are then
+two units: Chapter 5 shows the lock, and Chapter 12 the guarded update,
+that keep two settlements of one wallet from spending the same funds.) If Payments is
 temporarily unavailable, the retry and circuit breaker — described in the
 next section — handle recovery transparently, without any code in the
 handler.
@@ -835,6 +840,7 @@ that Payments uses to detect and deduplicate repeated requests.
 ::: listing lumen/core/services/wallets/settle_transfer_idempotent.py | Listing 11.8 — Idempotency-Key forwarded via headers parameter
 from __future__ import annotations
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.settle_transfer_command import (
     SettleTransfer,
 )
@@ -863,14 +869,15 @@ class SettleTransferIdempotentHandler(
         self._payments = payments
 
     async def do_handle(self, command: SettleTransfer) -> dict:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.withdraw(
             Money(amount=command.amount, currency=wallet.currency)
         )
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
 
         idempotency_key = str(command.transfer_id)
         return await self._payments.create_payment(

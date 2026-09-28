@@ -327,6 +327,7 @@ Aquí está el manejador.
 ::: listing lumen/core/services/wallets/settle_transfer_handler.py | Listado 11.2 — CommandHandler que inyecta PaymentsClient
 from __future__ import annotations
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.settle_transfer_command import (
     SettleTransfer,
 )
@@ -353,14 +354,15 @@ class SettleTransferHandler(CommandHandler[SettleTransfer, dict]):
         self._payments = payments
 
     async def do_handle(self, command: SettleTransfer) -> dict:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.withdraw(
             Money(amount=command.amount, currency=wallet.currency)
         )
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
 
         payment = await self._payments.create_payment({
             "wallet_id": command.wallet_id,
@@ -382,9 +384,12 @@ método asíncrono local. La agrupación de conexiones (connection pooling),
 la propagación de cabeceras y el mapeo de errores son todos invisibles
 para el manejador.
 
-`wallet.withdraw(Money(...))` se ejecuta antes de la llamada de red, así
-que el estado del monedero queda confirmado antes de que se contacte a
-Payments. Si Payments está temporalmente no disponible, los reintentos y el
+`wallet.withdraw(Money(...))` se ejecuta antes de la llamada de red, y el
+manejador no lleva `@transactional`, así que el `upsert` confirma en una
+unidad de trabajo propia antes de que se contacte a Payments. (La carga y
+el guardado son entonces dos unidades: el Capítulo 5 muestra el bloqueo, y
+el Capítulo 12 la actualización con guarda, que impiden que dos
+liquidaciones del mismo monedero gasten los mismos fondos.) Si Payments está temporalmente no disponible, los reintentos y el
 cortacircuitos —descritos en la siguiente sección— gestionan la
 recuperación de forma transparente, sin ningún código en el manejador.
 
@@ -868,6 +873,7 @@ deduplicar peticiones repetidas.
 ::: listing lumen/core/services/wallets/settle_transfer_idempotent.py | Listado 11.8 — Idempotency-Key reenviada a través del parámetro headers
 from __future__ import annotations
 
+from lumen.core.mappers.wallet_mapper import to_aggregate, to_entity
 from lumen.core.services.wallets.settle_transfer_command import (
     SettleTransfer,
 )
@@ -896,14 +902,15 @@ class SettleTransferIdempotentHandler(
         self._payments = payments
 
     async def do_handle(self, command: SettleTransfer) -> dict:
-        wallet = await self._repository.find(command.wallet_id)
-        if wallet is None:
+        entity = await self._repository.find_by_id(command.wallet_id)
+        if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
+        wallet = to_aggregate(entity)
         wallet.withdraw(
             Money(amount=command.amount, currency=wallet.currency)
         )
-        await self._repository.add(wallet)
+        await self._repository.upsert(to_entity(wallet))
 
         idempotency_key = str(command.transfer_id)
         return await self._payments.create_payment(

@@ -147,10 +147,10 @@ Un manejador de comandos hereda de `CommandHandler[C, R]` e implementa exactamen
 
 **Ambos decoradores en cada manejador son obligatorios.** `@command_handler` registra la clase en el `HandlerRegistry` introspeccionando el primer argumento de tipo genérico; no se necesita registro manual. `@service` conecta el manejador al contenedor de inyección de dependencias de PyFly para que los argumentos del constructor se resuelvan e inyecten automáticamente en el arranque. El orden importa: `@command_handler` arriba, `@service` justo debajo. Sin `@service`, el contenedor de inyección de dependencias nunca instancia la clase y el bus no puede encontrar el manejador; sin `@command_handler`, el registro nunca mapea el tipo de comando a la clase. Omitir cualquiera de los dos decoradores es un fallo silencioso: el bus lanza «no handler found» en el momento del despacho.
 
-**`@transactional()` convierte `do_handle` en una unidad de trabajo confirmada.** Los manejadores de comandos inyectan `session_factory: async_sessionmaker[AsyncSession]` y la almacenan como `self._session_factory`. Cuando `@transactional()` ejecuta `do_handle`, abre una sesión nueva desde esa factoría, la intercambia en el repositorio durante la llamada, confirma en caso de éxito y revierte ante cualquier excepción. Sin `@transactional()`, la sesión compartida del framework solo hace flush: la escritura sobrevive dentro de la petición pero nunca se confirma en la base de datos.
+**`@transactional()` convierte `do_handle` en una unidad de trabajo confirmada.** Los manejadores de comandos inyectan `session_factory: async_sessionmaker[AsyncSession]` y la almacenan como `self._session_factory`. Cuando `@transactional()` ejecuta `do_handle`, liga una unidad de trabajo a la tarea en curso en el origen de datos de esa factoría; cada llamada al repositorio del método se une a ella, y confirma en caso de éxito y revierte ante cualquier excepción. Sin `@transactional()` cada llamada al repositorio confirmaría por su cuenta, así que un manejador que carga, comprueba, guarda y publica ya no tendría éxito o fallaría como un solo paso.
 
 !!! note "Flush frente a commit, en términos sencillos"
-    Un **flush** empuja tus cambios pendientes a la conexión de la base de datos para que las consultas posteriores en la *misma* sesión puedan verlos, pero siguen estando dentro de una transacción abierta que se puede revertir. Un **commit** los hace permanentes. Sin `@transactional()`, tu depósito haría flush (visible a mitad de la petición) pero nunca commit (desaparecería después de la petición). El decorador es lo que hace que el cambio persista.
+    Un **flush** empuja tus cambios pendientes a la conexión de la base de datos para que las consultas posteriores en la *misma* sesión puedan verlos, pero siguen estando dentro de una transacción abierta que se puede revertir. Un **commit** los hace permanentes. Dentro de `@transactional()` el repositorio solo hace flush, y la unidad hace commit una sola vez, al final del manejador. Fuera de él, cada llamada al repositorio es una unidad breve que hace commit por sí misma. El decorador es lo que hace que todo el manejador persista, o falle, de una vez.
 
 **Paso 3 — Escribe `OpenWalletHandler`.** Ahora construye el trabajador para el primer comando. Crea `open_wallet_handler.py`, apila `@command_handler` sobre `@service`, inyecta el repositorio, el publicador de eventos y la factoría de sesiones, e implementa el único método `do_handle`.
 
@@ -202,7 +202,7 @@ class OpenWalletHandler(CommandHandler[OpenWallet, str]):
         return wallet_id
 :::
 
-Recorre `do_handle` paso a paso. `f"wlt-{uuid4()}"` genera un identificador estable con prefijo. `Wallet.open(...)` llama a la factoría, que impone la precondición de propietario no vacío y bufferiza un evento `WalletOpened`. `to_entity(wallet)` mapea el agregado a una fila plana `WalletEntity`. `repository.upsert(...)` llama a `session.merge` —una sola llamada que inserta si no existe ninguna fila o actualiza si existe— y luego hace flush. Usar `upsert` en lugar de `save` evita un `IntegrityError` en la clave primaria: el agregado es dueño de su id, así que tanto INSERT como UPDATE usan la misma cadena estable como clave. `wallet.clear_events()` drena el búfer y `publish_domain_events` reenvía cada evento al bus de EDA. El decorador `@transactional()` confirma la sesión al salir. El manejador devuelve el ID del monedero, que fluye de vuelta al controlador como el valor de retorno de `send`.
+Recorre `do_handle` paso a paso. `f"wlt-{uuid4()}"` genera un identificador estable con prefijo. `Wallet.open(...)` llama a la factoría, que impone la precondición de propietario no vacío y bufferiza un evento `WalletOpened`. `to_entity(wallet)` mapea el agregado a una fila plana `WalletEntity`. `repository.upsert(...)` llama a `session.merge` —una sola llamada que inserta si no existe ninguna fila o actualiza si existe— y luego hace flush. El agregado es dueño de su id, así que tanto INSERT como UPDATE usan la misma cadena estable como clave. (Hasta la v26.09.07 `save` siempre insertaba y un segundo guardado del mismo id lanzaba `IntegrityError`; desde la v26.09.08 `save` también fusiona una entidad cuya clave está fijada, y `upsert` se queda como la forma explícita.) `wallet.clear_events()` drena el búfer y `publish_domain_events` reenvía cada evento al bus de EDA. El decorador `@transactional()` confirma la unidad de trabajo al salir. El manejador devuelve el ID del monedero, que fluye de vuelta al controlador como el valor de retorno de `send`.
 
 Observa el requisito del constructor: `super().__init__()` es obligatorio en `CommandHandler`. Si lo omites, la contabilidad interna de la clase base —contexto de correlación, ganchos de ciclo de vida— nunca se inicializa. El repositorio, `EventPublisher` y `session_factory` los inyecta el contenedor de inyección de dependencias a partir de las anotaciones de tipo; no se necesita ninguna configuración de factoría.
 
@@ -221,7 +221,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.eda import EventPublisher
 
 
@@ -243,7 +243,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 
     @transactional()
     async def do_handle(self, command: DepositFunds) -> int:  # type: ignore[override]
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -268,7 +270,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.eda import EventPublisher
 
 
@@ -290,7 +292,9 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
 
     @transactional()
     async def do_handle(self, command: WithdrawFunds) -> int:  # type: ignore[override]
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -302,7 +306,7 @@ class WithdrawFundsHandler(CommandHandler[WithdrawFunds, int]):
         return wallet.balance.amount
 :::
 
-`DepositFundsHandler` y `WithdrawFundsHandler` siguen el patrón clásico: **find → to_aggregate → act → to_entity → upsert → drain**. `repository.find_by_id` devuelve la fila plana `WalletEntity`; `to_aggregate(entity)` rehidrata el objeto de dominio rico para que las invariantes del agregado estén en alcance. `Money` se construye a partir del `amount` del comando y de la moneda del *monedero* —nunca una moneda del propio comando— porque el monedero es dueño de esa invariante. Si `wallet.withdraw` rechaza (el saldo quedaría negativo), lanza `BusinessRuleViolation`, que se propaga como HTTP 422 sin una sola línea de código de manejo de errores en el manejador.
+`DepositFundsHandler` y `WithdrawFundsHandler` siguen el patrón clásico: **find → to_aggregate → act → to_entity → upsert → drain**. `repository.find_by_id` devuelve la fila plana `WalletEntity`, leída con un bloqueo pesimista (`LockMode.PESSIMISTIC_WRITE`) para que un cambio concurrente del mismo monedero espere a que termine esta unidad (Capítulo 5); `to_aggregate(entity)` rehidrata el objeto de dominio rico para que las invariantes del agregado estén en alcance. `Money` se construye a partir del `amount` del comando y de la moneda del *monedero* —nunca una moneda del propio comando— porque el monedero es dueño de esa invariante. Si `wallet.withdraw` rechaza (el saldo quedaría negativo), lanza `BusinessRuleViolation`, que se propaga como HTTP 422 sin una sola línea de código de manejo de errores en el manejador.
 
 Fíjate en lo que está ausente: ningún bloque try/except, ninguna llamada de registro, ninguna configuración de trazas. Todo eso pertenece a la tubería del bus. El manejador es una expresión pura de la intención de negocio.
 
@@ -360,7 +364,7 @@ balance: int = await command_bus.send(
 ::: figure art/figures/07-cqrs.svg | Figura 7.1 — Los comandos fluyen al modelo de escritura; las consultas, al modelo de lectura.
 
 !!! spring "Equivalencia con Spring"
-    `CommandBus.send(command)` es el equivalente en Python de `CommandGateway.send(command)` o `CommandGateway.sendAndWait(command)` del framework Axon. Cada clase de manejador de comandos corresponde a un método anotado con `@CommandHandler` en Axon, o a un `@MessageHandler` en el modelo ApplicationEventPublisher de Spring Modulith. El decorador `@command_handler` es la contrapartida de PyFly de `@CommandHandler`: registra el manejador en el registro introspeccionando el parámetro de tipo genérico, exactamente igual que Axon resuelve los métodos manejadores por el tipo del parámetro. La apilación de `@service` refleja el hecho de que en Spring cada bean `@CommandHandler` es también un `@Component` de Spring: el registro y la inyección son inseparables. El decorador `@transactional()` se corresponde directamente con `@Transactional` de Spring: ambos abren una sesión de unidad de trabajo, confirman en caso de éxito y revierten ante cualquier excepción, de modo que `upsert` (respaldado por `session.merge`) es el análogo en Python de `repository.save()` dentro de un método `@Transactional`.
+    `CommandBus.send(command)` es el equivalente en Python de `CommandGateway.send(command)` o `CommandGateway.sendAndWait(command)` del framework Axon. Cada clase de manejador de comandos corresponde a un método anotado con `@CommandHandler` en Axon, o a un `@MessageHandler` en el modelo ApplicationEventPublisher de Spring Modulith. El decorador `@command_handler` es la contrapartida de PyFly de `@CommandHandler`: registra el manejador en el registro introspeccionando el parámetro de tipo genérico, exactamente igual que Axon resuelve los métodos manejadores por el tipo del parámetro. La apilación de `@service` refleja el hecho de que en Spring cada bean `@CommandHandler` es también un `@Component` de Spring: el registro y la inyección son inseparables. El decorador `@transactional()` se corresponde directamente con `@Transactional` de Spring: ambos abren una unidad de trabajo, confirman en caso de éxito y revierten ante cualquier excepción, con las mismas reglas de propagación y de reversión. `save()` sigue el `save` de Spring Data (persiste una entidad nueva, fusiona una existente); el `upsert` de Lumen deja explícita la fusión con `session.merge`.
 
 ---
 
@@ -912,9 +916,9 @@ Las tres cabeceras —`X-Correlation-ID`, `X-Trace-ID` y `X-Span-ID`— siguen l
 
 La Parte II está completa. Lumen tiene ahora una rebanada vertical completa desde HTTP hasta el dominio y de vuelta —una construida sobre decisiones arquitectónicas que escalarán sin reescribir—.
 
-En el Capítulo 5 le diste persistencia al sistema: un `WalletRepository` que subclasifica `Repository[WalletEntity, str]` —el repositorio genérico estilo Spring Data del framework, que proporciona `find_by_id`, `find_all(pageable)`, `find_all_by_spec_paged` y más de fábrica, con la `AsyncSession` inyectada por la autoconfiguración relacional—. En el Capítulo 6 promoviste el monedero a un agregado DDD propiamente dicho: `Money` como objeto de valor inmutable, `Wallet(AggregateRoot[str])` como frontera de consistencia que impone las invariantes de descubierto, coincidencia de moneda e importe positivo, con los eventos de dominio `WalletOpened`, `FundsDeposited` y `FundsWithdrawn` bufferizados en el agregado y drenados al bus de eventos tras un guardado exitoso.
+En el Capítulo 5 le diste persistencia al sistema: un `WalletRepository` que subclasifica `Repository[WalletEntity, str]` —el repositorio genérico estilo Spring Data del framework, que proporciona `find_by_id`, `find_all(pageable)`, `find_all_by_spec_paged` y más de fábrica, en el que cada llamada se ejecuta en la unidad de trabajo de quien llama o en una breve propia—. En el Capítulo 6 promoviste el monedero a un agregado DDD propiamente dicho: `Money` como objeto de valor inmutable, `Wallet(AggregateRoot[str])` como frontera de consistencia que impone las invariantes de descubierto, coincidencia de moneda e importe positivo, con los eventos de dominio `WalletOpened`, `FundsDeposited` y `FundsWithdrawn` bufferizados en el agregado y drenados al bus de eventos tras un guardado exitoso.
 
-En este capítulo separaste el modelo de escritura del modelo de lectura. `OpenWallet`, `DepositFunds` y `WithdrawFunds` son mensajes de comando congelados y validados que fluyen a través de `DefaultCommandBus` —una tubería que ejecuta validación, autorización, ejecución del manejador, publicación de eventos de dominio y trazas distribuidas automáticamente para cada comando—. Cada manejador de comandos lleva `@transactional()` en `do_handle`: el decorador abre una unidad de trabajo confirmada desde `self._session_factory`, intercambia la sesión en el repositorio, confirma en caso de éxito y revierte en caso de fallo. La persistencia pasa por `repository.upsert` —respaldado por `session.merge`—, de modo que INSERT y UPDATE comparten una única ruta de código con clave en el propio id del agregado.
+En este capítulo separaste el modelo de escritura del modelo de lectura. `OpenWallet`, `DepositFunds` y `WithdrawFunds` son mensajes de comando congelados y validados que fluyen a través de `DefaultCommandBus` —una tubería que ejecuta validación, autorización, ejecución del manejador, publicación de eventos de dominio y trazas distribuidas automáticamente para cada comando—. Cada manejador de comandos lleva `@transactional()` en `do_handle`: el decorador liga una unidad de trabajo en el origen de datos de `self._session_factory`, cada llamada al repositorio se une a ella, y confirma en caso de éxito y revierte en caso de fallo. Los manejadores de ingreso y retirada leen el monedero con un bloqueo pesimista, así que los cambios concurrentes de un mismo monedero hacen cola en lugar de pisarse. La persistencia pasa por `repository.upsert` —respaldado por `session.merge`—, de modo que INSERT y UPDATE comparten una única ruta de código con clave en el propio id del agregado.
 
 `GetWallet` y `GetBalance` son mensajes de consulta que fluyen a través de `DefaultQueryBus` —la misma tubería sin el paso de publicación de eventos, y sin `@transactional()` porque las lecturas no confirman—. `GetBalanceHandler` proyecta a través de una interfaz `BalanceView` marcada con `@projection` y `Mapper.project`, copiando solo los campos declarados y aplicando una transformación de unidades mayores registrada. `ListWallets` y `ListRichWallets` completan el lado de consultas: `find_all(pageable)` devuelve un `Page[WalletEntity]` contado, ordenado y limitado por offset; `find_all_by_spec_paged` ejecuta un predicado `Specification` componible sobre la misma maquinaria de paginación. Ambos usan `Page.map(entity_to_dto)` para proyectar los elementos sin tocar los metadatos.
 
@@ -944,7 +948,7 @@ Vale la pena detenerse en esos últimos cuatro casos: cada uno ejercita la *tube
 
 1. **Traza el ciclo de vida completo en la batería de pruebas.** Abre `samples/lumen/tests/test_cqrs_flow.py` y ejecútalo contra una base de datos real usando Testcontainers (Capítulo 11). La prueba `test_full_wallet_lifecycle` abre un monedero, deposita 1 500 unidades menores, retira 500 y luego consulta tanto `GetWallet` como `GetBalance`. Recórrela con un depurador: confirma que `wallet.clear_events()` drena los eventos `FundsDeposited` y `FundsWithdrawn` después de cada llamada a `upsert`, y que `GetWallet` devuelve un `WalletDto` con `balance_minor == 1000` y `balance == 10.0`.
 
-2. **Observa `upsert` frente a `save`.** En una prueba, llama a `DepositFunds` dos veces sobre el mismo monedero sin `@transactional()` y observa el `IntegrityError`. Luego restaura `@transactional()` y verifica que ambos depósitos se confirman. Abre `WalletRepository.upsert` y traza cómo `session.merge` resuelve el conflicto de clave primaria que un `INSERT` simple lanzaría.
+2. **Observa `upsert` frente a `save`.** En una prueba, sustituye `upsert` por `save` en `DepositFundsHandler` e ingresa dos veces en el mismo monedero: desde la v26.09.08 `save()` fusiona una entidad cuya clave ya está fijada, así que ambos depósitos se confirman (hasta la v26.09.07 el segundo lanzaba `IntegrityError`). Restaura `upsert`, abre `WalletRepository.upsert` y traza cómo `session.merge` resuelve de la misma forma la clave primaria existente.
 
 3. **Añade una consulta `ListByOwner`.** Define `ListByOwner(Query[list[WalletDto]])` con un campo `owner_id: str`. Implementa `ListByOwnerHandler` —decorado con `@query_handler` + `@service`— que llame a `WalletRepository.find_by_owner_id(query.owner_id)` (el stub de consulta derivada ya existe) y mapee la lista de resultados con `entity_to_dto`. Añade un endpoint `GET /api/v1/wallets/by-owner/{owner_id}` a `WalletController`. Asegúrate de que el nombre del nuevo método de endpoint ordene antes que `wallet_detail` para que Starlette haga coincidir primero el segmento literal `/by-owner/…`.
 

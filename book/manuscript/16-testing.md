@@ -56,12 +56,13 @@ uv run --extra dev pytest -q
 You should see a row of dots — one per test — followed by a summary line:
 
 ```text
-.........................................                                [100%]
-41 passed in 0.28s
+..s.s........................................                            [100%]
+43 passed, 2 skipped in 0.28s
 ```
 
-Forty-one passing tests, under a third of a second, no Docker and no external
-process. That speed is the whole point of the pyramid: the fast base catches most
+Forty-three passing tests, under a third of a second, no Docker and no external
+process. (The two skipped ones are the PostgreSQL runs of the concurrency test from
+Chapter 5; they need `LUMEN_TEST_POSTGRES_URL`.) That speed is the whole point of the pyramid: the fast base catches most
 regressions before the slower integration layers ever run. If you instead see
 `No module named pytest`, you forgot `--extra dev` — re-run with it.
 
@@ -520,7 +521,7 @@ async def query_bus(
 
 Each fixture is declared with `@pytest_asyncio.fixture` (not the bare `@pytest.fixture`) so pytest-asyncio manages the async iterator lifecycle. `asyncio_mode = "auto"` in `pyproject.toml` makes async fixtures and tests work without per-function decorators — but the fixture decorator itself must still be `pytest_asyncio.fixture`.
 
-The `session_factory` fixture is shared. `repository` and `command_bus` both receive it, so the same in-memory SQLite engine backs reads, writes, and the `@transactional` boundary the handlers open. The `audit_listener` and `command_bus` fixtures both receive `event_bus`; pytest instantiates that once per test and shares it between them, so events published by the command handlers are visible to the listener.
+The `session_factory` fixture is shared. `repository` and `command_bus` both receive it, so the same in-memory SQLite engine backs reads, writes, and the `@transactional` boundary the handlers open. The repository is built with a session of its own — its *manual mode* — and uses that one session in and outside `@transactional`, which is what keeps a `:memory:` database (alive only on one connection) shared by the handlers and the queries. The booted application builds the repository without a session, so every call joins the unit of work of the handler that makes it; `test_app_context_integration.py` and `test_concurrent_balance_changes.py` exercise that path. The `audit_listener` and `command_bus` fixtures both receive `event_bus`; pytest instantiates that once per test and shares it between them, so events published by the command handlers are visible to the listener.
 
 *What just happened.* You wired a complete, production-shaped test stack — engine,
 repository, event bus, listener, and both CQRS buses — entirely from fixtures, with
@@ -692,9 +693,9 @@ Expected output:
 
 *What just happened.* This is the first layer that touches real infrastructure, and
 it still runs in milliseconds. The command went through the real bus, the real
-handler opened a real `@transactional` unit of work on a real SQLite session,
-committed it, and the query read it back — the exact path that runs in production,
-minus the HTTP layer. Because the handler is registered in the fixture rather than
+handler opened a real `@transactional` unit of work on a real SQLite database,
+committed it, and the query read it back — the path that runs in production,
+minus the HTTP layer and with the fixture's shared session. Because the handler is registered in the fixture rather than
 constructed in the test, you are testing the *dispatch* as well as the logic: if the
 command-to-handler routing broke, these tests would catch it.
 
@@ -1302,7 +1303,7 @@ The tests above cover Lumen's full pyramid with standard pytest primitives and P
 
 **`assert_event_published(events, event_type, payload_contains=...)`** scans a captured `EventEnvelope` list for the first envelope with the given type, optionally checks payload keys, and returns the envelope for further assertions. `assert_no_events_published(events)` fails if the list is non-empty.
 
-**Testcontainers integration** (`postgres_container()`, `redis_container()`, `pyfly_config(container, base={...})`) is PyFly's equivalent of Spring Boot's `@Testcontainers` + `@ServiceConnection`. Start a real Postgres container; `pyfly_config` rewrites the sync `psycopg2://` URL to `postgresql+asyncpg://` and merges it into a `Config` ready to boot an `ApplicationContext`. Install support with:
+**Testcontainers integration** (`postgres_container()`, `redis_container()`, `pyfly_config(container, base={...})`) is PyFly's equivalent of Spring Boot's `@Testcontainers` + `@ServiceConnection`. Start a real Postgres container; `pyfly_config` rewrites the sync `psycopg2://` URL to `postgresql+asyncpg://`, turns the relational layer on, and merges it into a `Config` ready to boot an `ApplicationContext`. On a database server `ddl-auto` defaults to `none`, so pass `create` in `base` when the test needs the tables of its models. Install support with:
 
 ```bash
 pip install 'pyfly[testcontainers]'
@@ -1316,12 +1317,44 @@ from pyfly.testing import postgres_container, pyfly_config, requires_docker
 @requires_docker
 async def test_wallet_round_trip_against_real_postgres():
     with postgres_container() as pg:
-        config = pyfly_config(pg, base={"pyfly.data.enabled": True})
+        config = pyfly_config(
+            pg, base={"pyfly.data.relational.ddl-auto": "create"}
+        )
         assert config.get("pyfly.data.relational.url").startswith(
             "postgresql+asyncpg://"
         )
         ...
 ```
+
+**`@DataTest`** is PyFly's `@DataJpaTest`. It runs every test of a class in a started data slice with the beans you list, hands the context to the test as the `data_context` fixture, and **rolls back every unit of work of the test** when it ends, so tests that share a database never see each other's rows:
+
+```python
+from lumen.models.entities.v1.wallet_orm import WalletEntity
+from lumen.models.repositories.wallet_repository import WalletRepository
+
+from pyfly.context.application_context import ApplicationContext
+from pyfly.testing import DataTest
+
+
+@DataTest(beans=[WalletRepository])
+class TestWalletRepositorySlice:
+    async def test_upsert_then_count(
+        self, data_context: ApplicationContext
+    ) -> None:
+        wallets = data_context.get_bean(WalletRepository)
+        await wallets.upsert(
+            WalletEntity(id="wlt-1", owner_id="alice", currency="EUR")
+        )
+        assert await wallets.count() == 1
+
+    async def test_starts_empty(
+        self, data_context: ApplicationContext
+    ) -> None:
+        # The row of the test above was rolled back.
+        assert await data_context.get_bean(WalletRepository).count() == 0
+```
+
+By default each test gets a SQLite file in its `tmp_path` with the relational layer on. Override the `pyfly_data_config` fixture in `conftest.py` to run every data test on PostgreSQL, MySQL (`mysql_container()`, on the asyncmy driver of `pyfly[mysql]`), or MariaDB (`mariadb_container()`), and the rollback keeps the tests apart on the shared server; `data_slice(..., rollback=True)` gives a single test the same rollback. Two things differ from production by construction: detached work (saga steps, `@async_method` calls) is refused while a unit of the test is open, and only relational datasources roll back. MongoDB transactions are tested on `mongodb_replica_set_container()` (Appendix B). Through v26.09.07 `@DataTest` only marked the class.
 
 Lumen does not use these helpers — SQLite covers the persistence layer without Docker, and the in-memory bus covers event routing. Reach for them when your project has infrastructure that cannot be reproduced without a real daemon.
 
@@ -1332,19 +1365,19 @@ time to confirm the full pyramid is green together:
 uv run --extra dev pytest -q
 ```
 
-Expected output — the same `41 passed` you started with, now with a mental model of
+Expected output — the same `43 passed` you started with, now with a mental model of
 exactly what each dot proves:
 
 ```text
-.........................................                                [100%]
-41 passed in 0.28s
+..s.s........................................                            [100%]
+43 passed, 2 skipped in 0.28s
 ```
 
 ---
 
 ## What you built {.recap}
 
-The six test files this chapter built add up to 26 passing tests, exercising every layer of the pyramid. Together with the saga tests from Chapter 12 and the event-sourcing tests from Chapter 9, Lumen's full suite is **41 passing tests** — the count you saw when you ran `uv run --extra dev pytest -q` at the start.
+The six test files this chapter built add up to 26 passing tests, exercising every layer of the pyramid. Together with the saga tests from Chapter 12, the event-sourcing tests from Chapter 9, and the concurrency test from Chapter 5, Lumen's full suite is **43 passing tests** (and two PostgreSQL cases that skip without a server) — the count you saw when you ran `uv run --extra dev pytest -q` at the start.
 
 At the base, `test_money.py` and `test_wallet_aggregate.py` prove the domain model's arithmetic, immutability, and invariant rules. All tests are synchronous, pure Python functions — no fixtures, no DI, no `async`. The `BusinessRuleViolation.rule` attribute makes each assertion specific to the exact violated invariant.
 
@@ -1390,6 +1423,8 @@ Concretely, you learned:
 - **Test profile (v26.6.110)** — for a block of test-only settings, add a
   `pyfly-test.yaml` overlay and activate it with `PYFLY_PROFILES_ACTIVE=test`
   (Spring `application-test.yaml` parity).
+- **`@DataTest`** — a data slice whose tests roll back every unit of work,
+  on SQLite by default or on a shared server through `pyfly_data_config`.
 - **Framework helpers** (`PyFlyTestCase`, `mock_bean`, `create_test_container`,
   Testcontainers) — available in `pyfly.testing` for projects that need them;
   Lumen keeps things simple with real components.

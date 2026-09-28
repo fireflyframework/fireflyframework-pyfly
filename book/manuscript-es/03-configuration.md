@@ -342,7 +342,7 @@ Decora una `@dataclass` con `@config_properties(prefix="...")`. El `prefix` iden
 **Paso 1 — Escribe la clase.** Aquí está la propia `RelationalProperties` del framework, que enlaza el bloque `pyfly.data.relational.*`:
 
 ::: listing pyfly/config/properties/data.py | Listado 3.5 — RelationalProperties: ajustes tipados para la capa de datos
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pyfly.core.config import config_properties
 
@@ -350,17 +350,19 @@ from pyfly.core.config import config_properties
 @config_properties(prefix="pyfly.data.relational")
 @dataclass
 class RelationalProperties:
-    """Typed binding for pyfly.data.relational.*"""
+    """Typed binding for pyfly.data.relational.* (abridged)."""
 
     enabled: bool = False
-    url: str = "sqlite+aiosqlite:///pyfly.db"
-    echo: bool = False
-    pool_size: int = 5
+    url: str | None = None
+    echo: EchoSetting = False  # True, False or "debug"
+    ddl_auto: str | None = None
+    pool: PoolProperties = field(default_factory=PoolProperties)
+    # ... sqlite, read_replica, datasources, migrations, schema
 :::
 
 El decorador establece `__pyfly_config_prefix__` en la clase y la marca como un bean inyectable. Los tipos de los campos deben ser `int`, `float`, `bool` o `str` para la coerción automática; los tipos más complejos se dejan tal cual.
 
-Fíjate en que cada campo lleva un valor por defecto que coincide con el `pyfly-defaults.yaml` integrado del framework. Esto es intencionado: la clase es autodocumentada y puede construirse y usarse en pruebas unitarias sin ningún fichero YAML en disco; basta con instanciar `RelationalProperties()` y obtienes los valores por defecto de desarrollo.
+Fíjate en que cada campo lleva un valor por defecto. Esto es intencionado: la clase es autodocumentada y puede construirse y usarse en pruebas unitarias sin ningún fichero YAML en disco; basta con instanciar `RelationalProperties()`. Dos valores por defecto están vacíos a propósito. `url` vale `None` porque una aplicación relacional sin `pyfly.data.relational.url` falla al arrancar (solo el perfil `dev` recurre a un fichero SQLite local, con un aviso), y `ddl_auto` sin fijar se resuelve como `create` para una base de datos embebida como SQLite y como `none` para un servidor de base de datos. Los ajustes anidados, como `pool.size` y `pool.recycle`, son dataclasses propias.
 
 **Paso 2 — Aplica el patrón a tus propios ajustes.** El mismo decorador funciona para la configuración a nivel de aplicación. Así sería una clase `WalletProperties` para las reglas de negocio de Lumen:
 
@@ -515,7 +517,7 @@ Cada clave de configuración con notación de puntos se corresponde con una vari
 | `pyfly.management.server.port` | `PYFLY_MANAGEMENT_SERVER_PORT` |
 | `pyfly.web.debug` | `PYFLY_WEB_DEBUG` |
 | `pyfly.data.relational.url` | `PYFLY_DATA_RELATIONAL_URL` |
-| `pyfly.data.relational.pool-size` | `PYFLY_DATA_RELATIONAL_POOL_SIZE` |
+| `pyfly.data.relational.pool.size` | `PYFLY_DATA_RELATIONAL_POOL_SIZE` |
 | `pyfly.logging.level.root` | `PYFLY_LOGGING_LEVEL_ROOT` |
 | `pyfly.eda.provider` | `PYFLY_EDA_PROVIDER` |
 | `pyfly.profiles.active` | `PYFLY_PROFILES_ACTIVE` |
@@ -573,7 +575,7 @@ PYFLY_DATA_RELATIONAL_ECHO=true uv run pyfly run
 Esta es una escotilla de escape práctica durante despliegues incrementales: el equipo que despliega puede inyectar un nuevo valor antes de que el fichero YAML se actualice y se revise, y la aplicación lo toma sin un cambio de código.
 
 !!! warning "Nombres de campo con varias palabras e inyección solo de entorno"
-    La inyección solo de entorno trata cada guion bajo en un nombre `PYFLY_*` como un separador de ruta, de modo que `PYFLY_DATA_RELATIONAL_POOL_SIZE` se lee como la ruta anidada `pool` → `size`, no como el campo plano `pool_size`. Para un campo de una sola palabra como `echo` esto es inequívoco y `bind()` lo inyecta limpiamente. Para un campo de varias palabras como `pool_size`, dale a la clave un hogar real en tu YAML (aunque sea solo `pool-size: 5`) para que la variable de entorno anule una hoja existente en lugar de depender de la inyección solo de entorno. La lectura en tiempo de lectura `config.get("pyfly.data.relational.pool-size")` siempre devuelve el valor de entorno de todos modos, porque `get()` mapea la clave completa con puntos en un solo paso.
+    La inyección solo de entorno trata cada guion bajo en un nombre `PYFLY_*` como un separador de ruta, de modo que `PYFLY_DATA_RELATIONAL_POOL_MAX_OVERFLOW` se lee como la ruta anidada `pool` → `max` → `overflow`, no como el campo `pool.max_overflow`. Para segmentos de una sola palabra como `echo`, o `pool.size` (exactamente `pool` → `size`), esto es inequívoco y `bind()` los inyecta limpiamente. Para un campo de varias palabras como `max_overflow`, dale a la clave un hogar real en tu YAML (aunque sea solo `max-overflow: 10` bajo `pool:`) para que la variable de entorno anule una hoja existente en lugar de depender de la inyección solo de entorno. La lectura en tiempo de lectura `config.get("pyfly.data.relational.pool.max-overflow")` siempre devuelve el valor de entorno de todos modos, porque `get()` mapea la clave completa con puntos en un solo paso.
 
 ---
 

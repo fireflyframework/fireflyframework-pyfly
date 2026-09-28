@@ -224,13 +224,13 @@ async def publish_domain_events(
 
 In Chapter 7 the command handlers loaded aggregates, drove domain behaviour, and saved — leaving buffered events on the floor. Now you close that gap. Inject an `EventPublisher` alongside the `WalletRepository` and an `async_sessionmaker`, decorate `do_handle` with `@transactional()`, and after `repo.upsert(...)` drain the aggregate's buffer and publish each event through the bridge.
 
-The `@transactional()` decorator (from `pyfly.data.relational.sqlalchemy`) opens a dedicated `AsyncSession` from the injected `async_sessionmaker`, binds it to the repository for the call, commits on success, and rolls back on failure. That means the load → mutate → save sequence is one committed unit of work, and no event is published unless the row actually lands in the database.
+The `@transactional()` decorator (from `pyfly.data.relational.sqlalchemy`) binds a unit of work to the running task on the datasource of the injected `async_sessionmaker`; every repository call in the method joins it, and it commits on success and rolls back on failure. That means the load → mutate → save sequence is one committed unit of work, and a save that fails stops the handler before any event is published.
 
 Here is the change, broken into the four edits you will make to `DepositFundsHandler`.
 
 **Step 1 — Add the publisher to the constructor.** Alongside the existing `repository` parameter, accept `events: EventPublisher` and store it as `self._events`. Type it as the *protocol* `EventPublisher`, never as `InMemoryEventBus` — that is what keeps the handler ignorant of which bus is running.
 
-**Step 2 — Accept the session factory.** Add `session_factory: async_sessionmaker[AsyncSession]` and store it as `self._session_factory`. The `@transactional()` decorator looks for exactly this attribute name to open its unit of work, so the name matters.
+**Step 2 — Accept the session factory.** Add `session_factory: async_sessionmaker[AsyncSession]` and store it as `self._session_factory`. The `@transactional()` decorator reads this attribute to pick the datasource its unit of work runs on (without it, the unit runs on the application's default datasource), so the name matters.
 
 **Step 3 — Decorate `do_handle` with `@transactional()`.** This wraps the whole load-mutate-save sequence in one committed transaction.
 
@@ -251,7 +251,7 @@ from lumen.models.repositories.wallet_repository import WalletRepository
 from pyfly.container import service
 from pyfly.cqrs import CommandHandler, command_handler
 from pyfly.domain import AggregateNotFound
-from pyfly.data.relational.sqlalchemy import transactional
+from pyfly.data.relational.sqlalchemy import LockMode, transactional
 from pyfly.eda import EventPublisher
 
 
@@ -273,7 +273,9 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
 
     @transactional()
     async def do_handle(self, command: DepositFunds) -> int:
-        entity = await self._repository.find_by_id(command.wallet_id)
+        entity = await self._repository.find_by_id(
+            command.wallet_id, lock=LockMode.PESSIMISTIC_WRITE
+        )
         if entity is None:
             raise AggregateNotFound("Wallet", command.wallet_id)
 
@@ -285,7 +287,7 @@ class DepositFundsHandler(CommandHandler[DepositFunds, int]):
         return wallet.balance.amount
 :::
 
-Three design decisions are worth noting. First, `events: EventPublisher` is typed as the protocol, not as `InMemoryEventBus` — the DI container injects whichever implementation is registered, so the handler never knows or cares which bus is active. Second, the publish call sits *after* `self._repository.upsert(...)` inside the `@transactional()` unit of work: if the save fails the decorator rolls back before `publish_domain_events` is reached, so listeners never see a fact that never persisted. Third, the handler works with the ORM entity directly via `to_aggregate` / `to_entity` mappers — the aggregate is rehydrated from the row, mutated, and mapped back to a row before the upsert. If the publish fails after a successful save you have an at-least-once delivery challenge — Chapter 10 addresses that with transactional outbox patterns. For now, the in-memory bus never fails.
+Three design decisions are worth noting. First, `events: EventPublisher` is typed as the protocol, not as `InMemoryEventBus` — the DI container injects whichever implementation is registered, so the handler never knows or cares which bus is active. Second, the publish call sits *after* `self._repository.upsert(...)` inside the `@transactional()` unit of work: if the save fails, the exception leaves the handler before `publish_domain_events` is reached, and the decorator rolls back. Third, the handler works with the ORM entity directly via `to_aggregate` / `to_entity` mappers — the aggregate is rehydrated from the row, mutated, and mapped back to a row before the upsert. The publish still runs before the unit commits, which leaves a gap the note below closes with the transactional outbox. For now, the in-memory bus never fails.
 
 !!! note "Run it"
     With the application running (`uv run pyfly run --server uvicorn`), open a wallet and deposit into it from a second terminal:
@@ -306,7 +308,23 @@ Three design decisions are worth noting. First, `events: EventPublisher` is type
 
     The HTTP response confirms the balance, but the more interesting evidence is in the application log: because the deposit published a `FundsDeposited` event and the audit listener (which you will build in the next section) reacts to it, you will see a `wallet_audit_observed` log line for `event_type=FundsDeposited`. No listener yet? Then the publish happens silently — which is exactly the point: the handler does not know whether anyone is listening.
 
-**What just happened.** The command handler now does one extra thing after saving: it drains the events the aggregate buffered and hands them to the bus. The crucial ordering is *save first, publish second*, all inside one transaction. If the database write rolls back, the events are never published, so a listener can never observe a fact that did not actually persist. The handler gained four lines and zero new knowledge — it still has no idea what, if anything, will react.
+**What just happened.** The command handler now does one extra thing after saving: it drains the events the aggregate buffered and hands them to the bus. The crucial ordering is *save first, publish second*, all inside one transaction. If the save fails, the events are never published. The handler gained four lines and zero new knowledge — it still has no idea what, if anything, will react.
+
+!!! note "Publishing after the commit: the transactional outbox"
+    The in-memory bus delivers at `publish()`: the audit listener runs inside the handler's unit of work, *before* it commits, and a broker bus sends at that moment too. A commit that fails afterwards leaves the event delivered for a change that never persisted. Since v26.09.08 PyFly closes that gap for any `EventPublisher` with one switch:
+
+    ```yaml
+    pyfly:
+      eda:
+        provider: memory          # or kafka, rabbitmq, redis
+        outbox:
+          enabled: true           # off by default
+          store: auto             # sql, mongo, or auto
+    ```
+
+    Each `publish()` is then appended to an outbox in the caller's unit of work — the `pyfly_outbox_*` tables on the primary datasource, or collections in MongoDB — and a forwarder hands it to the bus only after the unit commits: a unit that rolls back publishes nothing, one that commits publishes at least once, with the event's id in the `x-pyfly-event-id` header for consumers to deduplicate on. The `database` and `postgres` providers are an outbox already. Chapter 10 comes back to it for Kafka and RabbitMQ.
+
+    Two more framework pieces touch this path. The `DomainEventPublisher` (on by default) drains an aggregate's pending events when its unit commits and hands them to the application's `@app_event_listener` listeners; Lumen calls `wallet.clear_events()` inside the unit, so the publisher finds nothing left and no event goes out twice. Set `pyfly.eda.domain-events.destination` to let it publish them through the EDA bus instead, and delete the hand-written call. And an `@app_event_listener(phase=TransactionPhase.AFTER_COMMIT)` runs only once the unit it was published in has committed.
 
 The `OpenWalletHandler` follows the same pattern:
 
@@ -684,7 +702,7 @@ The architecture is genuinely event-driven within a single process. Here is a qu
 | `publish_domain_events` | Bridge — drains `wallet.clear_events()`, serialises with `dataclasses.asdict`, calls `publisher.publish` |
 | `ErrorStrategy` | Controls failure handling: `IGNORE`, `LOG_AND_CONTINUE`, `RETRY`, `DEAD_LETTER`, `FAIL_FAST` |
 
-Three principles carry forward into the rest of Part III: **save before you publish** — listeners must never see uncommitted facts; **design listeners for idempotency** — retries must be safe; **depend on the port, not the adapter** — the bus can be swapped without touching listener code.
+Three principles carry forward into the rest of Part III: **save before you publish** — listeners must never see a fact that failed to persist, and with the transactional outbox never one that did not commit; **design listeners for idempotency** — retries must be safe; **depend on the port, not the adapter** — the bus can be swapped without touching listener code.
 
 Chapter 9 pushes the event idea further. Instead of maintaining a separate read model alongside a mutable aggregate, you store the events themselves as the system of record — event sourcing the ledger so that every historical balance is computable from first principles.
 
