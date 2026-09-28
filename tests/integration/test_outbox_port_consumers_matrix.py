@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The relay, the ``database`` bus and the event-sourcing ``TransactionalOutbox`` depend on the outbox store port
-alone (WP09b).
+"""The relay, the ``database`` bus, the forwarding layer (``TransactionalEventPublisher`` and its
+``OutboxForwarder``) and the event-sourcing ``TransactionalOutbox`` depend on the outbox store port alone (WP09b).
 
 Each runs here on a :class:`~tests.support.outbox_contract.PortOnlyStore`: a real SQL store behind a wrapper that
 has the port's methods and nothing else. What they did through the SQL class's own methods (its engine, its
@@ -30,7 +30,9 @@ import pytest
 from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 from pyfly.data.transaction import TransactionTemplate
 from pyfly.eda.adapters.database import DatabaseEventBus, ListenerState
+from pyfly.eda.adapters.memory import InMemoryEventBus
 from pyfly.eda.outbox import OutboxRelay, SqlOutboxStore
+from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
 from pyfly.eda.types import EventEnvelope
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.outbox import TransactionalOutbox
@@ -164,6 +166,42 @@ async def test_the_event_sourcing_outbox_runs_on_any_outbox_store(relational_bac
     assert outbox.outbox is store
     with pytest.raises(ValueError, match="not both"):
         TransactionalOutbox(publish, datasource="primary", store=store)
+
+
+async def test_the_forwarding_layer_runs_on_any_outbox_store(relational_backend: RelationalBackend) -> None:
+    """``TransactionalEventPublisher`` and its ``OutboxForwarder`` need nothing beyond the port: any store that has
+    only the port's methods carries a transport's events as the SQL store does."""
+    store, template = await _store(relational_backend)
+    transport = InMemoryEventBus()
+    received: list[Any] = []
+
+    async def consumer(envelope: EventEnvelope) -> None:
+        received.append(envelope.payload["n"])
+
+    transport.subscribe("*", consumer)
+    publisher = TransactionalEventPublisher(transport, store, name="memory", poll_interval=0.1)
+    await publisher.start()
+    try:
+        assert publisher.store is store and publisher.forwarder.outbox is store
+        with pytest.raises(RuntimeError, match="declined"):
+            async with template.transaction():
+                await publisher.publish("orders", "order.placed", {"n": 1})
+                raise RuntimeError("declined")
+        async with template.transaction():
+            await publisher.publish("orders", "order.placed", {"n": 2})
+            assert received == []  # nothing reaches the transport before the commit
+        for _ in range(500):  # the commit wakes the running forwarder
+            if publisher.relay.counters.delivered:
+                break
+            await asyncio.sleep(0.01)
+        assert received == [2]
+        assert await publisher.pending() == []
+        assert await publisher.dead_letters() == []
+        health = await publisher.health_status()
+        assert health.status == "UP", health.details
+        assert health.details["forwarded"] == 1
+    finally:
+        await publisher.stop()
 
 
 class _StopCountingStore(PortOnlyStore):

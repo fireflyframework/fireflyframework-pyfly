@@ -20,6 +20,7 @@ guide covers both in depth.
 8. [Provider Selection](#provider-selection)
    - [The transactional outbox: `postgres` and `database`](#the-transactional-outbox-postgres-and-database)
    - [Any broker, transactional: `pyfly.eda.outbox.enabled`](#any-broker-transactional-pyflyedaoutboxenabled)
+   - [The outbox on MongoDB: `pyfly.eda.outbox.store: mongo`](#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)
    - [Postgres: what privileges a serving process actually needs](#postgres-what-privileges-a-serving-process-actually-needs)
    - [Dead letters](#dead-letters)
 9. [Declarative Decorators](#declarative-decorators)
@@ -272,7 +273,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.postgres.datasource` / `pyfly.eda.postgres.dsn` | `str` | | The same two keys for `postgres`; `dsn` is the key it always had. Before 26.09.08 `dsn` was required, and the bus opened a connection pool of its own. |
 | `pyfly.eda.postgres.listen-dsn` | `str` | | A direct DSN for the LISTEN connection (behind a pooler in transaction mode); by default it is checked out of the datasource's pool. |
 | `pyfly.eda.postgres.channel` | `str` | `pyfly_eda` | `pg_notify` channel name. |
-| `pyfly.eda.postgres.auto-create-tables` / `pyfly.eda.outbox.auto-create-tables` | `bool` | what `ddl-auto` allows | Create the outbox tables when they are missing. Unset, the outbox does what `pyfly.data.relational.ddl-auto` lets every framework store do: create them under `create` and `create-drop`, only check them otherwise. When they all exist nothing is created, so a serving process needs no schema-creation right; `false` means the framework never issues DDL for them (the tables are only checked). |
+| `pyfly.eda.postgres.auto-create-tables` / `pyfly.eda.outbox.auto-create-tables` | `bool` | what `ddl-auto` allows | Create the outbox tables when they are missing. Unset, the outbox does what `pyfly.data.relational.ddl-auto` lets every framework store do: create them under `create` and `create-drop`, only check them otherwise. When they all exist nothing is created, so a serving process needs no schema-creation right; `false` means the framework never issues DDL for them (the tables are only checked). The Mongo store creates its collections' indexes unless `pyfly.eda.outbox.auto-create-tables` is `false` (then it only checks them); `ddl-auto` is the relational schema's. |
 | `pyfly.eda.outbox.poll-interval` | duration | `5s` | How often an idle relay polls (seconds, or `500ms`, `90s`, `5m`, `2h`). |
 | `pyfly.eda.outbox.batch-size` | `int` | `100` | Deliveries claimed per round. |
 | `pyfly.eda.outbox.claim-timeout` | duration | `300s` | The lease of a claim: a delivery a relay claimed and did not settle (the process died) is claimed again once it ends. A relay extends the lease before it runs a delivery that could outlast it (see below), so such a delivery waits up to its worst case plus `claim-timeout`. |
@@ -284,7 +285,7 @@ property. All keys are optional; the defaults work for local development.
 | `pyfly.eda.outbox.retention.interval` / `retention.batch-size` | duration / `int` | `1m` / `1000` | How often a relay prunes, and how many events one statement deletes. |
 | `pyfly.eda.outbox.notify` | `bool` | | LISTEN/NOTIFY wake-ups; unset: on when the datasource is PostgreSQL and the LISTEN connection can be opened (the asyncpg driver, or `pyfly.eda.postgres.listen-dsn`); otherwise the relay polls, with a warning. |
 | `pyfly.eda.outbox.enabled` | `bool` | `false` | Put the transactional outbox in front of the provider's publisher (`kafka`, `rabbitmq`, `redis`, `memory`): a publish is part of the caller's unit of work and reaches the broker after the commit, at least once ([Any broker, transactional](#any-broker-transactional-pyflyedaoutboxenabled)). The `database` and `postgres` providers are the outbox already. |
-| `pyfly.eda.outbox.store` | `str` | `auto` | The outbox store: `sql` (the `pyfly_outbox_*` tables on `pyfly.eda.outbox.datasource`), `mongo` (not available until the Mongo outbox store lands: it raises at startup) or `auto` (`mongo` when the application has a Mongo client, `pyfly.data.document.enabled: true`, and no relational datasource: none in its `DataSourceRegistry`, however it is configured, and no `outbox.datasource`/`outbox.url`; else `sql`). |
+| `pyfly.eda.outbox.store` | `str` | `auto` | The outbox store of the transactional publisher and the `database` bus: `sql` (the `pyfly_outbox_*` tables on `pyfly.eda.outbox.datasource`), `mongo` (the `pyfly_outbox_*` collections of the document database, on the document datasource: [The outbox on MongoDB](#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)) or `auto` (`mongo` when the application has a Mongo client, `pyfly.data.document.enabled: true`, and no relational datasource: none in its `DataSourceRegistry`, however it is configured, and no `outbox.datasource`/`outbox.url`; else `sql`). The `postgres` provider is the SQL store on PostgreSQL: `mongo` raises there. |
 | `pyfly.eda.outbox.forward.destinations` | `str` | every destination | The destinations the transactional publisher sends through the outbox (comma-separated; `*`: every one). A publish to another destination goes to the broker after the commit, at most once. |
 | `pyfly.eda.outbox.forward.group` | `str` | `pyfly.forward:<provider>` | The forwarder's consumer group: the processes of one group split the forwarding, so they must forward to the same broker. |
 | `pyfly.eda.outbox.forward.*` | | the `outbox.*` value | The forwarder's `poll-interval`, `batch-size`, `claim-timeout`, `handler-timeout` (the longest one publish may take), `start`, `error-strategy` and `retention.*`, each defaulting to the `pyfly.eda.outbox.*` key of the same name. |
@@ -369,7 +370,10 @@ LaraFly shape (its key order, `DATE_ATOM` timestamps), select `serialization-for
 The `postgres` and `database` providers are one bus, `DatabaseEventBus` (`PostgresEventBus` keeps the
 constructor the Postgres adapter always had): a **transactional outbox** on a datasource of the application's
 `DataSourceRegistry`, with that datasource's pool, connect arguments and dialect setup. `database` runs on any
-SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/NOTIFY as a wake-up.
+SQL backend (SQLite, PostgreSQL, MySQL, MariaDB); on PostgreSQL both use LISTEN/NOTIFY as a wake-up. In a MongoDB
+application (`pyfly.eda.outbox.store: mongo`, or `auto` without a relational datasource) the `database` bus keeps its
+outbox in the document database instead ([The outbox on MongoDB](#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)):
+the tables and statements below are the SQL store's, the guarantees are both stores'.
 
 - **A publish is part of the publisher's unit of work.** `publish()` writes the event into
   `pyfly_outbox_events` in the unit bound for the outbox's datasource (a short unit of its own outside one):
@@ -468,10 +472,11 @@ consumer group drain them before the upgrade (or copy what a group had not consu
 through `OutboxStore` (`pyfly.eda.ports.outbox`): append in the caller's unit, register consumer groups, claim by
 state for a lease, settle fenced by the claim, release, retention. `SqlOutboxStore` (`pyfly.eda.outbox`; its name
 before 26.09.08, `Outbox`, is kept as an alias) is the SQL adapter these sections describe, and
-`DatabaseEventBus(store=...)` and `TransactionalOutbox(publish, store=...)` run on any other. The value types
+`DatabaseEventBus(store=...)` and `TransactionalOutbox(publish, store=...)` run on any other, such as
+`MongoOutboxStore` ([The outbox on MongoDB](#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)). The value types
 (`Delivery`, `PendingDelivery`, `Retention`, `StartPosition`, `PruneResult`) are the port's, re-exported from
 `pyfly.eda.outbox` unchanged. What an adapter must do is the contract suite `tests/support/outbox_contract.py`,
-which the SQL store passes on SQLite, PostgreSQL, MySQL and MariaDB.
+which the SQL store passes on SQLite, PostgreSQL, MySQL and MariaDB, and the Mongo store on a replica set.
 
 ### Any broker, transactional: `pyfly.eda.outbox.enabled`
 
@@ -551,8 +556,8 @@ What it guarantees:
   `IGNORE` settle a failed forward as done: the event is dropped, at most once.
 - **The event commits in the store's unit.** With the outbox on the datasource of the business changes (the
   default), they commit together. An outbox on another datasource commits in a unit of that datasource, a second
-  write; a MongoDB business unit has no outbox of its own yet (`pyfly.eda.outbox.store: mongo` raises until the
-  Mongo outbox store lands).
+  write. A MongoDB application keeps its outbox in its document database, and the event commits with the
+  documents ([The outbox on MongoDB](#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo)).
 
 The forwarder's group is registered for `forward.destinations` (every destination by default, also when the list
 holds `*`), so an event another writer of the store appends to one of them is forwarded too. A publish to a
@@ -560,7 +565,9 @@ destination left out of `forward.destinations` goes straight to the broker after
 once outside one): at most once, and lost if the process dies in between. The group stays registered when
 `outbox.enabled` is turned off, and every other writer of the same tables (an outbox bus) keeps owing it its
 events: remove it (`await SqlOutboxStore("primary").unregister("pyfly.forward:kafka")`) when you switch the layer
-off for good.
+off for good (on MongoDB, `await MongoOutboxStore("document", database="shop").unregister("pyfly.forward:kafka")`,
+with the database of `pyfly.data.document.database`: without `database=` the store takes the one the client's URI
+names, else `pyfly`).
 
 The broker's bus builds the envelope it sends when the forwarder publishes: its `timestamp` is the instant of the
 forward, not of the publish in the unit (the event's id is kept, in `x-pyfly-event-id`). With the in-process bus
@@ -592,6 +599,119 @@ publisher = TransactionalEventPublisher(
 await publisher.start()
 ```
 
+### The outbox on MongoDB: `pyfly.eda.outbox.store: mongo`
+
+A MongoDB application keeps its outbox beside its documents. `MongoOutboxStore` (`pyfly.eda.adapters.mongo_outbox`)
+is the outbox store on collections of the document database, for the transactional publisher
+(`pyfly.eda.outbox.enabled`) and for the `database` bus (`provider: database`). `pyfly.eda.outbox.store: auto` picks
+it for an application with the document layer (`pyfly.data.document.enabled: true`) and no relational datasource;
+`mongo` asks for it in any application with the document layer.
+
+```yaml
+pyfly:
+  data:
+    document:
+      enabled: true
+      uri: mongodb://mongo:27017/?replicaSet=rs0
+      database: shop
+  eda:
+    provider: kafka
+    kafka:
+      bootstrap-servers: kafka:9092
+    outbox:
+      enabled: true      # store: auto picks mongo, as there is no relational datasource
+```
+
+Its guarantees are the SQL store's, and so are the sections above: the same contract suite
+(`tests/support/outbox_contract.py`) runs on both. A unit that rolls back published nothing; a unit that commits
+publishes its event at least once, with its id in `x-pyfly-event-id`; deliveries are claimed by state for a lease,
+and every later write on a claim is fenced by it; the processes of a group share its deliveries; retention and dead
+letters work alike. What differs is where the data lives, and why:
+
+- **The event commits with the documents.** A publish joins the unit of work of the document datasource
+  (`pyfly.data.document.datasource`, `document`; in a document-only application the one a bare `@transactional`
+  runs on): the event and its deliveries are written in that unit's MongoDB transaction, so a `@transactional`
+  method that saves documents and publishes commits both or neither. Outside a unit, the publish runs in a short
+  transaction of its own, and so does a publish in a unit that runs no transaction: the one a single-command
+  repository write opens outside `@transactional`. A `MongoRepository.save` there writes the document on its own,
+  and the events of its aggregate, published one by one as that write's unit commits, are each written with their
+  deliveries in a short transaction of the store's own, so no event is ever owed to no group. They are separate
+  transactions, not one: when a later event fails, the earlier ones stand and are delivered, and the save raises,
+  its document stored. When an aggregate's events must commit together (and with its document), save it in a
+  `@transactional` method. A read-only unit refuses the publish (`IllegalTransactionStateError`), as a
+  `MongoRepository` refuses a write there. In an application with both layers `auto` stays on the SQL store: set
+  `store: mongo` to have the events commit with the document units instead (an event published in a relational
+  unit is then written in a unit of the document datasource, a second write).
+- **A replica set.** The store writes an event and its deliveries in one multi-document transaction (the caller's
+  unit's, or one of its own), which MongoDB runs on a replica set or a sharded cluster only. Its `start()` refuses a
+  standalone server with `IllegalTransactionStateError`, so the publisher, and the application, fail to start rather
+  than write events that could lose their deliveries. A single-node replica set is enough ([Replica Set
+  Requirement](data-document.md#replica-set-requirement)). The store is tested on a replica set; on a sharded
+  cluster, keep its five collections unsharded on one shard (the database's primary shard, where MongoDB puts an
+  unsharded collection), so an event and its deliveries commit on one shard and a claim, which reads them outside a
+  transaction, never sees a delivery before its event.
+- **Collections and indexes.** Five collections of the document database (`pyfly.data.document.database`), created
+  with their indexes when the store starts (idempotent: an index that exists is left as it is):
+
+  | Collection | Holds | Indexes |
+  |---|---|---|
+  | `pyfly_outbox_events` | one document per event: `_id` (the outbox id), `event_id`, `destination`, `event_type`, `payload` and `headers` (JSON text), `created_at` | `created_at` |
+  | `pyfly_outbox_deliveries` | what is still owed, per consumer group and event: `available_at` (due, or the claim's lease end), `attempts`, `claimed_by`, `done` (the subscriptions that handled it), `last_error` | unique `(consumer_group, outbox_id)`; `(consumer_group, available_at, outbox_id)`; `outbox_id` |
+  | `pyfly_outbox_consumers` | the consumer groups and their destinations (`*`: every one) | unique `(consumer_group, destination)`; `destination` |
+  | `pyfly_outbox_dead_letters` | the dead letters, as the SQL table holds them | `(consumer_group, failed_at)`; `failed_at` |
+  | `pyfly_outbox_counters` | the counter the outbox ids come from | |
+
+  With `pyfly.eda.outbox.auto-create-tables: false` the store only checks the indexes and fails to start naming a
+  missing one. A serving process needs `readWrite` on the database (it includes `createIndex`).
+- **Outbox ids.** An event's id is taken from the counter with one atomic `findAndModify`, outside the unit's
+  transaction: two MongoDB transactions that increment one document conflict (the second is aborted at once), so a
+  counter inside the transaction would fail every publishing unit that ran beside another one. The ids grow as a SQL
+  identity column's do: a unit that rolls back leaves a gap, and a unit that commits late leaves a lower id behind
+  higher ones. Neither loses an event: a delivery is claimed by its state when it becomes visible, never by an id
+  cursor.
+- **Claims.** A claim reads a group's due deliveries, oldest first, then moves them a lease ahead with one
+  `updateMany` that matches only the ones still due, marked with the claim's token. MongoDB applies it to each
+  document atomically, so two relays never take one delivery; a claim that lost some of what it read to another
+  relay reads on past them, as `FOR UPDATE SKIP LOCKED` would. The writes of a claim, a completion, an extension, a
+  release and a plain settle are commands MongoDB applies to each document atomically (a claim reads around its
+  `updateMany`, and an extension may read which deliveries it still holds), so they need no transaction: they join
+  the caller's unit when one is bound, and otherwise run in a unit of their own without one. A registration, an
+  unregistration, a settle with dead letters and a retention batch are several writes that belong together, so they
+  run in a transaction (the caller's unit's when it runs one, else the store's own), run again when MongoDB aborts
+  one of the store's own for a write conflict (another process registering the same group at once).
+- **A registration from `earliest`** owes the new group every event the outbox holds, in its one transaction (the
+  events read a thousand at a time). On a very large outbox that transaction can outlast MongoDB's
+  `transactionLifetimeLimitSeconds` (60 seconds by default): MongoDB then aborts it, and after running it again a
+  few times the registration fails. Prune the outbox, or raise the limit, before a new group starts from `earliest`
+  on a large backlog.
+- **The payload is JSON**, as the SQL store keeps it: a consumer gets the same values from either store (an instant,
+  a decimal or a UUID in a payload arrives as a string).
+- **The client is the application's.** The store runs on the document datasource's client and units of work,
+  resolved when it runs; it never closes the client (the context that built it does, when it stops). The
+  transactional publisher and the `database` bus stop their store when they stop, which releases nothing, so they
+  may share one.
+
+Without the auto-configuration:
+
+```python
+from pyfly.eda.adapters.kafka import KafkaEventBus
+from pyfly.eda.adapters.mongo_outbox import MongoOutboxStore
+from pyfly.eda.outbox_forwarding import TransactionalEventPublisher
+
+publisher = TransactionalEventPublisher(
+    KafkaEventBus(bootstrap_servers="kafka:9092", topics=["orders"], group="billing"),
+    MongoOutboxStore("document", database="shop"),   # or the AsyncMongoClient, or its MongoTransactionManager
+    name="kafka",
+)
+await publisher.start()
+```
+
+`DatabaseEventBus(store=MongoOutboxStore(...))` is the `database` bus on it, and `TransactionalOutbox(publish,
+store=MongoOutboxStore(...))` the event-sourcing outbox. The `postgres` provider is the SQL store on PostgreSQL:
+`pyfly.eda.outbox.store: mongo` raises there. The LISTEN/NOTIFY wake-ups are PostgreSQL's: the relays poll, and a
+publish in the same process wakes them after its commit; `pyfly.eda.outbox.notify: true` makes the `database` bus
+fail to start on the Mongo store.
+
 ### Postgres: what privileges a serving process actually needs
 
 Postgres checks `CREATE` on the schema *before* it checks `IF NOT EXISTS`, so replaying `CREATE TABLE IF NOT
@@ -621,7 +741,8 @@ The identity column of `pyfly_outbox_events` needs no grant on its sequence. Bef
 ### Dead letters
 
 An `EdaDeadLetterStore` records the events whose handlers failed on every attempt. The outbox buses write
-theirs to `pyfly_outbox_dead_letters` in the unit that settles the delivery, with the consumer group, the
+theirs to `pyfly_outbox_dead_letters` (a table, or a collection on the Mongo store) in the unit that settles the
+delivery, with the consumer group, the
 subscription, the event and the last failure; `bus.outbox.dead_letters(group)` reads them. So does the forwarder
 of a transactional publisher, for the events it failed to publish on every attempt
 (`publisher.dead_letters()`), unless the application defines the bean below. The Kafka and

@@ -51,6 +51,7 @@ PyFly Data Document provides a document-oriented data access layer that implemen
   - [The unified @transactional decorator](#the-unified-transactional-decorator)
   - [Replica Set Requirement](#replica-set-requirement)
   - [Usage Example](#usage-example)
+  - [Publishing Events: the Outbox on MongoDB](#publishing-events-the-outbox-on-mongodb)
 - [MongoRepositoryBeanPostProcessor](#mongorepositorybeanpostprocessor)
   - [How It Works](#how-it-works_1)
   - [Stub Detection](#stub-detection)
@@ -1006,6 +1007,70 @@ class OrderService:
 ```
 
 Source file: `src/pyfly/data/document/mongodb/transaction_manager.py`
+
+### Publishing Events: the Outbox on MongoDB
+
+An event published to a broker inside a document `@transactional` method would reach the broker before the commit,
+and stay there after a rollback. The transactional outbox of `pyfly.eda` removes that dual write in a MongoDB
+application too: with `pyfly.eda.outbox.enabled: true` (any broker) or `pyfly.eda.provider: database`, the event
+publisher keeps its outbox in collections of the document database (`MongoOutboxStore`,
+`pyfly.eda.adapters.mongo_outbox`), and a publish is written in the unit's MongoDB transaction, beside the documents.
+The unit commits both or neither; a relay forwards the committed event afterwards, at least once, with its id in
+`x-pyfly-event-id`.
+
+```yaml
+pyfly:
+  data:
+    document:
+      enabled: true
+      uri: mongodb://localhost:27017/?replicaSet=rs0
+      database: shop
+  eda:
+    provider: rabbitmq
+    outbox:
+      enabled: true      # store: auto is mongo: the application has no relational datasource
+```
+
+```python
+from pyfly.container import service
+from pyfly.data import transactional
+from pyfly.eda import EventPublisher
+
+
+@service
+class OrderService:
+    def __init__(self, orders: OrderRepository, events: EventPublisher) -> None:
+        self._orders = orders
+        self._events = events
+
+    @transactional
+    async def place(self, order: OrderDocument) -> None:
+        await self._orders.save(order)
+        await self._events.publish("orders", "order.placed", {"order_id": str(order.id)})
+        # The document and the event commit together, or neither does
+```
+
+- The outbox is five collections of `pyfly.data.document.database`: `pyfly_outbox_events`, `pyfly_outbox_deliveries`,
+  `pyfly_outbox_consumers`, `pyfly_outbox_dead_letters` and `pyfly_outbox_counters`, whose indexes the store creates
+  when the application starts (`pyfly.eda.outbox.auto-create-tables: false`: it only checks them).
+- It needs a replica set (see [Replica Set Requirement](#replica-set-requirement)): on a standalone server the
+  publisher refuses to start.
+- It runs on the document datasource's client and units of work (`pyfly.data.document.datasource`): a publish joins
+  the `@transactional` unit of that datasource (outside one, it runs in a short transaction of its own), and a
+  read-only unit refuses it.
+- `pyfly.eda.outbox.store: auto` picks it when the application has the document layer and no relational datasource;
+  `mongo` asks for it in an application with both.
+- The events an `AggregateDocument` raises go the same way with `pyfly.eda.domain-events.destination`: they are
+  appended to the outbox in the unit that saves the document (see
+  [Aggregate Documents and Domain Events](#aggregate-documents-and-domain-events)). A `MongoRepository.save`
+  outside `@transactional` writes the document on its own, with no transaction; its events are then written one by
+  one, each with its deliveries in a short transaction of the store's own, so no event is ever owed to no group.
+  They do not commit together: when a later one fails, the earlier ones stand and are delivered, and the save
+  raises, its document stored. Save the aggregate in a `@transactional` method when its events must commit
+  together (and with the document).
+
+Its guarantees are those of the SQL outbox store; the configuration keys, the collections and their indexes, the
+outbox ids and the claims are in [The outbox on MongoDB](events.md#the-outbox-on-mongodb-pyflyedaoutboxstore-mongo).
 
 ---
 

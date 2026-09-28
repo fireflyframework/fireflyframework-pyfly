@@ -19,8 +19,9 @@ relay, a :data:`~pyfly.kernel.lifecycle.CONSUMER_PHASE` lifecycle bean, delivers
 consumer group to the subscribed handlers, at least once, each subscription settled on its own.
 
 The bus reads and writes through the :class:`~pyfly.eda.ports.outbox.OutboxStore` port: by default a
-:class:`~pyfly.eda.outbox.SqlOutboxStore` on the datasource it is given, or any store passed as *store* (a
-document store, once there is one). The accelerators below are the SQL store's, on PostgreSQL.
+:class:`~pyfly.eda.outbox.SqlOutboxStore` on the datasource it is given, or any store passed as *store*, such as
+the :class:`~pyfly.eda.adapters.mongo_outbox.MongoOutboxStore` of a MongoDB application. The accelerators below
+are the SQL store's, on PostgreSQL.
 
 On PostgreSQL two accelerators are on: a publish is one statement that also sends ``NOTIFY`` (delivered by the
 server only if the unit commits), and a bus that consumes keeps a ``LISTEN`` connection that wakes its relay at
