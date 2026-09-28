@@ -1124,6 +1124,59 @@ async def test_a_reader_behind_a_full_numbered_page_reads_it_without_numbering(
     assert at_the_end.count("UPDATE") == 2  # the page reaches past the head row: the new event is numbered
 
 
+async def test_last_position_numbers_the_events_committed_when_it_was_called_not_those_committed_since(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review of WP08: ``last_position()`` numbered until no event was left without a position, so under a
+    write rate above the numbering rate (10 000 to 40 000 events a second) it could run without end, and a runner
+    with ``start_from="latest"`` calls it from ``start()``. It now numbers as many events as were waiting when it
+    was called; the readers number the rest. Here every numbering round lets three more events commit while it
+    numbers two."""
+    from sqlalchemy import event as sqlalchemy_event
+
+    import pyfly.eventsourcing.store as store_module
+
+    monkeypatch.setattr(store_module, "_NUMBERING_BATCH", 2)
+    store = await _store(relational_backend, "head-row")
+    await store.append("waiting", "Order", [_envelope(f"W{index}") for index in range(5)], expected_version=0)
+    committed = [0]
+
+    def commit_more(conn: Any, clauseelement: Any, *_args: Any) -> None:
+        if not (isinstance(clauseelement, Update) and clauseelement.table.name == event_store_head.name):
+            return
+        for _ in range(3):
+            committed[0] += 1
+            later = _envelope(f"Later{committed[0]}")
+            conn.execute(
+                insert(event_store).values(
+                    event_id=later.event_id,
+                    aggregate_id=f"later-{committed[0]}",
+                    aggregate_type="Order",
+                    sequence=1,
+                    event_type=later.event_type,
+                    payload=later.to_json(),
+                    metadata="{}",
+                    occurred_at=later.occurred_at,
+                    version=1,
+                )
+            )
+
+    sqlalchemy_event.listen(store.engine.sync_engine, "before_execute", commit_more)
+    try:
+        async with asyncio.timeout(30):
+            last = await store.last_position()
+    finally:
+        sqlalchemy_event.remove(store.engine.sync_engine, "before_execute", commit_more)
+
+    assert last >= 5  # every event waiting at the call has a position
+    assert committed[0] <= 9  # three rounds of two, not a round for every event committed meanwhile
+    events = await _drain(store)
+    assert [event.event_type for event in events][:5] == [f"W{index}" for index in range(5)]
+    assert len(events) == 5 + committed[0] and [event.global_position for event in events] == list(
+        range(1, len(events) + 1)
+    )
+
+
 # The set-based numbering docs/modules/eventsourcing.md gives for a large table of an earlier release.
 _NUMBER_EARLIER_EVENTS = {
     "postgresql": """

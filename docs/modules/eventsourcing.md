@@ -150,9 +150,11 @@ comes after it on the stream.
 
 `stream_all(after_event_id=...)`, the cursor of earlier releases, still works: it pages from that event's
 position, and raises `ValueError` for an id that is not on the stream (it used to return nothing, forever).
-`last_position()` is the position of the last event on the stream now. An `EventStore` written against the
-earlier SPI (a `stream_all` without `after_position`) is still projected, with its place kept in memory by event
-id, without checkpoints or a lease (a `projection_store_without_positions` WARNING says so).
+`last_position()` is the position of the last event on the stream now; with `head-row` it first numbers the
+events that were waiting when it was called (not those that commit meanwhile, so it returns under any write
+rate). An `EventStore` written against the earlier SPI (a `stream_all` without `after_position`) is still
+projected, with its place kept in memory by event id, without checkpoints or a lease (a
+`projection_store_without_positions` WARNING says so).
 
 ### Checkpoints
 

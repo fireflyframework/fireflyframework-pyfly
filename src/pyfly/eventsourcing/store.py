@@ -564,10 +564,11 @@ class SqlAlchemyEventStore:
         """The global position of the last event a reader can see on the stream now (0 when there is none):
         where a new projection that should skip the history starts.
 
-        With ``head-row``, outside a unit of work on the store's datasource, it first gives every committed event
-        without a position its own: over the backlog of a large table an earlier release filled, that takes as
-        long as numbering all of it (the event-sourcing guide gives the figures, and SQL that numbers such a
-        table before the upgraded application starts)."""
+        With ``head-row``, outside a unit of work on the store's datasource, it first gives the committed events
+        without a position theirs, as many as were waiting when it was called (events that commit meanwhile are
+        left to the readers, so a write rate above the numbering rate never keeps it going): over the backlog of a
+        large table an earlier release filled, that takes as long as numbering all of it (the event-sourcing guide
+        gives the figures, and SQL that numbers such a table before the upgraded application starts)."""
         from sqlalchemy import func, select
 
         strategy = await self._ready()
@@ -576,12 +577,14 @@ class SqlAlchemyEventStore:
         last = select(func.coalesce(func.max(table.c.global_position), 0))
         if strategy == POSITION_XID8:
             last = last.where(table.c.global_position < _xid8_horizon())
+        waiting = select(func.count()).where(table.c.global_position.is_(None))
         probe = self._numbers_on_read(strategy, manager)
         while True:
             async with infrastructure_unit(manager, read_only=True) as session:
-                if not (probe and await self._unnumbered(session)):
+                count = int((await session.execute(waiting)).scalar_one()) if probe else 0
+                if not count:
                     return int((await session.execute(last)).scalar_one())
-            await self._number_committed(manager)
+            await self._number_committed(manager, at_least=count)
             probe = False
 
     # ------------------------------------------------------------------
