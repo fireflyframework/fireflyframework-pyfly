@@ -895,8 +895,8 @@ class MongoRepository(Generic[T, ID]):
             await _validate(document)
             if new:
                 fields = await self._before_insert(document, settings)
-                async with self._operation(write=True) as session:
-                    result = await self._collection().insert_one(fields, session=session)
+                async with unit.operation():
+                    result = await self._collection().insert_one(fields, session=unit.resource)
             else:
                 await _run_actions(document, EventTypes.SAVE, ActionDirections.BEFORE)
                 await _run_actions(document, EventTypes.UPDATE, ActionDirections.BEFORE)
@@ -907,9 +907,9 @@ class MongoRepository(Generic[T, ID]):
                     nones = get_top_level_nones(document)
                     if nones:
                         changes.append({"$unset": dict.fromkeys(nones, "")})
-                async with self._operation(write=True) as session:
+                async with unit.operation():
                     # Beanie's update of a stored document (its revision check and state), without its actions.
-                    await document.update(*changes, session=session, upsert=True, skip_actions=_SKIP_ACTIONS)
+                    await document.update(*changes, session=unit.resource, upsert=True, skip_actions=_SKIP_ACTIONS)
         except BaseException:
             state.restore()
             raise
@@ -989,8 +989,8 @@ class MongoRepository(Generic[T, ID]):
                             update["$unset"] = dict.fromkeys(nones, "")
                     operations.append(UpdateOne(encode(self._model, criteria), update, upsert=upsert))
                 plans.append((entity, new, document))
-            async with self._operation(write=True) as session:
-                result = await self._collection().bulk_write(operations, ordered=True, session=session)
+            async with unit.operation():
+                result = await self._collection().bulk_write(operations, ordered=True, session=unit.resource)
                 updates = len(items) - result.inserted_count
                 if guarded and result.matched_count + result.upserted_count < updates:
                     conflict = RevisionIdWasChanged()
@@ -1022,10 +1022,10 @@ class MongoRepository(Generic[T, ID]):
 
     async def _delete_document(self, entity: Any) -> None:
         """Beanie's ``delete`` of *entity*: its delete actions, outside the guard, around one ``delete``."""
-        self._writable_unit()
+        unit = self._writable_unit()  # before the delete actions (user code)
         await _run_actions(entity, EventTypes.DELETE, ActionDirections.BEFORE)
-        async with self._operation(write=True) as session:
-            await entity.delete(session=session, skip_actions=_SKIP_ACTIONS)
+        async with unit.operation():
+            await entity.delete(session=unit.resource, skip_actions=_SKIP_ACTIONS)
         await _run_actions(entity, EventTypes.DELETE, ActionDirections.AFTER)
 
     async def delete_by_id(self, id: ID) -> None:
@@ -1074,8 +1074,8 @@ class MongoRepository(Generic[T, ID]):
     async def _delete_where(self, filter_document: dict[str, Any], *, many: bool, actions: bool = True) -> int:
         """Delete what *filter_document* matches: one command, or document by document (loading them) when the
         class has delete event actions and *actions* is true. Returns how many were deleted."""
-        self._writable_unit()
         if actions and _has_delete_actions(self._model):
+            self._writable_unit()  # before the find, and the delete actions (user code)
             documents = await self._find(filter_document, limit=None if many else 1)
             for document in documents:
                 await self._delete_document(document)
