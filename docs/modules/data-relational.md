@@ -874,7 +874,7 @@ page = await repo.find_all_by_spec_paged(active & admin, pageable)
 | `is_not_null(field)`              | `field IS NOT NULL`           | field          |
 | `between(field, low, high)`       | `field BETWEEN low AND high`  | field, low, high|
 
-Every field name is validated when the specification is applied, against the entity: its columns, synonyms and hybrid properties, and its relationships to one entity (`FilterOperator.eq("owner", user)` compares with an instance, or `None`). Anything else (a typo, a Python `@property`, a private or dunder name, a name with `$`) raises `InvalidPropertyError`, which the web layer answers with 400, so filters taken from a request never reach `getattr`.
+Every field name is validated when the specification is applied, against the entity: its columns, synonyms and hybrid properties, its relationships to one entity (`FilterOperator.eq("owner", user)` compares with an instance, or `None`), and its composites (`FilterOperator.eq("location", Point(1, 2))`, with `neq`, `is_null` and `is_not_null`; `neq` is the negation of `eq`, and `None` means every column null; any other operator on a composite raises `InvalidPropertyError`). Anything else (a typo, a Python `@property`, a private or dunder name, a name with `$`) raises `InvalidPropertyError`, which the web layer answers with 400, so filters taken from a request never reach `getattr`.
 
 ### Composing Filters
 

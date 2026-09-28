@@ -35,8 +35,10 @@ Example::
     spec = FilterOperator.gte("age", 18) & FilterOperator.lt("age", 65)
 
 **Names are validated** when a specification is applied, against the entity it is applied to
-(:class:`~pyfly.data.property_resolver.PropertyResolver`): its columns, synonyms and hybrids, and its
-relationships to one entity (compared with an instance of that entity or ``None``). Anything else (a typo, a
+(:class:`~pyfly.data.property_resolver.PropertyResolver`): its columns, synonyms and hybrids, its
+relationships to one entity (compared with an instance of that entity or ``None``), and its composites (compared
+with a value of their class or ``None``, which means every column null, through ``eq``, ``neq``, ``is_null`` and
+``is_not_null``; ``neq`` is the negation of ``eq``, as a derived query's ``_not``). Anything else (a typo, a
 Python ``@property``, a private or dunder name, a name with ``$``) raises
 :class:`~pyfly.data.property_resolver.InvalidPropertyError`, which the web layer answers with 400, so filters
 straight from a request never reach ``getattr``. A repository's ``__filterable__`` allow-list narrows
@@ -50,14 +52,14 @@ from __future__ import annotations
 import threading
 import weakref
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import Select
+from sqlalchemy import Select, not_
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import InstanceState, Mapper
 
 from pyfly.data.filter import BaseFilterUtils
-from pyfly.data.property_resolver import PropertyResolver
+from pyfly.data.property_resolver import InvalidPropertyError, PropertyResolver
 from pyfly.data.relational.sqlalchemy.specification import Specification
 
 _RESOLVERS: weakref.WeakKeyDictionary[type, PropertyResolver] = weakref.WeakKeyDictionary()
@@ -65,7 +67,8 @@ _RESOLVERS_LOCK = threading.Lock()
 
 
 def filter_properties(entity: type) -> PropertyResolver:
-    """The names a filter of *entity* may use: its properties, and its relationships to one entity."""
+    """The names a filter of *entity* may use: its properties, its relationships to one entity and its
+    composites."""
     resolver = _RESOLVERS.get(entity)
     if resolver is None:
         properties = dict(PropertyResolver.for_entity(entity).properties)
@@ -75,25 +78,42 @@ def filter_properties(entity: type) -> PropertyResolver:
             for relationship in mapper.relationships
             if not relationship.uselist and not relationship.key.startswith("_")
         )
+        properties.update((prop.key, prop.key) for prop in mapper.composites if not prop.key.startswith("_"))
         resolver = PropertyResolver(entity, properties)
         with _RESOLVERS_LOCK:
             _RESOLVERS[entity] = resolver
     return resolver
 
 
-def _attribute(root: Any, field: str) -> Any:
-    """*root*'s attribute *field* (``root`` is the entity class or an alias of it), the name validated."""
-    inspected: Any = sa_inspect(root)
-    return getattr(root, filter_properties(inspected.mapper.class_).resolve(field, usage="filter"))
-
-
-def _where(field: str, condition: Callable[[Any], Any]) -> Specification[Any]:
-    """A specification adding ``condition(attribute)`` for the entity's attribute *field*."""
+def _where(
+    field: str, condition: Callable[[Any], Any], composite: Callable[[Any], Any] | None = None
+) -> Specification[Any]:
+    """A specification adding ``condition(attribute)`` for the entity's attribute *field* (``root`` is the entity
+    class or an alias of it, the name validated), or ``composite(attribute)`` when the attribute is a composite:
+    an operator without one does not apply to a composite."""
 
     def predicate(root: Any, query: Select[Any]) -> Select[Any]:
-        return query.where(condition(_attribute(root, field)))
+        mapper: Mapper[Any] = cast(Any, sa_inspect(root)).mapper
+        key = filter_properties(mapper.class_).resolve(field, usage="filter")
+        attribute = getattr(root, key)
+        if key not in mapper.composites:
+            return query.where(condition(attribute))
+        if composite is None:
+            raise InvalidPropertyError(
+                f"{mapper.class_.__name__}.{field} is a composite: it compares with a value of its class or None "
+                "(eq, neq, is_null, is_not_null)",
+                entity=mapper.class_.__name__,
+                property=field,
+                usage="filter",
+            )
+        return query.where(composite(attribute))
 
     return Specification(predicate)
+
+
+def _composite_equals(attribute: Any, value: Any) -> Any:
+    """A composite equal to *value*, column by column (every column null for ``None``)."""
+    return attribute == value
 
 
 class FilterOperator:
@@ -107,13 +127,14 @@ class FilterOperator:
 
     @staticmethod
     def eq(field: str, value: Any) -> Specification[Any]:
-        """Equal to (a relationship to one entity compares with an instance, or ``None``)."""
-        return _where(field, lambda column: column == value)
+        """Equal to (a relationship to one entity compares with an instance, a composite with a value of its
+        class; both with ``None`` too)."""
+        return _where(field, lambda column: column == value, lambda held: _composite_equals(held, value))
 
     @staticmethod
     def neq(field: str, value: Any) -> Specification[Any]:
-        """Not equal to."""
-        return _where(field, lambda column: column != value)
+        """Not equal to (a composite: not equal to *value* as a whole, the negation of :meth:`eq`)."""
+        return _where(field, lambda column: column != value, lambda held: not_(_composite_equals(held, value)))
 
     @staticmethod
     def gt(field: str, value: Any) -> Specification[Any]:
@@ -152,13 +173,13 @@ class FilterOperator:
 
     @staticmethod
     def is_null(field: str) -> Specification[Any]:
-        """Value is NULL."""
-        return _where(field, lambda column: column.is_(None))
+        """Value is NULL (a composite: every column of it)."""
+        return _where(field, lambda column: column.is_(None), lambda held: _composite_equals(held, None))
 
     @staticmethod
     def is_not_null(field: str) -> Specification[Any]:
-        """Value is NOT NULL."""
-        return _where(field, lambda column: column.isnot(None))
+        """Value is NOT NULL (a composite: not every column of it)."""
+        return _where(field, lambda column: column.isnot(None), lambda held: not_(_composite_equals(held, None)))
 
     @staticmethod
     def between(field: str, low: Any, high: Any) -> Specification[Any]:

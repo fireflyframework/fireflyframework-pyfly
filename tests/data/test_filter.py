@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import String, select
+from sqlalchemy import Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, composite, mapped_column
 
 from pyfly.data.property_resolver import InvalidPropertyError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
@@ -47,6 +47,23 @@ class User(BaseEntity):
     @property
     def greeting(self) -> str:
         return f"Hi {self.name}"
+
+
+@dataclasses.dataclass
+class Spot:
+    """A composite value: two columns of a row."""
+
+    x: int | None
+    y: int | None
+
+
+class Place(Base):
+    __tablename__ = "filter_places"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    x: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    y: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    at: Mapped[Spot] = composite("x", "y")
 
 
 # ---------------------------------------------------------------------------
@@ -390,3 +407,38 @@ class TestFromExampleEntities:
                 self._cache = {"anything": 1}
 
         assert await _names(seeded_session, FilterUtils.from_example(Probe())) == ["Bob", "Diana"]
+
+
+class TestCompositeFilters:
+    """A composite compares with a value of its class, or ``None`` (every column null), as a derived query compares
+    it: ``neq`` is the negation of ``eq`` (SQLAlchemy's ``!=`` on a composite compares column by column, so
+    ``(1, 4)`` was not ``!= (1, 2)``), and ``is_null`` failed with ``NotImplementedError``."""
+
+    @pytest.fixture
+    async def places(self, session: AsyncSession) -> AsyncSession:
+        session.add_all(
+            [Place(id=1, x=1, y=2), Place(id=2, x=3, y=4), Place(id=3, x=1, y=4), Place(id=4, x=None, y=None)]
+        )
+        await session.flush()
+        return session
+
+    @staticmethod
+    async def _ids(session: AsyncSession, spec: Specification[Place]) -> list[int]:
+        result = await session.execute(spec.to_predicate(Place, select(Place)))
+        return sorted(place.id for place in result.scalars().all())
+
+    async def test_eq_and_neq_compare_with_a_value(self, places: AsyncSession):
+        assert await self._ids(places, FilterOperator.eq("at", Spot(1, 2))) == [1]
+        assert await self._ids(places, FilterOperator.neq("at", Spot(1, 2))) == [2, 3]
+        assert await self._ids(places, FilterUtils.from_dict({"at": Spot(3, 4)})) == [2]
+        assert await self._ids(places, FilterOperator.eq("at", None)) == [4]
+
+    async def test_is_null_and_is_not_null_read_every_column(self, places: AsyncSession):
+        assert await self._ids(places, FilterOperator.is_null("at")) == [4]
+        assert await self._ids(places, FilterOperator.is_not_null("at")) == [1, 2, 3]
+        assert await self._ids(places, ~FilterOperator.is_null("at") & FilterOperator.neq("at", Spot(3, 4))) == [1, 3]
+
+    async def test_a_composite_takes_no_other_operator(self, places: AsyncSession):
+        with pytest.raises(InvalidPropertyError, match="composite") as raised:
+            await self._ids(places, FilterOperator.gt("at", Spot(1, 1)))
+        assert (raised.value.property, raised.value.usage) == ("at", "filter")
