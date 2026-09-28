@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Collection, Coroutine
 from typing import Any, Protocol, runtime_checkable
 
 from pyfly.data.transaction.template import run_shielded
@@ -47,7 +47,7 @@ async def settle_all(coroutines: list[Coroutine[Any, Any, Any]]) -> list[Any]:
     try:
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
     except asyncio.CancelledError:
-        await _cancel_and_wait(tasks)
+        await cancel_and_wait(tasks)
         raise
     failure = next((task.exception() for task in tasks if task in done and _failed(task)), None)
     if failure is None:
@@ -57,10 +57,10 @@ async def settle_all(coroutines: list[Coroutine[Any, Any, Any]]) -> list[Any]:
             task.cancel()
         await asyncio.wait(tasks)
     except asyncio.CancelledError:
-        await _cancel_and_wait(tasks)
+        await cancel_and_wait(tasks)
         raise
     finally:
-        _retrieve(tasks)
+        retrieve_outcomes(tasks)
     raise failure
 
 
@@ -68,15 +68,18 @@ def _failed(task: asyncio.Future[Any]) -> bool:
     return task.done() and not task.cancelled() and task.exception() is not None
 
 
-async def _cancel_and_wait(tasks: Sequence[asyncio.Future[Any]]) -> None:
+async def cancel_and_wait(tasks: Collection[asyncio.Future[Any]]) -> None:
+    """Cancel *tasks* and wait until every one has ended, whatever cancellations the caller gets meanwhile; their
+    outcomes are marked as seen (:func:`retrieve_outcomes`)."""
     for task in tasks:
         task.cancel()
     await run_shielded(asyncio.wait(tasks))
-    _retrieve(tasks)
+    retrieve_outcomes(tasks)
 
 
-def _retrieve(tasks: Sequence[asyncio.Future[Any]]) -> None:
-    """Mark every finished task's outcome as seen (the first failure is raised by the caller)."""
+def retrieve_outcomes(tasks: Collection[asyncio.Future[Any]]) -> None:
+    """Mark every finished task's outcome as seen, so none is logged as never retrieved (the caller raises the
+    failure it reports itself)."""
     for task in tasks:
         if task.done() and not task.cancelled():
             task.exception()

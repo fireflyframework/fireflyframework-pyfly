@@ -49,11 +49,10 @@ import asyncio
 import contextlib
 import random
 import time
-from collections.abc import Collection
 from typing import Any
 
 from pyfly.data.transaction import detached, track_commits
-from pyfly.data.transaction.template import run_shielded
+from pyfly.transactional.core.backpressure import cancel_and_wait, retrieve_outcomes
 from pyfly.transactional.core.exceptions import OrchestrationError
 from pyfly.transactional.saga.core.context import SagaContext
 from pyfly.transactional.saga.engine.step_invoker import StepInvoker
@@ -102,21 +101,6 @@ def _as_step_failure(step_id: str, exc: BaseException) -> BaseException:
         f"step '{step_id}' ended cancelled although nothing cancelled it (it awaited something that was "
         "cancelled); the step failed"
     )
-
-
-async def _settle_cancelled(tasks: Collection[asyncio.Task[Any]]) -> None:
-    """Cancel *tasks* and wait until every one has ended, whatever cancellations the caller gets meanwhile."""
-    for task in tasks:
-        task.cancel()
-    await run_shielded(asyncio.wait(tasks))
-    _retrieve(tasks)
-
-
-def _retrieve(tasks: Collection[asyncio.Task[Any]]) -> None:
-    """Mark the outcome of every finished task as seen (the layer reports its first failure itself)."""
-    for task in tasks:
-        if task.done() and not task.cancelled():
-            task.exception()
 
 
 class SagaExecutionOrchestrator:
@@ -206,9 +190,9 @@ class SagaExecutionOrchestrator:
                         task.cancel()
                 await asyncio.wait(tasks.values())
         except asyncio.CancelledError:
-            await _settle_cancelled(tasks.values())
+            await cancel_and_wait(tasks.values())
             raise
-        _retrieve(tasks.values())
+        retrieve_outcomes(tasks.values())
         if state.failure is not None:
             raise state.failure
         for step_id, task in tasks.items():
