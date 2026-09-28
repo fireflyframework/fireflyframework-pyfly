@@ -66,9 +66,14 @@ Mutation raises `dataclasses.FrozenInstanceError`.
 
 An aggregate root extends `Entity[TID]` with a buffer of *pending*
 domain events. State changes happen through intent-revealing methods,
-which call `self.raise_event(event)` to queue an event. Repositories
-drain the buffer with `clear_events()` after persisting and the
-application service publishes the events to the bus.
+which call `self.raise_event(event)` to queue an event. The events are
+published **when the unit of work that persists the aggregate commits**,
+never before: the EDA module's `DomainEventPublisher` collects the events
+an aggregate raises inside a unit of work (and those of an aggregate a unit
+saves) and publishes them as the unit commits, to the application's event
+listeners and, when configured, through the transactional outbox (see
+[Domain events of aggregates](events.md#domain-events-of-aggregates)). A
+unit that rolls back publishes nothing.
 
 This is the *non-event-sourced* aggregate root. For the event-sourced
 variant (with `apply`/`replay`/`when`) see
@@ -76,6 +81,8 @@ variant (with `apply`/`replay`/`when`) see
 
 ```python
 from dataclasses import dataclass
+from pyfly.container import service
+from pyfly.data.transaction import transactional
 from pyfly.domain import AggregateRoot, BusinessRuleViolation, DomainEvent
 
 @dataclass(frozen=True)
@@ -95,12 +102,39 @@ class Order(AggregateRoot[str]):
         assert self.id is not None
         self.raise_event(OrderShipped(order_id=self.id, tracking_number=tracking_number))
 
-order = Order(id="o-1")
-order.ship("trk-42")
+@service
+class Shipping:
+    def __init__(self, orders: OrderRepository) -> None:
+        self.orders = orders
 
-events = order.clear_events()
-# publish events to the message broker, then commit the unit of work
+    @transactional
+    async def ship(self, order_id: str, tracking_number: str) -> None:
+        order = await self.orders.find(order_id)
+        order.ship(tracking_number)  # raises OrderShipped
+        await self.orders.add(order)
+        # OrderShipped is published as this unit commits: never if it rolls back
 ```
+
+Do not publish the events yourself before the unit of work commits: a rollback
+would leave them published and the change undone. Code that publishes by hand
+drains them with `clear_events()` *inside* the unit and hands them to a
+publisher that joins it (`DomainEventPublisher.publish(order)`, an outbox bus on
+the unit's datasource), or registers the publication with
+`pyfly.data.transaction.after_commit`.
+
+An aggregate may also be an ORM-mapped entity (`class Order(Base,
+AggregateRoot[int])`): an instance the ORM loads without running
+`AggregateRoot.__init__` still collects events.
+
+**Upgrading from 26.09.07: a behavior change.** The EDA auto-configuration's
+`DomainEventPublisher` is on by default and drains the pending events as the
+unit commits. An application that collected `pending_events()` (or called
+`clear_events()`) *after* the unit and published them to the EDA bus now finds
+the buffer empty, and its integration events silently stop. Set
+`pyfly.eda.domain-events.destination` to have the publisher send them through
+the EDA bus (in the unit, with an outbox bus), or set
+`pyfly.eda.domain-events.enabled: false` to keep publishing by hand (see
+[Domain events of aggregates](events.md#domain-events-of-aggregates)).
 
 ---
 
@@ -122,6 +156,22 @@ class CustomerRegistered(DomainEvent):
 evt = CustomerRegistered(customer_id="c-1", email="alice@example.com")
 print(evt.event_id, evt.occurred_at, evt.event_type)
 ```
+
+Every bus carries an event as JSON. `to_payload()` gives the event's fields as
+JSON values (an instant as ISO-8601 in UTC, a `Decimal` or `UUID` as a string,
+an `Enum` as its value, a nested dataclass as an object), and
+`from_payload(payload)` reads such a payload back into the typed event:
+
+```python
+payload = evt.to_payload()
+# {"event_id": "…", "occurred_at": "2026-09-27T10:30:15.250000+00:00",
+#  "customer_id": "c-1", "email": "alice@example.com"}
+assert CustomerRegistered.from_payload(payload) == evt
+```
+
+The CQRS command publisher and the domain-event publisher send this payload.
+Before 26.09.08 they sent `dataclasses.asdict(event)`, whose `datetime` no bus
+could serialize, and the failure was only logged.
 
 ---
 

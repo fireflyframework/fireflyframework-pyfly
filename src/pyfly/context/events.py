@@ -11,15 +11,35 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Application events and event bus for context lifecycle notifications."""
+"""Application events and event bus for context lifecycle notifications.
+
+A listener runs inline in :meth:`ApplicationEventBus.publish`, inside the caller's transaction when there is
+one, unless it declares the transaction phase it runs at (Spring's ``@TransactionalEventListener``)::
+
+    @app_event_listener(phase=TransactionPhase.AFTER_COMMIT)
+    async def send_receipt(self, event: OrderPlaced) -> None: ...
+
+- ``BEFORE_COMMIT``: inside the unit of work, right before it commits;
+- ``AFTER_COMMIT``: once it committed, outside it (not at all when it rolls back);
+- ``AFTER_ROLLBACK``: only once it rolled back;
+- ``AFTER_COMPLETION``: once it completed, either way.
+
+Outside a transaction there is nothing to wait for: every phase but ``AFTER_ROLLBACK`` runs at once, and an
+``AFTER_ROLLBACK`` listener does not run. A failure of an ``AFTER_*`` listener is logged and counted, never
+raised: the unit has completed (see :mod:`pyfly.data.transaction.synchronization`).
+"""
 
 from __future__ import annotations
 
+import functools
 import inspect
 from collections.abc import Awaitable, Callable, Iterable
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from pyfly.container.ordering import get_order
+
+if TYPE_CHECKING:
+    from pyfly.data.transaction.synchronization import TransactionPhase
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -50,23 +70,44 @@ class RefreshScopeRefreshedEvent(ApplicationEvent):
         self.refreshed = refreshed
 
 
-def app_event_listener(func: F) -> F:
-    """Mark a method as a listener for application events.
+@overload
+def app_event_listener(func: F, /) -> F: ...
+@overload
+def app_event_listener(*, phase: TransactionPhase | str | None = None) -> Callable[[F], F]: ...
+def app_event_listener(func: Any = None, /, *, phase: Any = None) -> Any:
+    """Mark a method as a listener for application events, bare or with the *phase* it runs at.
 
-    The event type is inferred from the method's type hint on the event parameter.
+    The event type is inferred from the method's type hint on the event parameter. *phase* is a
+    :class:`~pyfly.data.transaction.TransactionPhase` (or its name): the listener then runs at that phase of
+    the unit of work the event is published in (see the module documentation); without one it runs inline.
     """
-    func.__pyfly_app_event_listener__ = True  # type: ignore[attr-defined]
-    return func
+
+    def mark(target: F) -> F:
+        target.__pyfly_app_event_listener__ = True  # type: ignore[attr-defined]
+        target.__pyfly_event_phase__ = _phase(phase)  # type: ignore[attr-defined]
+        return target
+
+    if func is not None:
+        return mark(func)
+    return mark
+
+
+def _phase(phase: Any) -> TransactionPhase | None:
+    if phase is None:
+        return None
+    from pyfly.data.transaction.synchronization import TransactionPhase
+
+    return phase if isinstance(phase, TransactionPhase) else TransactionPhase(str(phase).upper())
 
 
 class ApplicationEventBus:
     """Simple in-process event bus for application lifecycle events."""
 
     def __init__(self) -> None:
-        # Per event type: (listener, owner class for @order, owning bean or None).
+        # Per event type: (listener, owner class for @order, owning bean or None, transaction phase or None).
         self._listeners: dict[
             type,
-            list[tuple[Callable[..., Awaitable[None]], type | None, object | None]],
+            list[tuple[Callable[..., Awaitable[None]], type | None, object | None, TransactionPhase | None]],
         ] = {}
 
     def subscribe(
@@ -76,15 +117,19 @@ class ApplicationEventBus:
         *,
         owner_cls: type | None = None,
         owner: object | None = None,
+        phase: TransactionPhase | str | None = None,
     ) -> None:
         """Register a listener for a specific event type (any type, not only ApplicationEvent).
 
         *owner* is the bean the listener belongs to; :meth:`unsubscribe_owners` removes its listeners
-        when the bean is destroyed.
+        when the bean is destroyed. *phase* is the transaction phase the listener runs at (by default the
+        one its ``@app_event_listener(phase=...)`` declares; none: inline).
         """
+        if phase is None:
+            phase = getattr(listener, "__pyfly_event_phase__", None)
         if event_type not in self._listeners:
             self._listeners[event_type] = []
-        self._listeners[event_type].append((listener, owner_cls, owner))
+        self._listeners[event_type].append((listener, owner_cls, owner, _phase(phase)))
         # Pre-sort so publish() doesn't need to sort per invocation
         self._listeners[event_type].sort(key=lambda e: get_order(e[1]) if e[1] else 0)
 
@@ -117,11 +162,17 @@ class ApplicationEventBus:
         *event* may be any object — lifecycle ``ApplicationEvent`` subclasses or arbitrary
         domain events. Listeners may be synchronous (``void``) or coroutine functions; the
         result is awaited only when awaitable, so a plain ``def`` listener does not crash
-        startup (audit #115).
+        startup (audit #115). A listener with a transaction phase is registered on the current unit of
+        work, to run at that phase (see the module documentation).
         """
-        for event_type, entries in self._listeners.items():
+        for event_type, entries in list(self._listeners.items()):
             if isinstance(event, event_type):
-                for listener, _owner_cls, _owner in entries:
+                for listener, _owner_cls, _owner, phase in list(entries):
+                    if phase is not None:
+                        from pyfly.data.transaction.synchronization import on_phase
+
+                        await on_phase(phase, functools.partial(listener, event))
+                        continue
                     result = listener(event)
                     if inspect.isawaitable(result):
                         await result

@@ -18,6 +18,7 @@ importable even when the optional broker libraries (aiokafka, redis,
 asyncpg) are not installed. Reach the implementations through their
 fully-qualified module path::
 
+    from pyfly.eda.adapters.database import DatabaseEventBus
     from pyfly.eda.adapters.kafka import KafkaEventBus
     from pyfly.eda.adapters.postgres import PostgresEventBus
     from pyfly.eda.adapters.redis import RedisStreamsEventBus

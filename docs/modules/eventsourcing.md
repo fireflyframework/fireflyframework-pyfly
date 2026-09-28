@@ -3,7 +3,7 @@
 `pyfly.eventsourcing` is a port of `org.fireflyframework.eventsourcing`.
 Aggregates emit `DomainEvent`s; an `EventStore` persists them; a
 repository replays the stream to reconstruct state; a snapshot store
-truncates replay cost; a `TransactionalOutbox` provides at-least-once
+truncates replay cost; a table-backed `TransactionalOutbox` provides transactional, at-least-once
 delivery to a broker; `ProjectionRunner` updates read models from the
 store's global stream, keeping its place in a `CheckpointStore`.
 
@@ -107,16 +107,47 @@ crossed_interval = (aggregate.version // snapshot_interval) > (previous_version 
 
 ## Outbox pattern
 
+`TransactionalOutbox` is a table-backed transactional outbox (the framework table
+`pyfly_outbox_events`, see [the transactional outbox](events.md#the-transactional-outbox-postgres-and-database)).
+`enqueue()` writes the event in the unit of work bound for the outbox's datasource: enqueued in the unit that
+appends the events or saves the aggregate, it exists exactly when that unit commits, and a rollback takes it
+back. A relay (a `CONSUMER_PHASE` lifecycle bean) hands every committed event to `publish`, attempts a failed
+one again after a back-off, keeps it in the dead letters after `max_attempts`, and prunes delivered events.
+Pending events survive a restart, and several processes may run the same outbox: each event goes to one.
+
 ```python
 from pyfly.eventsourcing import TransactionalOutbox
 
 async def publish(envelope):
     await broker.publish(envelope)
 
-outbox = TransactionalOutbox(publish=publish, max_attempts=5)
+outbox = TransactionalOutbox(publish=publish, datasource="primary", max_attempts=5)
 await outbox.start()
-await outbox.enqueue(envelope_for_event)
+
+@transactional
+async def open_account(command):
+    ...
+    await outbox.enqueue(envelope_for_event)   # published once this unit commits
+
+await outbox.pending()        # not delivered yet
+await outbox.dead_letters()   # failed on every attempt
 ```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `datasource` | the default datasource | Where the outbox table lives: a name, a `DataSource` or an `AsyncEngine`. |
+| `name` | `default` | Outboxes with different names on one datasource deliver apart. |
+| `max_attempts` | `5` | Attempts before an event goes to the dead letters. |
+| `backoff` | exponential, 1 s to 30 s | The delay before the next attempt of a failed event. |
+| `poll_interval_s` | `1.0` | How often the relay looks for events enqueued by other processes; an enqueue in this process wakes it when its unit commits. |
+| `publish_timeout` | `60.0` | Seconds a publish may take before the attempt counts as failed. |
+| `create_tables` | `True` | Create the outbox tables when they are missing (otherwise only check them). |
+
+Before 26.09.08 the outbox was a dictionary in the process: an event enqueued by a unit that then rolled back
+was published anyway, a restart lost everything pending, and nothing was ever removed. It now needs a data
+layer: an application without one gets `IllegalTransactionStateError` from `start()`. A delivered event leaves
+the table rather than being flagged: `OutboxRecord.delivered` stays in the record for compatibility and is always
+`False` in what `pending()` and `dead_letters()` return.
 
 ## Projections
 

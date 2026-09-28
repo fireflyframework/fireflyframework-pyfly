@@ -26,10 +26,23 @@ it runs outside one; nothing when it fails or rolls back), the bus evicts
 - every cached result of the query handlers tagged with ``@cache_evict(EventType)`` for an event the
   command produced (``domain_events`` on its result or on the command) or for an event its own handler is
   tagged with.
+
+When the handler ends with a cancellation or a commit whose outcome is unknown
+(:class:`~pyfly.data.transaction.CommitOutcomeUnknownError`), its own unit of work may have committed (a
+commit completes, shielded, before the cancellation is delivered): the bus evicts what it would have after a
+commit, then re-raises. An eviction too many costs a cache miss; one too few keeps a stale result.
+
+Event publication: the command's ``domain_events`` are published once its unit of work commits, through an
+``after_commit`` synchronization (at once when it runs outside one; not at all when it rolls back), so a
+wider unit that fails after the command publishes nothing. A publisher that joins transactions (an outbox
+bus: ``joins_transactions``) publishes at once instead, inside the unit, which commits or rolls back the
+events with it. Deferred to the commit, a publication failure is logged and counted by the unit, not raised
+(``EventFailureStrategy.RAISE`` applies when the bus publishes at once).
 """
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 from typing import Any, Protocol, TypeVar, runtime_checkable
@@ -46,6 +59,7 @@ from pyfly.cqrs.query.handler import QueryHandler
 from pyfly.cqrs.tracing.correlation import CorrelationContext
 from pyfly.cqrs.types import Command, Query
 from pyfly.cqrs.validation.exceptions import CqrsValidationException
+from pyfly.data.transaction import CommitOutcomeUnknownError, after_commit
 from pyfly.data.transaction.template import shielded
 
 R = TypeVar("R")
@@ -156,10 +170,16 @@ class DefaultCommandBus:
 
             # 4. Execute
             handler = self._registry.find_command_handler(type(command))
-            if context is not None:
-                result = await handler.handle_with_context(command, context)
-            else:
-                result = await handler.handle(command)
+            try:
+                if context is not None:
+                    result = await handler.handle_with_context(command, context)
+                else:
+                    result = await handler.handle(command)
+            except (asyncio.CancelledError, CommitOutcomeUnknownError):
+                # The handler's own unit may have committed before the cancellation (or the lost connection)
+                # reached it: evict what it made stale all the same, then re-raise.
+                await self._invalidate_after_unknown_outcome(command, handler)
+                raise
 
             # 5. Query-cache invalidation (after the commit inside a unit of work). It runs to completion even
             # when the task is cancelled meanwhile: the handler may have committed already.
@@ -199,6 +219,13 @@ class DefaultCommandBus:
                 CorrelationContext.clear()
             else:
                 CorrelationContext.set_correlation_id(previous_cid)
+
+    async def _invalidate_after_unknown_outcome(self, command: Command[Any], handler: CommandHandler[Any, Any]) -> None:
+        if self._query_cache is None or not self._query_cache.is_available:
+            return
+        stale = self._stale_queries(command, None, handler)
+        if stale is not None:
+            await shielded(self._invalidate_queries(command, *stale))
 
     def _stale_queries(
         self, command: Command[Any], result: Any, handler: CommandHandler[Any, Any]
@@ -268,7 +295,7 @@ class DefaultCommandBus:
         return produced
 
     async def _try_publish_events(self, command: Any, result: Any) -> None:
-        """Publish domain events if the handler/command produced any.
+        """Publish domain events if the handler/command produced any, after the commit (module documentation).
 
         The destination is resolved from the matched handler's
         ``__pyfly_event_destination__`` attribute (set by
@@ -278,29 +305,41 @@ class DefaultCommandBus:
         publisher = self._event_publisher
         if publisher is None:
             return
-        events = getattr(result, "domain_events", None) or getattr(command, "domain_events", None)
-        if events:
-            # Resolve the optional destination from the handler's decorator
-            # metadata so the bus honours @publish_domain_event(destination=…).
-            handler = self._registry.find_command_handler(type(command))
-            destination: str | None = getattr(handler, "__pyfly_event_destination__", None)
+        events = list(getattr(result, "domain_events", None) or getattr(command, "domain_events", None) or ())
+        if not events:
+            return
+        # Resolve the optional destination from the handler's decorator
+        # metadata so the bus honours @publish_domain_event(destination=…).
+        handler = self._registry.find_command_handler(type(command))
+        destination: str | None = getattr(handler, "__pyfly_event_destination__", None)
+        if getattr(publisher, "joins_transactions", False):
+            await self._publish_events(command, events, destination)  # in the unit, which carries them
+            return
 
-            failed_events: list[tuple[Any, Exception]] = []
-            for event in events:
-                try:
-                    await publisher.publish(event, destination=destination)
-                except Exception as exc:
-                    _logger.error("Failed to publish domain event %s: %s", type(event).__name__, exc)
-                    failed_events.append((event, exc))
-            if failed_events and self._event_failure_strategy == EventFailureStrategy.RAISE:
-                first_event, first_exc = failed_events[0]
-                raise CommandProcessingException(
-                    message=(
-                        f"{len(failed_events)} domain event(s) failed to publish "
-                        f"for {type(command).__name__}; first failure: {first_exc}"
-                    ),
-                    command_type=type(command),
-                    cause=first_exc,
-                ) from first_exc
-            elif failed_events:
-                _logger.error("%d domain event(s) failed to publish", len(failed_events))
+        async def publish_after_commit() -> None:
+            await self._publish_events(command, events, destination)
+
+        await after_commit(publish_after_commit)
+
+    async def _publish_events(self, command: Any, events: list[Any], destination: str | None) -> None:
+        publisher = self._event_publisher
+        assert publisher is not None
+        failed_events: list[tuple[Any, Exception]] = []
+        for event in events:
+            try:
+                await publisher.publish(event, destination=destination)
+            except Exception as exc:
+                _logger.error("Failed to publish domain event %s: %s", type(event).__name__, exc, exc_info=True)
+                failed_events.append((event, exc))
+        if failed_events and self._event_failure_strategy == EventFailureStrategy.RAISE:
+            _first_event, first_exc = failed_events[0]
+            raise CommandProcessingException(
+                message=(
+                    f"{len(failed_events)} domain event(s) failed to publish "
+                    f"for {type(command).__name__}; first failure: {first_exc}"
+                ),
+                command_type=type(command),
+                cause=first_exc,
+            ) from first_exc
+        if failed_events:
+            _logger.error("%d domain event(s) failed to publish", len(failed_events))

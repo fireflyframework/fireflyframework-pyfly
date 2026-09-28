@@ -16,6 +16,11 @@
 Import concrete adapter types from the adapter package::
 
     from pyfly.eda.adapters.memory import InMemoryEventBus
+    from pyfly.eda.adapters.database import DatabaseEventBus
+
+The transactional outbox the ``postgres`` and ``database`` buses (and ``eventsourcing.TransactionalOutbox``)
+run on is :mod:`pyfly.eda.outbox`; the publication of aggregates' domain events at commit is
+:mod:`pyfly.eda.domain_events`.
 """
 
 from pyfly.eda.circuit_breaker import (
@@ -28,6 +33,7 @@ from pyfly.eda.dlq import (
     EdaDeadLetterEntry,
     EdaDeadLetterStore,
     InMemoryEdaDeadLetterStore,
+    SqlEdaDeadLetterStore,
 )
 from pyfly.eda.filter import EventFilter, HeaderEventFilter, PredicateEventFilter
 from pyfly.eda.ports.outbound import EventHandler, EventPublisher
@@ -57,6 +63,7 @@ __all__ = [
     "JsonEventSerializer",
     "PredicateEventFilter",
     "ProtobufEventSerializer",
+    "SqlEdaDeadLetterStore",
     "event_listener",
     "event_publisher",
     "publish_result",

@@ -13,12 +13,10 @@
 # limitations under the License.
 """The damage the wildcard subscription did, named.
 
-``PostgresEventBus._drain`` refuses to advance the group's cursor while no
-handler is registered, so events published before a worker subscribed are not
-lost. The CQRS cache bridge used to register a wildcard handler in every process
-whether or not it had a rule, which made ``_handlers`` non-empty and defeated
-that guard: an API process drained the worker's queue into a no-op and the jobs
-stayed queued forever.
+The outbox bus claims nothing, and registers no consumer group, while no handler is subscribed, so events
+published before a worker subscribed wait for it. The CQRS cache bridge used to register a wildcard handler
+in every process whether or not it had a rule, which made the bus a consumer: an API process drained the
+worker's queue into a no-op and the jobs stayed queued forever.
 """
 
 from __future__ import annotations
@@ -31,7 +29,8 @@ from pyfly.eda.adapters.postgres import PostgresEventBus
 
 
 def _bus_and_bridge() -> tuple[PostgresEventBus, EdaCacheInvalidationBridge]:
-    bus = PostgresEventBus(dsn="postgresql://x/y", group="workers")
+    # No database behind the bus: any claim or registration would fail to connect.
+    bus = PostgresEventBus(datasource="no-such-datasource", group="workers")
     return bus, EdaCacheInvalidationBridge(QueryCacheAdapter(cache=None))
 
 
@@ -39,21 +38,19 @@ def _bus_and_bridge() -> tuple[PostgresEventBus, EdaCacheInvalidationBridge]:
 async def test_a_rule_less_bridge_leaves_the_bus_with_no_handlers() -> None:
     bus, bridge = _bus_and_bridge()
     bridge.subscribe(bus)
-    assert bus._handlers == []
+    assert bus.subscriptions == []
 
-    # _drain() returns on the handler guard before it ever acquires a
-    # connection — with no pool, reaching the pool would raise.
-    assert bus._pool is None
-    await bus._drain()
+    # The relay returns before it ever reaches the datasource.
+    assert await bus.relay.run_once() == 0
 
 
 @pytest.mark.asyncio
 async def test_a_bridge_with_a_rule_is_a_real_consumer() -> None:
-    """The contrast: a bridge that has work to do does register, and does drain."""
+    """The contrast: a bridge that has work to do does subscribe, and does claim."""
     bus, bridge = _bus_and_bridge()
     bridge.register("order.updated", "order:{order_id}")
     bridge.subscribe(bus)
-    assert [pattern for pattern, _ in bus._handlers] == ["order.updated"]
+    assert [subscription.pattern for subscription in bus.subscriptions] == ["order.updated"]
 
-    with pytest.raises(AttributeError):
-        await bus._drain()  # past the guard, into the (absent) pool
+    with pytest.raises(Exception, match="no-such-datasource|transaction manager|application context"):
+        await bus.relay.run_once()  # past the guard, into the (absent) datasource

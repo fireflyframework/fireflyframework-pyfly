@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from pyfly.data.relational.datasource_registry import DataSourceConfigurationError, DataSourceRegistry
 from pyfly.eda.adapters.memory import InMemoryEventBus
 from pyfly.eda.auto_configuration import EdaAutoConfiguration
+from pyfly.testing import pyfly_config
 
 
 def _config(values: dict[str, object]) -> object:
@@ -55,28 +58,83 @@ class TestEdaAutoConfiguration:
             assert bus._streams == ["a", "b"]
             assert bus._group == "flydesk-idp"
 
-    def test_postgres_provider(self) -> None:
+    def test_postgres_provider(self, tmp_path: Path) -> None:
         from pyfly.eda.adapters.postgres import PostgresEventBus
 
-        bus = EdaAutoConfiguration().event_publisher(
-            _config(
-                {
-                    "pyfly.eda.provider": "postgres",
-                    "pyfly.eda.postgres.dsn": "postgresql://x/y",
-                    "pyfly.eda.destinations": "flydesk.idp.jobs",
-                    "pyfly.eda.postgres.channel": "flydesk_eda",
-                }
-            )
+        config = pyfly_config(
+            base={
+                "pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                "pyfly.eda.provider": "postgres",
+                "pyfly.eda.postgres.dsn": "postgresql://x/y",
+                "pyfly.eda.destinations": "flydesk.idp.jobs",
+                "pyfly.eda.postgres.channel": "flydesk_eda",
+            }
         )
+        bus = EdaAutoConfiguration().event_publisher(config)
         assert isinstance(bus, PostgresEventBus)
         assert bus._destinations == ["flydesk.idp.jobs"]
         assert bus._channel == "flydesk_eda"
+        # pyfly.eda.postgres.dsn is an alias resolved through the registry: a datasource of its own, "eda".
+        datasource = bus.outbox.datasource
+        assert datasource is DataSourceRegistry.for_config(config).get("eda")
 
-    def test_postgres_provider_requires_dsn(self) -> None:
+    def test_postgres_provider_without_a_dsn_uses_the_primary_datasource(self, tmp_path: Path) -> None:
+        """Before 26.09.08 pyfly.eda.postgres.dsn was required: the bus opened a pool of its own."""
+        config = pyfly_config(
+            base={
+                "pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                "pyfly.eda.provider": "postgres",
+            }
+        )
+        bus = EdaAutoConfiguration().event_publisher(config)
+        assert bus.outbox.datasource is DataSourceRegistry.for_config(config).primary  # type: ignore[attr-defined]
+
+    def test_postgres_provider_without_any_datasource_names_the_missing_url(self) -> None:
         import pytest
 
-        with pytest.raises(ValueError, match="postgres.dsn is required"):
-            EdaAutoConfiguration().event_publisher(_config({"pyfly.eda.provider": "postgres"}))
+        with pytest.raises(DataSourceConfigurationError, match="pyfly.data.relational.url"):
+            EdaAutoConfiguration().event_publisher(pyfly_config(base={"pyfly.eda.provider": "postgres"}))
+
+    def test_database_provider_takes_the_outbox_settings(self, tmp_path: Path) -> None:
+        from pyfly.eda.adapters.database import DatabaseEventBus
+        from pyfly.eda.outbox import StartPosition
+        from pyfly.eda.types import ErrorStrategy
+
+        config = pyfly_config(
+            base={
+                "pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                "pyfly.data.relational.datasources.reporting.url": f"sqlite+aiosqlite:///{tmp_path / 'r.db'}",
+                "pyfly.eda.provider": "database",
+                "pyfly.eda.group": "billing",
+                "pyfly.eda.outbox.datasource": "reporting",
+                "pyfly.eda.outbox.poll-interval": "250ms",
+                "pyfly.eda.outbox.start": "earliest",
+                "pyfly.eda.outbox.error-strategy": "log_and_continue",
+                "pyfly.eda.outbox.auto-create-tables": "false",
+            }
+        )
+        bus = EdaAutoConfiguration().event_publisher(config)
+        assert type(bus) is DatabaseEventBus
+        assert bus.group == "billing"
+        assert bus.outbox.datasource is DataSourceRegistry.for_config(config).get("reporting")
+        assert bus.relay.poll_interval == 0.25
+        assert bus.relay._start_position is StartPosition.EARLIEST
+        assert bus.relay._error_strategy is ErrorStrategy.LOG_AND_CONTINUE
+        assert bus.outbox.creates_tables is False
+
+    def test_a_datasource_and_a_url_for_the_bus_are_exclusive(self, tmp_path: Path) -> None:
+        import pytest
+
+        config = pyfly_config(
+            base={
+                "pyfly.data.relational.url": f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+                "pyfly.eda.provider": "postgres",
+                "pyfly.eda.postgres.datasource": "primary",
+                "pyfly.eda.postgres.dsn": "postgresql://x/y",
+            }
+        )
+        with pytest.raises(DataSourceConfigurationError, match="not both"):
+            EdaAutoConfiguration().event_publisher(config)
 
     def test_auto_provider_picks_kafka_when_available(self) -> None:
         with patch("pyfly.config.auto.AutoConfiguration.is_available") as is_avail:
@@ -122,3 +180,32 @@ def test_detect_provider_parametrized(
     with patch("pyfly.config.auto.AutoConfiguration.is_available") as is_avail:
         is_avail.side_effect = lambda mod: mod in available_modules
         assert EdaAutoConfiguration.detect_provider() == expected_provider
+
+
+from pyfly.container import bean, configuration  # noqa: E402 — kept near the test that uses them
+from pyfly.eda.domain_events import DomainEventPublisher, active_domain_event_publisher  # noqa: E402
+
+_OWN_PUBLISHER = DomainEventPublisher()
+
+
+@configuration
+class _OwnDomainEventPublisher:
+    @bean
+    def domain_event_publisher(self) -> DomainEventPublisher:
+        return _OWN_PUBLISHER
+
+
+async def test_an_application_s_own_domain_event_publisher_replaces_the_auto_configured_one() -> None:
+    """Both were started, and whichever started last silently collected every domain event."""
+    from pyfly.context.application_context import ApplicationContext
+
+    context = ApplicationContext(pyfly_config(base={"pyfly.eda.provider": "memory"}))
+    context.register_bean(_OwnDomainEventPublisher)
+    context.register_bean(EdaAutoConfiguration)
+    await context.start()
+    try:
+        assert context.get_beans_of_type(DomainEventPublisher) == [_OWN_PUBLISHER]
+        assert active_domain_event_publisher() is _OWN_PUBLISHER
+    finally:
+        await context.stop()
+    assert active_domain_event_publisher() is None
