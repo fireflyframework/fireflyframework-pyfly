@@ -35,7 +35,7 @@ from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTrans
 from pyfly.data.transaction import TransactionTemplate, is_transaction_active
 from pyfly.eda.adapters.memory import InMemoryEventBus
 from pyfly.eda.domain_events import EVENT_ID_HEADER
-from pyfly.eda.outbox import SqlOutboxStore
+from pyfly.eda.outbox import EVERY_DESTINATION, SqlOutboxStore
 from pyfly.eda.outbox_forwarding import (
     FORWARD_GROUP_PREFIX,
     OutboxForwarder,
@@ -225,6 +225,48 @@ async def test_events_other_writers_append_for_the_forwarded_destinations_are_fo
     await _drain(publisher)
 
     assert consumer.numbers() == ["orders"]
+
+
+async def test_the_every_destination_wildcard_forwards_every_destination_through_the_outbox(
+    relational_backend: RelationalBackend,
+) -> None:
+    """``destinations=["*"]`` (:data:`EVERY_DESTINATION`, the default of ``forward.destinations``) is every
+    destination, as ``None`` is: a publish is appended to the store in the unit and forwarded by the relay, never
+    sent to the transport at the commit (at most once) as a destination the forwarder does not take is."""
+    engine = relational_backend.create_engine()
+    publisher, _bus, consumer = await _publisher(engine, destinations=["orders", EVERY_DESTINATION])
+    template = TransactionTemplate(SqlAlchemyTransactionManager.for_engine(engine))
+    assert publisher.forwarder.destinations is None
+    assert publisher.forwarder.forwards("orders") and publisher.forwarder.forwards("payments")
+
+    with pytest.raises(RuntimeError, match="declined"):
+        async with template.transaction():
+            await publisher.publish("payments", "payment.taken", {"n": "rolled back"})
+            raise RuntimeError("declined")
+    async with template.transaction():
+        await publisher.publish("payments", "payment.taken", {"n": 1})
+    assert consumer.received == []  # nothing was sent at the commit: the event waits in the store
+    assert [p.envelope.payload for p in await publisher.pending()] == [{"n": 1}]
+
+    assert await publisher.relay.run_once() == 1
+    assert consumer.numbers() == [1]
+    assert await publisher.pending() == []
+
+
+async def test_an_empty_event_id_header_is_replaced_by_the_outbox_events_id(
+    relational_backend: RelationalBackend,
+) -> None:
+    """A publisher that had no id to give (a domain event object without ``event_id`` sets the header to ``""``)
+    does not make every such event deduplicate to one id: the forwarded copy carries the outbox event's id."""
+    engine = relational_backend.create_engine()
+    publisher, _bus, consumer = await _publisher(engine)
+
+    await publisher.publish("orders", "order.placed", {"n": 1}, {EVENT_ID_HEADER: ""})
+    await publisher.publish("orders", "order.placed", {"n": 2}, {EVENT_ID_HEADER: " "})
+    await _drain(publisher)
+
+    first, second = (envelope.headers[EVENT_ID_HEADER] for envelope in consumer.received)
+    assert first.strip() and second.strip() and first != second
 
 
 async def test_a_destination_the_forwarder_does_not_take_goes_straight_to_the_transport_after_the_commit(

@@ -34,8 +34,8 @@ The guarantees:
 - **A unit that commits publishes its event at least once.** In the normal path once; again when a publish failed
   (after the retry policy's back-off), and when the process died after the broker took the event and before the
   delivery was settled: the lease ends and a relay (this process after a restart, or another one) publishes it
-  again. Every copy carries the event's id in the ``x-pyfly-event-id`` header (a header the publisher set, a
-  domain event's id, is kept), so a consumer deduplicates on it.
+  again. Every copy carries the event's id in the ``x-pyfly-event-id`` header (a non-blank one the publisher
+  set, a domain event's id, is kept), so a consumer deduplicates on it.
 - **Order.** The events a group is owed are claimed in publication order, and a claim is published in that order
   by one relay at a time, but a failed publish is attempted again after later events, and the relays of several
   processes claim side by side: consume events as independent facts, or order them yourself.
@@ -44,10 +44,10 @@ The guarantees:
   transport; nothing is forwarded twice except after a lost lease (a crash, or a publish that outlasted
   ``claim_timeout``). An event that failed on every attempt stays in the store's dead letters.
 
-The forwarder's group is registered for its destinations (every one by default), so an event another writer of
-the store appends to one of them is forwarded too. A publish to a destination the forwarder does not take goes
-straight to the transport, after the caller's unit commits (at once outside one): at most once, and lost when the
-process dies in between.
+The forwarder's group is registered for its destinations (every one by default, and when they include ``"*"``),
+so an event another writer of the store appends to one of them is forwarded too. A publish to a destination the
+forwarder does not take goes straight to the transport, after the caller's unit commits (at once outside one): at
+most once, and lost when the process dies in between.
 
 ``pyfly.eda.outbox.enabled`` wraps the configured provider's publisher (see
 :mod:`pyfly.eda.auto_configuration`); the ``database`` and ``postgres`` providers are the outbox already.
@@ -66,7 +66,7 @@ from typing import TYPE_CHECKING, Any
 from pyfly.eda.domain_events import EVENT_ID_HEADER
 from pyfly.eda.outbox import OutboxRelay, OutboxSettings, describe_error
 from pyfly.eda.ports.outbound import EventHandler, EventPublisher
-from pyfly.eda.ports.outbox import OutboxStore, Retention, StartPosition
+from pyfly.eda.ports.outbox import EVERY_DESTINATION, OutboxStore, Retention, StartPosition
 from pyfly.eda.types import ErrorStrategy, EventEnvelope
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
 
@@ -209,16 +209,17 @@ class OutboxForwarder(OutboxRelay):
     - *name*: the transport's name (``kafka``, ``rabbitmq``...; by default its class name), and *group* the
       consumer group (by default ``pyfly.forward:<name>``). The processes of one group share its events: give
       forwarders to different transports different groups;
-    - *destinations*: the destinations it forwards (``None``: every one); the group is registered for them,
-      starting at *start_position*;
+    - *destinations*: the destinations it forwards (``None``, or a list that holds ``"*"``
+      (:data:`~pyfly.eda.ports.outbox.EVERY_DESTINATION`): every one); the group is registered for them, starting
+      at *start_position*;
     - *retry*, *error_strategy*, *dead_letter_store*, *poll_interval*, *batch_size*, *claim_timeout*,
       *handler_timeout* (the longest one publish may take), *retention* (``None``: the default
       :class:`~pyfly.eda.ports.outbox.Retention`), *settings* (its shutdown timeout) and *owner*: see
       :class:`~pyfly.eda.outbox.OutboxRelay`.
 
     Its one subscription publishes every claimed event to the transport, outside any unit of work, with the
-    event's id in the ``x-pyfly-event-id`` header; a publish that raises (or outlasts *handler_timeout*) is a
-    failed attempt.
+    event's id in the ``x-pyfly-event-id`` header (a non-blank one the publisher set is kept); a publish that
+    raises (or outlasts *handler_timeout*) is a failed attempt.
     """
 
     def __init__(
@@ -243,6 +244,8 @@ class OutboxForwarder(OutboxRelay):
     ) -> None:
         self._transport_name = name or type(transport).__name__
         group = group or forward_group(self._transport_name)
+        if destinations is not None and EVERY_DESTINATION in destinations:
+            destinations = None  # "*" is every destination, as the store registers it: forwards() takes them all
         super().__init__(
             store,
             group=group,
@@ -284,7 +287,9 @@ class OutboxForwarder(OutboxRelay):
         """Publish one claimed event to the transport, outside the units of work of the task that runs it."""
         from pyfly.data.transaction import outside_transaction
 
-        headers = {EVENT_ID_HEADER: envelope.event_id, **envelope.headers}
+        headers = dict(envelope.headers)
+        if not headers.get(EVENT_ID_HEADER, "").strip():  # a blank id would make every such event one duplicate
+            headers[EVENT_ID_HEADER] = envelope.event_id
         with outside_transaction():
             await self._transport.publish(envelope.destination, envelope.event_type, envelope.payload, headers)
 
