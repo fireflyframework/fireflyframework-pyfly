@@ -173,6 +173,19 @@ async def test_a_revoked_session_stays_revoked(relational_backend: RelationalBac
         await logins.a_revoked_session_stays_revoked(replica, revocation)
 
 
+@pytest.mark.parametrize("via", ["logout", "logout-filter"])
+async def test_a_logout_survives_a_registry_outage(relational_backend: RelationalBackend, via: str) -> None:
+    """The registry's table is gone (its database fails from then on) while the session store answers."""
+    async with _replicas(relational_backend, count=1) as [(store, registry, engine)]:
+        replica = logins.Replica(store, _controller(store, registry, max_sessions=1))
+
+        async def break_registry() -> None:
+            async with engine.begin() as connection:
+                await connection.run_sync(session_registrations.drop)
+
+        await logins.a_logout_survives_a_registry_outage(replica, via, break_registry)
+
+
 async def test_one_login_at_a_time_through_the_login_flow_keeps_the_latest_sessions(
     relational_backend: RelationalBackend,
 ) -> None:

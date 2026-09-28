@@ -23,7 +23,9 @@ from pyfly.container.container import Container
 from pyfly.core.config import Config
 from pyfly.security.auto_configuration import LogoutAutoConfiguration
 from pyfly.security.context import SecurityContext
+from pyfly.session.adapters.memory import InMemorySessionStore
 from pyfly.session.concurrency import ConcurrencyControlPolicy, InMemorySessionRegistry, SessionConcurrencyController
+from pyfly.session.filter import SessionFilter
 from pyfly.session.session import HttpSession
 from pyfly.web.adapters.starlette.filters.logout_filter import LogoutFilter
 
@@ -129,3 +131,35 @@ class TestLogoutDeregistersTheSession:
         response = await logout_filter.do_filter(request, _call_next)
 
         assert response.status_code == 302 and request.state.session.invalidated
+
+    @pytest.mark.asyncio
+    async def test_a_registry_outage_does_not_undo_the_logout(self) -> None:
+        """The deregistration ran first and its failure answered 500 with the session never invalidated: it stayed
+        in the store, logged in. The logout now ends the session and logs the failed deregistration."""
+
+        class _Unreachable(InMemorySessionRegistry):
+            async def deregister(self, principal: str, session_id: str) -> None:
+                raise ConnectionError("the session registry is unreachable")
+
+        store = InMemorySessionStore()
+        await store.save("sid", {"SECURITY_CONTEXT": SecurityContext(user_id="ada")}, ttl=60)
+        controller = SessionConcurrencyController(_Unreachable(), ConcurrencyControlPolicy(max_sessions=1))
+        logout_filter = LogoutFilter(concurrency=controller)
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/logout",
+                "headers": [(b"cookie", b"PYFLY_SESSION=sid")],
+                "query_string": b"",
+            }
+        )
+
+        async def through_the_logout_filter(inner: Request) -> Response:
+            response: Response = await logout_filter.do_filter(inner, _call_next)
+            return response
+
+        response = await SessionFilter(store=store).do_filter(request, through_the_logout_filter)
+
+        assert response.status_code == 302
+        assert not await store.exists("sid")

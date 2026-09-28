@@ -274,14 +274,22 @@ class OAuth2LoginHandler:
     # ------------------------------------------------------------------
 
     async def _handle_logout(self, request: Request) -> Response:
-        """Invalidate the session and redirect to the root."""
+        """Invalidate the session, deregister it from the concurrency controller, and redirect to the root.
+
+        The session is invalidated first: a deregistration that fails (the registry's database or Redis down,
+        a pool timeout) is logged as ``session_deregistration_failed`` and never undoes the logout. The
+        controller drops the registration left behind as dead, at the principal's next capped login or
+        through the purge.
+        """
         session: HttpSession = request.state.session
-        if self._concurrency is not None:
-            principal = session.get_attribute(_SECURITY_CONTEXT_KEY)
-            user_id = getattr(principal, "user_id", None)
-            if user_id is not None:
-                await self._concurrency.on_logout(user_id, session.id)
+        user_id = getattr(session.get_attribute(_SECURITY_CONTEXT_KEY), "user_id", None)
+        session.set_attribute(_SECURITY_CONTEXT_KEY, None)
         session.invalidate()
+        if self._concurrency is not None and user_id is not None:
+            try:
+                await self._concurrency.on_logout(user_id, session.id)
+            except Exception:  # noqa: BLE001 — the session has ended already; a stale registration is dropped later
+                logger.warning("session_deregistration_failed", exc_info=True)
         return RedirectResponse(url="/", status_code=302)
 
     # ------------------------------------------------------------------

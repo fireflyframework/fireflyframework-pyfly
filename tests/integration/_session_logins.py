@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -276,18 +276,8 @@ async def a_revoked_session_stays_revoked(replica: Replica, revocation: str) -> 
     if revocation == "eviction":
         second = await login(replica, await start_login(replica.store))
         assert second.status == 302
-    elif revocation == "logout":
-
-        async def oauth2_logout(request: Request) -> Response:
-            return await replica.handler._handle_logout(request)
-
-        await replica.session_filter.do_filter(app_request(s1, "/logout"), oauth2_logout)
     else:
-
-        async def logout_filter(request: Request) -> Response:
-            return await replica.logout_filter.do_filter(request, _past_the_logout)
-
-        await replica.session_filter.do_filter(app_request(s1, "/logout"), logout_filter)
+        assert (await logout(replica, s1, revocation)).status_code == 302
     assert not await replica.store.exists(s1)
 
     release.set()
@@ -300,6 +290,43 @@ async def a_revoked_session_stays_revoked(replica: Replica, revocation: str) -> 
     assert s1 not in session_cookies(r_response), f"{revocation}: the response sends the revoked session's cookie"
 
 
+async def logout(replica: Replica, session_id: str, via: str) -> Response:
+    """The logout request of the browser holding *session_id*, through *replica*'s session filter and the OAuth2
+    login handler's logout (*via* ``logout``) or the generic logout filter (``logout-filter``)."""
+
+    async def oauth2_logout(request: Request) -> Response:
+        return await replica.handler._handle_logout(request)
+
+    async def logout_filter(request: Request) -> Response:
+        response: Response = await replica.logout_filter.do_filter(request, _past_the_logout)
+        return response
+
+    handler = oauth2_logout if via == "logout" else logout_filter
+    response: Response = await replica.session_filter.do_filter(app_request(session_id, "/logout"), handler)
+    return response
+
+
 async def _past_the_logout(request: Request) -> Response:
     """What the logout filter calls next, which a logout request never reaches."""
     raise AssertionError("the logout filter passed a logout request on")
+
+
+async def a_logout_survives_a_registry_outage(
+    replica: Replica, via: str, break_registry: Callable[[], Awaitable[None]]
+) -> None:
+    """The session registry fails (a pool timeout, a database or Redis outage) while the session store answers.
+    A logout through the OAuth2 login handler (*via* ``logout``) or the generic logout filter (``logout-filter``)
+    still ends the session: it answers 302, the session is deleted, and a later request with its cookie is
+    anonymous. The logout deregistered the session first and answered 500 with the session left logged in; the
+    registration left behind is now dropped by the controller as dead."""
+    first = await login(replica, await start_login(replica.store))
+    assert first.status == 302
+    s1 = first.session_id
+    assert await authenticated_as(replica, s1) == replica.principal
+    await break_registry()
+
+    response = await logout(replica, s1, via)
+
+    assert response.status_code == 302, f"{via}: the logout failed"
+    assert not await replica.store.exists(s1), f"{via}: the logged-out session is still in the store"
+    assert await authenticated_as(replica, s1) is None, f"{via}: the logged-out session still authenticates"

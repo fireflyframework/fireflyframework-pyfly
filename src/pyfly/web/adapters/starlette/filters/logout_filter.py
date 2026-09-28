@@ -51,7 +51,10 @@ class LogoutFilter(OncePerRequestFilter):
             session from it, so the per-principal cap stops counting the session at once.
             Without it the registration stays until the controller drops it as dead (at the
             principal's next capped login, or through the purge) — and, beside a controller
-            with no session store to check, counts until the session is evicted.
+            with no session store to check, counts until the session is evicted. The session
+            is invalidated before it is deregistered: a deregistration that fails (the
+            registry down) is logged as ``session_deregistration_failed`` and never undoes
+            the logout.
     """
 
     __pyfly_order__ = HIGHEST_PRECEDENCE + 235
@@ -80,10 +83,14 @@ class LogoutFilter(OncePerRequestFilter):
         session = getattr(getattr(request, "state", None), "session", None)
         if session is not None:
             user_id = getattr(session.get_attribute(_SECURITY_CONTEXT_KEY), "user_id", None)
-            if self._concurrency is not None and user_id is not None:
-                await self._concurrency.on_logout(user_id, session.id)
             session.set_attribute(_SECURITY_CONTEXT_KEY, None)
             session.invalidate()
+            if self._concurrency is not None and user_id is not None:
+                # After the invalidation: a failed deregistration never undoes the logout.
+                try:
+                    await self._concurrency.on_logout(user_id, session.id)
+                except Exception:  # noqa: BLE001 — the session has ended already; a stale registration is dropped later
+                    logger.warning("session_deregistration_failed", exc_info=True)
         if hasattr(request, "state"):
             from pyfly.security.context import SecurityContext
 

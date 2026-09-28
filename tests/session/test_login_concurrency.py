@@ -26,6 +26,7 @@ shared with the SQL and Redis integration tests (``tests/integration/_session_lo
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -133,6 +134,33 @@ async def test_a_revoked_session_stays_revoked(revocation: str) -> None:
     replica = logins.Replica(store, _controller(store, max_sessions=1, strategy="evict-oldest"))
 
     await logins.a_revoked_session_stays_revoked(replica, revocation)
+
+
+class _RegistryDown(InMemorySessionRegistry):
+    """The in-memory registry, whose deregistrations fail once :attr:`down` is set (a registry outage)."""
+
+    down = False
+
+    async def deregister(self, principal: str, session_id: str) -> None:
+        if self.down:
+            raise ConnectionError("the session registry is unreachable")
+        await super().deregister(principal, session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["logout", "logout-filter"])
+async def test_a_logout_survives_a_registry_outage(via: str, caplog: pytest.LogCaptureFixture) -> None:
+    store = _YieldingStore()
+    registry = _RegistryDown()
+    controller = SessionConcurrencyController(registry, ConcurrencyControlPolicy(max_sessions=1), session_store=store)
+
+    async def break_registry() -> None:
+        registry.down = True
+
+    with caplog.at_level(logging.WARNING):
+        await logins.a_logout_survives_a_registry_outage(logins.Replica(store, controller), via, break_registry)
+
+    assert "session_deregistration_failed" in caplog.messages
 
 
 @pytest.mark.asyncio
