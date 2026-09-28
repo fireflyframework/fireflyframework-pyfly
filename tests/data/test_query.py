@@ -21,7 +21,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import Integer, String, text
-from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects import mssql, mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -31,7 +31,7 @@ from pyfly.data.query import modifying
 from pyfly.data.query_parser import InvalidQueryMethodError
 from pyfly.data.relational.sqlalchemy.entity import Base, BaseEntity
 from pyfly.data.relational.sqlalchemy.post_processor import RepositoryBeanPostProcessor
-from pyfly.data.relational.sqlalchemy.query import QueryExecutor, query, tokenize, transpile_jpql
+from pyfly.data.relational.sqlalchemy.query import QueryExecutor, _native, query, tokenize, transpile_jpql
 from pyfly.data.relational.sqlalchemy.repository import Repository
 from tests.support.backend_matrix import enable_sqlite_foreign_keys
 
@@ -520,6 +520,44 @@ class TestLiteralsAsEachDialectReadsThem:
             "$body$ :c $body$",
         ]
         assert [token.text for token in tokens if token.kind == "bind"] == [":d"]
+
+
+class TestBracketsAsEachDialectReadsThem:
+    """``[...]`` quotes a name on SQL Server and SQLite only: elsewhere it builds or subscripts an array
+    (PostgreSQL's ``ARRAY[:a, :b]``, ``tags[:i]``), and the parameters inside it are parameters. Reading it as a
+    name on every dialect escaped them, so ``:a`` reached PostgreSQL as written."""
+
+    ARRAYED = "SELECT id FROM q_items WHERE name = ANY(ARRAY[:a, :b]) AND score = scores[:i]"
+
+    @pytest.mark.parametrize(
+        "dialect", [None, postgresql.dialect(), mysql.dialect()], ids=["unknown", "postgresql", "mysql"]
+    )
+    def test_the_parameters_inside_brackets_are_parameters(self, dialect: Any):
+        assert [token.text for token in tokenize(self.ARRAYED, dialect) if token.kind == "bind"] == [":a", ":b", ":i"]
+        native = _native(self.ARRAYED, dialect)
+        assert (native.sql, native.binds) == (self.ARRAYED, ("a", "b", "i"))
+        assert set(text(native.sql).compile(dialect=postgresql.dialect()).params) == {"a", "b", "i"}
+
+    def test_a_jpql_array_binds_its_parameters(self):
+        jpql = "SELECT i.id FROM Item i WHERE i.name = ANY(ARRAY[:a, :b]) AND i.score > i.score"
+        transpiled = transpile_jpql(jpql, Item, postgresql.dialect())
+        assert transpiled.binds == ("a", "b")
+        assert transpiled.sql == "SELECT i.id FROM q_items i WHERE i.name = ANY(ARRAY[:a, :b]) AND i.score > i.score"
+
+    @pytest.mark.parametrize("dialect", [sqlite.dialect(), mssql.dialect()], ids=["sqlite", "mssql"])
+    def test_a_bracketed_name_is_a_name_where_the_dialect_quotes_with_brackets(self, dialect: Any):
+        sql = "SELECT name AS [at:noon] FROM q_items WHERE role = :role"
+        assert [token.text for token in tokenize(sql, dialect) if token.kind == "quoted"] == ["[at:noon]"]
+        native = _native(sql, dialect)
+        assert native.binds == ("role",)
+        assert set(text(native.sql).compile(dialect=dialect).params) == {"role"}
+
+    def test_a_parameter_inside_brackets_is_checked_at_startup(self):
+        @query("SELECT id FROM q_items WHERE name = ANY(ARRAY[:a, :nme])", native=True)
+        async def arrayed(self, a: str, name: str) -> list[int]: ...
+
+        with pytest.raises(InvalidQueryMethodError, match=":nme"):
+            QueryExecutor().compile_query_method(arrayed, Item)
 
 
 class TestQueryMethodsAreCheckedAtStartup:

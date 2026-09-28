@@ -89,11 +89,14 @@ a collection, one value per element. A ``UUID`` binds as SQLAlchemy's ``Uuid`` a
    the row being changed.
 
 String literals, quoted identifiers and comments are never rewritten; they are read as the dialect reads them
-(a backslash escapes a quote on MySQL and MariaDB; PostgreSQL's ``E'...'`` and ``$$...$$`` are literals). A name
-that is not an entity (a table in a subquery, ``schema.table``) is left as it is. In JPQL and native SQL alike,
-the colons of literals, quoted identifiers and comments are escaped, so ``'10:30'``, ``'a :b'`` or
-``-- see :x`` never become parameters; a colon already escaped the way ``text()`` documents (``'10\\:30'``) is
-escaped once, not twice.
+(a backslash escapes a quote on MySQL and MariaDB; PostgreSQL's ``E'...'`` and ``$$...$$`` are literals;
+``[name]`` is a quoted identifier on SQL Server and SQLite only, and elsewhere an array's bracket, so
+``ARRAY[:a, :b]`` and ``tags[:i]`` bind their parameters on PostgreSQL). A name that is not an entity (a table in
+a subquery, ``schema.table``) is left as it is. In JPQL and native SQL alike, the colons of literals, quoted
+identifiers and comments are escaped, so ``'10:30'``, ``'a :b'`` or ``-- see :x`` never become parameters; a
+colon already escaped the way ``text()`` documents (``'10\\:30'``) is escaped once, not twice. The startup check
+reads brackets as arrays (it runs before the dialect is known): a name with a colon in it is quoted with double
+quotes (``"at:noon"``, or MySQL's backticks), whose colons are never parameters.
 """
 
 from __future__ import annotations
@@ -143,8 +146,10 @@ __all__ = ["CompiledQuery", "QueryExecutor", "TranspiledQuery", "query", "tokeni
 # ---------------------------------------------------------------------------------------------------------
 
 
-def _token_pattern(string: str, quoted: str) -> re.Pattern[str]:
-    """The token pattern whose string literals are *string* and double-quoted names *quoted*."""
+def _token_pattern(string: str, quoted: str, *, brackets: bool) -> re.Pattern[str]:
+    """The token pattern whose string literals are *string* and double-quoted names *quoted*; ``[name]`` is a
+    quoted name too when *brackets* (and otherwise a ``[`` and a ``]`` of their own)."""
+    bracketed = r"|\[[^\]]*\]" if brackets else ""
     return re.compile(
         rf"""
           (?P<space>\s+)
@@ -152,7 +157,7 @@ def _token_pattern(string: str, quoted: str) -> re.Pattern[str]:
         | (?P<escape_string>[Ee]'(?:[^'\\]|\\.|'')*')
         | (?P<dollar_string>\$(?P<tag>(?:[A-Za-z_][A-Za-z0-9_]*)?)\$.*?\$(?P=tag)\$)
         | (?P<string>{string})
-        | (?P<quoted>{quoted}|`(?:[^`]|``)*`|\[[^\]]*\])
+        | (?P<quoted>{quoted}|`(?:[^`]|``)*`{bracketed})
         | (?P<cast>::)
         | (?P<bind>:[A-Za-z_][A-Za-z0-9_]*)
         | (?P<positional>\?[0-9]+)
@@ -164,11 +169,24 @@ def _token_pattern(string: str, quoted: str) -> re.Pattern[str]:
     )
 
 
-_STANDARD_TOKENS = _token_pattern(r"'(?:[^']|'')*'", r'"(?:[^"]|"")*"')
+_STANDARD_LITERALS = (r"'(?:[^']|'')*'", r'"(?:[^"]|"")*"')
 """String literals as the SQL standard writes them: a quote inside one is doubled (PostgreSQL, SQLite...)."""
 
-_BACKSLASH_TOKENS = _token_pattern(r"'(?:[^'\\]|\\.|'')*'", r'"(?:[^"\\]|\\.|"")*"')
+_BACKSLASH_LITERALS = (r"'(?:[^'\\]|\\.|'')*'", r'"(?:[^"\\]|\\.|"")*"')
 """String literals as MySQL and MariaDB read them: a backslash escapes the character after it, a quote too."""
+
+_TOKEN_PATTERNS = {
+    (backslash, brackets): _token_pattern(
+        *(_BACKSLASH_LITERALS if backslash else _STANDARD_LITERALS), brackets=brackets
+    )
+    for backslash in (False, True)
+    for brackets in (False, True)
+}
+"""The token patterns by (backslash-escaped literals, bracket-quoted names)."""
+
+_BRACKET_QUOTING = frozenset({"mssql", "sqlite"})
+"""The dialects that quote a name with brackets (``[order]``). Elsewhere a bracket builds or subscripts an array
+(PostgreSQL's ``ARRAY[:a, :b]`` and ``tags[:i]``), and the parameters inside it are parameters."""
 
 _STRING_KINDS = {"escape_string": "string", "dollar_string": "string"}
 """PostgreSQL's ``E'...'`` and ``$tag$...$tag$`` literals are string tokens like the others."""
@@ -234,17 +252,19 @@ def tokenize(sql: str, dialect: Dialect | None = None) -> list[Token]:
     doubling it (``'it''s'``). A query that reads only the other way is read that way (a MySQL server in
     ``NO_BACKSLASH_ESCAPES`` mode; a query checked before its dialect is known, ``dialect=None``). PostgreSQL's
     ``E'...'`` and dollar-quoted (``$$...$$``, ``$tag$...$tag$``) literals are strings on every dialect.
+    ``[name]`` is a quoted name on SQL Server and SQLite only: on the other dialects, and before the dialect is
+    known, a bracket builds or subscripts an array (``ARRAY[:a, :b]``), whose parameters are parameters.
 
     An unterminated string literal or quoted identifier raises
     :class:`~pyfly.data.query_parser.InvalidQueryMethodError`.
     """
     backslash = dialect is not None and dialect.name in ("mysql", "mariadb")
-    patterns = (_BACKSLASH_TOKENS, _STANDARD_TOKENS) if backslash else (_STANDARD_TOKENS, _BACKSLASH_TOKENS)
+    brackets = dialect is not None and dialect.name in _BRACKET_QUOTING
     try:
-        return _tokens(sql, patterns[0])
+        return _tokens(sql, _TOKEN_PATTERNS[backslash, brackets])
     except InvalidQueryMethodError as error:
         try:
-            return _tokens(sql, patterns[1])
+            return _tokens(sql, _TOKEN_PATTERNS[not backslash, brackets])
         except InvalidQueryMethodError:
             raise error from None
 

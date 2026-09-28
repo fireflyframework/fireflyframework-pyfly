@@ -415,6 +415,32 @@ async def test_a_colon_in_a_literal_or_a_comment_is_never_a_parameter(relational
         assert await authors.commented("eu") == [1, 2]
 
 
+class ArrayAuthorRepository(Repository[QaAuthor, int]):
+    """PostgreSQL arrays: a bracket builds one, and the parameters inside it are parameters."""
+
+    @query("SELECT id FROM qa_author WHERE dname = ANY(ARRAY[:first, :second]) ORDER BY id", native=True)
+    async def native_named_either(self, first: str, second: str) -> list[int]: ...
+
+    @query("SELECT a.id FROM QaAuthor a WHERE a.display_name = ANY(ARRAY[:first, :second]) ORDER BY a.id")
+    async def named_either(self, first: str, second: str) -> list[int]: ...
+
+    @query("SELECT (ARRAY[a.region, a.display_name])[:index] FROM QaAuthor a WHERE a.id = :id")
+    async def picked(self, id: int, index: int) -> str | None: ...
+
+
+@pytest.mark.backends("pg")
+async def test_the_parameters_inside_a_postgresql_array_are_bound(relational_backend: RelationalBackend) -> None:
+    """``ARRAY[:a, :b]`` and ``array[:i]`` bind their parameters, in native SQL and in JPQL: brackets quote a name
+    only on the dialects that quote with them (SQL Server, SQLite)."""
+    async with repository_datasources(relational_backend, QaAuthor, QaBook) as datasources:
+        await _authors(datasources)
+        authors = RepositoryBeanPostProcessor().after_init(ArrayAuthorRepository(), "array_authors")
+        assert await authors.native_named_either("Bob", "Dee") == [2, 4]
+        assert await authors.named_either(first="Ana", second="Zed") == [1]
+        assert await authors.picked(3, 1) == "us"
+        assert await authors.picked(3, 2) == "Cid"
+
+
 async def _nodes(datasources: Datasources) -> NodeRepository:
     """The tree 1 <- 2 <- 3: node 3 is the only leaf."""
     async with datasources.engine.begin() as conn:
