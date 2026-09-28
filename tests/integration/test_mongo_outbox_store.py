@@ -344,6 +344,26 @@ async def test_a_single_command_unit_that_fails_after_its_write_reports_an_unkno
     assert held.attempts == 1  # the claim's write stood
 
 
+async def test_a_settle_that_lost_its_lease_writes_nothing_and_reports_no_unknown_outcome(mongo: Mongo) -> None:
+    """The late settle of a relay whose lease ended matches nothing: its dead letters roll back with its
+    transaction, and its single-command unit, which wrote nothing, is no unknown outcome."""
+    store = mongo.store()
+    await store.start()
+    await store.register("g", None)
+    await store.append(_event(1))
+    (lost,) = await store.claim("g", limit=10, lease=timedelta(0), owner="dead")
+    (taken,) = await store.claim("g", limit=10, lease=LEASE, owner="live")
+
+    with track_commits() as commits:
+        assert await store.settle(lost, retry_at=store.now() + LEASE, error="late") is False
+        assert await store.settle(lost, dead=[("s", RuntimeError("late"))]) is False
+    assert commits.unknown == 0
+    assert await store.dead_letters() == []
+    (pending,) = await store.pending("g")
+    assert (pending.attempts, pending.last_error) == (2, None)
+    assert await store.complete([taken]) == 1
+
+
 async def test_a_standalone_server_is_refused_at_start(mongo_url: str) -> None:
     client: AsyncMongoClient[Any] = AsyncMongoClient(mongo_url)
     try:

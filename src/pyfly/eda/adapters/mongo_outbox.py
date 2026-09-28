@@ -737,27 +737,25 @@ class MongoOutboxStore:
         mine = {"consumer_group": delivery.group, "outbox_id": delivery.outbox_id, "claimed_by": delivery.token}
         handled = sorted(set(done))
 
-        async def write(unit: UnitOfWork) -> None:
+        async def write(unit: UnitOfWork) -> bool:
+            """The settling command, fenced by the claim; whether the delivery was still this claim's."""
             session = unit.resource
             async with unit.operation():
                 if retry_at is None:
-                    matched = (await deliveries.delete_one(mine, session=session)).deleted_count
-                else:
-                    result = await deliveries.update_one(
-                        mine,
-                        {
-                            "$set": {
-                                "available_at": retry_at,
-                                "claimed_by": None,
-                                "done": handled,
-                                "last_error": _truncated(error) if error else None,
-                            }
-                        },
-                        session=session,
-                    )
-                    matched = result.matched_count
-            if matched == 0:
-                raise _LeaseLost
+                    return bool((await deliveries.delete_one(mine, session=session)).deleted_count)
+                result = await deliveries.update_one(
+                    mine,
+                    {
+                        "$set": {
+                            "available_at": retry_at,
+                            "claimed_by": None,
+                            "done": handled,
+                            "last_error": _truncated(error) if error else None,
+                        }
+                    },
+                    session=session,
+                )
+                return bool(result.matched_count)
 
         async def with_dead_letters(unit: UnitOfWork) -> None:
             failed_at = self._clock()
@@ -766,15 +764,19 @@ class MongoOutboxStore:
                     [self._dead_letter(delivery, key, failure, failed_at) for key, failure in dead],
                     session=unit.resource,
                 )
-            await write(unit)
+            if not await write(unit):
+                raise _LeaseLost  # the dead letters roll back with the transaction
 
+        settled = True
         try:
             if dead:
                 await self._atomically(with_dead_letters)
             else:
                 async with self._unit(single=True) as unit:
-                    await write(unit)
+                    settled = await write(unit)
         except _LeaseLost:
+            settled = False
+        if not settled:
             _logger.warning(
                 "outbox_delivery_claimed_again",
                 extra={
@@ -783,8 +785,7 @@ class MongoOutboxStore:
                     "event_id": delivery.envelope.event_id,
                 },
             )
-            return False
-        return True
+        return settled
 
     @staticmethod
     def _dead_letter(
