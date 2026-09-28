@@ -242,3 +242,15 @@ try:
         name: str
 except ImportError:  # pragma: no cover
     pass
+
+
+def test_the_replica_set_container_raises_the_open_file_limit() -> None:
+    """A suite that gives every test a database of its own exhausted mongod's default 1024 open files, and
+    WiredTiger aborted the server; the replica-set fixture runs it with MongoDB's recommended limit."""
+    pytest.importorskip("testcontainers")
+    from pyfly.testing.testcontainers import mongodb_replica_set_container
+
+    container = mongodb_replica_set_container()
+    (ulimit,) = container.get_wrapped_container()._kwargs["ulimits"]
+    assert (ulimit.name, ulimit.soft, ulimit.hard) == ("nofile", 64000, 64000)
+
