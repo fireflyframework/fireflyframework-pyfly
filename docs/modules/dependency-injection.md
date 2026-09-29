@@ -1487,13 +1487,20 @@ When `ApplicationContext.stop()` is called (each step bounded per bean by
 6. **Release** -- the singletons this run built are released, and everything the run added (the
    started lifecycle beans, the post-processors discovered from beans, the event listeners it
    wired, the post-create hook) is forgotten, so a later `start()` is a cold start. From here on
-   the container builds no bean of any scope until the context starts again.
+   the container builds no bean of any scope until the context starts again. That `start()` drops
+   the registrations the previous run's `@bean` methods added, and the interface bindings that
+   went with them, before it processes the configurations again.
 
 Through 26.09.07 the lifecycle beans stopped first, in reverse registration order, then
 `@pre_destroy` ran and `ContextClosedEvent` came last: the primary engine was disposed before the
 consumers, the user lifecycle beans and every `@pre_destroy`, and their writes reconnected through
 a pool nobody disposed. A restart also restarted the previous run's adapters and delivered each
-event to the previous run's listeners.
+event to the previous run's listeners. In 26.09.08 a restart kept the previous run's interface
+bindings: a configuration processed before the one that binds an interface resolved it through a
+stale binding and failed with a `KeyError` naming the dropped implementation (for example
+`CqrsAutoConfiguration` resolving `EventPublisher` before `EdaAutoConfiguration` bound
+`InMemoryEventBus`). It showed in any process that starts one context several times, such as a
+test suite whose modules share an application.
 
 ---
 
