@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.09 (2026-09-28)
+
+A fix found by the first application that moved to `26.09.08`. That application's integration suite
+starts and stops one shared context per test module, and every module after the first failed to
+start.
+
+### Fixed
+
+- **A restarted context no longer resolves an interface through the previous run's binding.** A restart
+  dropped the registrations the last `start()` added, so that it could rebuild from the registry a cold
+  start sees, but it kept the interface bindings that went with them. A configuration processed before
+  the one that binds an interface could then resolve that interface through the stale binding, which
+  pointed at a registration that no longer existed. The start then failed with
+  `BeanCreationException: ... KeyError: <class '...'>`. For example, `CqrsAutoConfiguration` resolved
+  `EventPublisher` before `EdaAutoConfiguration` had bound `InMemoryEventBus` again.
+  - **Who was affected:** a process that starts one context more than once, such as a test suite whose
+    modules share an application, or an embedding that restarts its context. A single start was not
+    affected.
+  - **The fix:** `start()` now drops the previous run's interface bindings together with its
+    registrations.
+  - **Regression test:** `tests/context/test_restart_cold_start.py` restarts a context three times, with
+    the consumer configuration registered before the provider.
+
+### Upgrading
+
+- **No changes needed.** If a test suite added a workaround for this error, remove it.
+
+---
+
 ## v26.09.08 (2026-09-28)
 
 The data layer, rebuilt on a unit of work. An audit of the ORM and transaction layer at `26.09.07`
