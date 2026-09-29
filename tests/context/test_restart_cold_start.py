@@ -266,3 +266,51 @@ async def test_an_engine_handed_to_the_container_pools_again_after_a_restart(tmp
     finally:
         await ctx.stop()
         await engine.dispose()
+
+
+class _Port:
+    """An interface that only a ``@bean`` method of a later configuration binds."""
+
+
+class _Adapter(_Port):
+    pass
+
+
+class _Consumer:
+    def __init__(self, port: _Port) -> None:
+        self.port = port
+
+
+@configuration
+class _ConsumerConfiguration:
+    """Processed first: its bean method needs the port another configuration provides."""
+
+    @bean
+    def consumer(self, port: _Port) -> _Consumer:
+        return _Consumer(port)
+
+
+@configuration
+class _AdapterConfiguration:
+    @bean
+    def adapter(self) -> _Port:
+        return _Adapter()
+
+
+async def test_a_restart_drops_the_interface_bindings_the_previous_run_added() -> None:
+    """The previous run's ``_Port -> _Adapter`` binding must not outlive its registration.
+
+    A restart dropped the registrations the last run added but kept the interface bindings it added.
+    A configuration processed before the one that binds the interface then resolved the port through
+    the stale binding and failed with ``KeyError: _Adapter`` (seen with ``CqrsAutoConfiguration``
+    resolving ``EventPublisher`` before ``EdaAutoConfiguration`` bound ``InMemoryEventBus``).
+    """
+    ctx = ApplicationContext(Config({}))
+    ctx.register_bean(_ConsumerConfiguration)
+    ctx.register_bean(_AdapterConfiguration)
+    for _ in range(3):
+        await ctx.start()
+        consumer = ctx.get_bean(_Consumer)
+        assert isinstance(consumer.port, _Adapter)
+        assert ctx.container._bindings.get(_Port) == [_Adapter]
+        await ctx.stop()
