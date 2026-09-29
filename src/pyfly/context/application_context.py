@@ -185,6 +185,8 @@ class ApplicationContext:
         #: The same for the (type, name) and name indexes of the container.
         self._pipeline_all: frozenset[tuple[type, str]] = frozenset()
         self._pipeline_named: frozenset[str] = frozenset()
+        #: The (interface, implementation) bindings the last start() pipeline added.
+        self._pipeline_bindings: frozenset[tuple[type, type]] = frozenset()
         #: Post-processors handed to register_post_processor(). The ones discovered from beans belong
         #: to one run and are dropped by stop(), so a restart uses the new run's instances.
         self._registered_post_processors: list[BeanPostProcessor] = []
@@ -378,11 +380,21 @@ class ApplicationContext:
                 self._container._unindex_name(*all_key)
         for name in self._pipeline_named:
             self._container._named.pop(name, None)
+        # The interface bindings go too: a binding whose registration was dropped sends a lookup of the
+        # interface to a class the container no longer knows (KeyError) whenever a configuration
+        # processed earlier resolves that interface before its provider binds it again.
+        for interface, implementation in self._pipeline_bindings:
+            implementations = self._container._bindings.get(interface)
+            if implementations is not None and implementation in implementations:
+                implementations.remove(implementation)
+                if not implementations:
+                    del self._container._bindings[interface]
         self._container.allow_creation()
 
         registrations_before = set(self._container._registrations.keys())
         all_before = set(self._container._all.keys())
         named_before = set(self._container._named.keys())
+        bindings_before = self._binding_pairs()
 
         # Every instance the container creates from now on goes through the init pipeline. Until
         # the batched passes of step 5 run, the hook only collects the non-singleton ones (the
@@ -527,8 +539,17 @@ class ApplicationContext:
         self._pipeline_registrations = frozenset(self._container._registrations.keys()) - registrations_before
         self._pipeline_all = frozenset(self._container._all.keys()) - all_before
         self._pipeline_named = frozenset(self._container._named.keys()) - named_before
+        self._pipeline_bindings = self._binding_pairs() - bindings_before
 
         self._started = True
+
+    def _binding_pairs(self) -> frozenset[tuple[type, type]]:
+        """Every (interface, implementation) binding the container holds now."""
+        return frozenset(
+            (interface, implementation)
+            for interface, implementations in self._container._bindings.items()
+            for implementation in implementations
+        )
 
     async def stop(self) -> None:
         """Stop the context: drain, destroy, release — the database last.
