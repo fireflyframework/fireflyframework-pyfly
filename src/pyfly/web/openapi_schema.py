@@ -15,13 +15,43 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import PydanticUserError, TypeAdapter
-from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
+from pydantic.json_schema import CoreModeRef, CoreRef, DefsRef, GenerateJsonSchema, JsonSchemaMode
 
 from pyfly.web.openapi_metadata import UNSET
+
+# Pydantic appends metadata reprs to core references. Quoted constraint strings
+# can themselves contain colons/digits, so only unquoted identity suffixes count.
+_REFERENCE_TOKEN = re.compile(r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|(?P<identity>:(?:str-)?[0-9]+)(?=$|[\[,\]_])")
+
+
+class _StableDefinitionNames(GenerateJsonSchema):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._reference_ids: dict[str, int] = {}
+        super().__init__(*args, **kwargs)
+
+    def get_defs_ref(self, core_mode_ref: CoreModeRef) -> DefsRef:
+        """Replace process-local identities only at the definition-naming boundary.
+
+        Pydantic's rsplit(':', 1) can retain an identity when a metadata pattern
+        contains colons. Stable encounter indices preserve distinct same-name types
+        while leaving the original core references, schema data and cache keys intact.
+        """
+        core_ref, mode = core_mode_ref
+
+        def replace(match: re.Match[str]) -> str:
+            identity = match.group("identity")
+            if identity is None:
+                return match.group()
+            index = self._reference_ids.setdefault(identity, len(self._reference_ids) + 1)
+            prefix = ":str-" if identity.startswith(":str-") else ":"
+            return f"{prefix}{index}"
+
+        return super().get_defs_ref((CoreRef(_REFERENCE_TOKEN.sub(replace, core_ref)), mode))
 
 
 @dataclass
@@ -35,7 +65,8 @@ class SchemaRegistry:
     """Defer schemas until every input is known, so Pydantic resolves name collisions."""
 
     def __init__(self, schema_generator: type[GenerateJsonSchema]) -> None:
-        self._generator = schema_generator
+        # The consumer stays in the MRO, including its naming and schema hooks.
+        self._generator = type("_OpenAPISchemaGenerator", (_StableDefinitionNames, schema_generator), {})
         self._inputs: list[tuple[int, JsonSchemaMode, TypeAdapter[Any]]] = []
 
     def schema(
