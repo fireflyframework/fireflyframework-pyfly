@@ -78,6 +78,8 @@ The PyFly web layer provides enterprise-grade HTTP routing, controller registrat
   - [Swagger UI](#swagger-ui)
   - [ReDoc](#redoc)
   - [OpenAPIGenerator Internals](#openapigenerator-internals)
+  - [Explicit contracts for manual handlers](#explicit-contracts-for-manual-handlers)
+  - [Offline generation and customization](#offline-generation-and-customization)
 - [Application Factory: create_app()](#application-factory-create_app)
   - [Full Parameter Reference](#full-parameter-reference)
   - [What create_app() Does](#what-create_app-does)
@@ -1888,29 +1890,192 @@ The raw OpenAPI 3.1 specification is served at `/openapi.json`.
 
 ### OpenAPIGenerator Internals
 
-The `OpenAPIGenerator` class (`src/pyfly/web/openapi.py`) builds the spec:
+`OpenAPIGenerator` generates OpenAPI 3.1 from framework-neutral `RouteMetadata`.
+Collection reads controller classes without resolving beans or evaluating arbitrary
+property/custom descriptors. Ordinary methods, inherited methods, static methods,
+and class methods are discoverable. Collection and generation do not start the
+application, invoke handlers, or contact services.
 
-1. **Info** -- populated from `title`, `version`, and `description` passed to `create_app()`.
-2. **Tags** -- derived from controller class names (`OrderController` becomes the `Order` tag).
-3. **Paths** -- built from `RouteMetadata` collected by `ControllerRegistrar.collect_route_metadata()`. Each handler contributes an operation with `operationId`, parameters, request body, responses, tags, summary, description, and deprecated flag.
-4. **Components/Schemas** -- Pydantic models used as `Body[T]` or `Valid[T]` types are registered in `components.schemas` via `model_json_schema()`, and referenced using `$ref`. Nested `$defs` from Pydantic v2 are automatically hoisted into `components/schemas` and `$ref` paths are rewritten accordingly.
-5. **Validation Error Schemas** -- Endpoints with request bodies automatically include a `422 Validation Error` response with the standard `HTTPValidationError` and `ValidationError` schemas.
-6. **Mounted routes** -- the plain `Route` objects and `Mount`ed sub-applications handed to `create_app(extra_routes=...)` are walked (recursively, with the mount prefix) and emitted as operations marked `x-pyfly-mounted: true`. There is no handler signature to read a contract from, so each carries its `operationId`, the endpoint's docstring summary, a `default` response and the path parameters Starlette's convertors declare (`{botId}` → string, `{n:int}` → integer, `{x:float}` → number, `{id:uuid}` → string/uuid; a mount's own parameters are inherited). `operationId`s are unique across the document: the first holder of a name keeps it and a later endpoint with the same `__name__` is qualified as `<name>_<method>_<path slug>`. A mount whose app cannot be walked is listed under `x-pyfly-mounts`. A controller's operation on the same path and method is never overwritten.
+- `PathVar[T]`, `QueryParam[T]`, `Header[T]`, and `Cookie[T]` become parameters.
+  Header names replace underscores with hyphens. Path parameters are required;
+  other inferred parameters are optional when they have a default or admit `None`.
+  Defaults are JSON serialized, including enums and UUIDs.
+- `Body[T]` and `Valid[T]` become JSON request bodies. Binding sentinels are removed
+  while other `Annotated` constraints are preserved. Inferred bodies remain required:
+  the existing body binder always reads the body and does not use Python parameter
+  defaults to make it optional. A nullable schema describes JSON `null`, independently
+  of body presence; inference of union schemas does not add union binding support.
+  For an optional manually parsed body, set `OpenAPIRequestBody(required=False, ...)`.
+- Serializable return types become response schemas: models, primitives, UUIDs,
+  enums, literals, unions, collections, recursive models, and discriminated unions.
+  Unsupported inferred runtime types such as `Request` and `JSONResponse` retain
+  a generic response description without invented response content. A 204 response
+  remains bodyless, and SSE retains its `text/event-stream` content.
+- Request bodies and parameters use Pydantic **validation** mode. Response content
+  and headers use **serialization** mode. Both preserve aliases. When input/output
+  shapes differ, Pydantic emits separate definitions. Shared definitions preserve
+  recursive references and discriminator targets without same-name model collisions.
+- A documented request body adds the legacy inferred 422 validation response unless
+  that status is overridden or responses are completely replaced. This default is
+  documentation; applications with a different error envelope should override it.
 
-Parameters are extracted from handler type hints (with `Valid` wrapper automatically peeled):
-- `PathVar[T]` becomes an `in: path` parameter
-- `QueryParam[T]` becomes an `in: query` parameter
-- `Header[T]` becomes an `in: header` parameter
-- `Cookie[T]` becomes an `in: cookie` parameter
-- `Body[BaseModel]` or `Valid[BaseModel]` becomes a `requestBody` with a JSON schema reference
+The operation ID uses the explicit documentation ID, then the mapping's `name`,
+then the handler name. Unique legacy names remain unchanged. Implicit collisions
+are assigned deterministically in sorted path/method order, controllers before
+mounted routes; later holders get `<name>_<method>_<path slug>` and, if needed, a
+numeric suffix. All preferred names are reserved before suffix assignment. Duplicate
+explicit IDs and duplicate controller path/method declarations raise `ValueError`.
 
-Response schemas are derived from handler return types:
-- `BaseModel` subclass returns produce a `$ref` to the model's schema
-- `list[BaseModel]` returns produce an `array` schema with `items.$ref`
-- `None` returns (204) produce a `"No Content"` description
-- Other returns produce a generic `"Successful response"` description
+Routes and sub-applications supplied through `create_app(extra_routes=...)` remain
+marked `x-pyfly-mounted: true`, with their names, summaries, path parameters and a
+`default` response. A controller takes precedence on an overlapping path/method.
+Opaque mounts are listed in `x-pyfly-mounts`; WebSocket inventory is published in
+`x-pyfly-websocket-routes` because WebSockets have no OpenAPI operation representation.
 
-Source file: `src/pyfly/web/openapi.py`
+### Explicit contracts for manual handlers
+
+`@openapi_operation` attaches documentation to the original function. It does not
+wrap the handler, change annotations/signatures, perform validation, acquire services,
+or modify response bytes/status/headers. It works above or below an HTTP mapping.
+Use it when a handler reads a raw `Request` or returns a manually constructed response:
+
+```python
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ValidationError
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse
+
+from pyfly.container.stereotypes import rest_controller
+from pyfly.web import (
+    OpenAPIHeader, OpenAPIParameter, OpenAPIRequestBody, OpenAPIResponse,
+    openapi_operation, post_mapping,
+)
+
+class Submission(BaseModel):
+    message: str
+
+class Receipt(BaseModel):
+    job_id: UUID
+
+@rest_controller
+class JobsController:
+    @post_mapping("/jobs", name="jobs.submit")
+    @openapi_operation(
+        summary="Accept a job",
+        parameters=[OpenAPIParameter("X-Tenant", "header", UUID)],
+        request_body=OpenAPIRequestBody(
+            content={"application/json": Submission}, required=True,
+            description="The job to accept",
+        ),
+        responses={
+            202: OpenAPIResponse(
+                "Accepted", content={"application/json": Receipt},
+                headers={"X-Job-ID": OpenAPIHeader(UUID, description="Tracking ID")},
+            ),
+            422: OpenAPIResponse("Invalid submission", content={"text/plain": str}),
+        },
+        replace_responses=True,
+        security=[],
+    )
+    async def submit(self, request: Request) -> JSONResponse | PlainTextResponse:
+        # The handler owns validation and the actual response contract.
+        try:
+            UUID(request.headers["X-Tenant"])
+            Submission.model_validate(await request.json())
+        except (ValueError, KeyError, ValidationError):
+            return PlainTextResponse("Invalid submission", status_code=422)
+        job_id = uuid4()
+        return JSONResponse(
+            {"job_id": str(job_id)}, status_code=202,
+            headers={"X-Job-ID": str(job_id)},
+        )
+```
+
+Typed schema inputs are
+Python types, annotated aliases, or existing Pydantic `TypeAdapter` instances, not raw
+JSON-schema dictionaries. Invalid explicit schema inputs fail with the responsible
+HTTP method/path instead of silently disappearing.
+
+| Setting | Omitted/default | Explicit override |
+|---------|-----------------|-------------------|
+| `operation_id` | Mapping name, then handler name | Nonempty unique ID |
+| `request_body` | Infer from bindings | `OpenAPIRequestBody` replaces it; `None` omits it |
+| `parameters` | Infer from bindings | Complete replacement; `[]` removes inferred parameters |
+| `responses` | Infer success and applicable 422 | Merge by status, replacing each declared status completely |
+| `replace_responses` | `False` | `True` requires a nonempty response map and removes all inferred statuses |
+| `summary`, `description` | Infer from docstrings | Empty strings suppress inferred text |
+| `tags` | Infer from controller name | Complete replacement; `[]` removes tags |
+| `deprecated` | Infer existing deprecated marker | `False` clears it |
+| `security` | Inherit document-level requirements | `[]` explicitly declares no security requirement |
+
+Response keys accept integer/string status codes (100–599), `"default"`, and ranges
+such as `"2XX"`. Response `content` and request-body `content` map media types to
+schema inputs. Empty response content documents a bodyless response; request-body
+content must be nonempty. `OpenAPIParameter(name, location, schema, required=True,
+description="", default=...)` accepts `path`, `query`, `header`, or `cookie` locations.
+Path parameters must be required. An omitted `default` differs from an explicit
+`default=None`. `OpenAPIHeader(schema, description="", required=False)` describes a
+response header. None of these declarations expands the runtime parameter binder's
+supported types; handlers remain responsible for manual contracts and coercion.
+
+### Offline generation and customization
+
+`RouteMetadata` and the documentation value types are available from `pyfly.web`
+without installing Starlette. The existing adapter import of `RouteMetadata` remains
+compatible. An offline caller can supply metadata directly without a context or handler:
+
+```python
+from typing import Annotated
+from pydantic import Field, TypeAdapter
+from pydantic.json_schema import GenerateJsonSchema
+
+from pyfly.web import OpenAPIOperation, OpenAPIResponse, RouteMetadata
+from pyfly.web.openapi import OpenAPIGenerator
+
+class ContractSchema(GenerateJsonSchema):
+    def generate_inner(self, schema):
+        result = super().generate_inner(schema)
+        if result.get("type") == "integer":
+            result["x-contract-integer"] = True
+        return result
+
+metadata = RouteMetadata(
+    path="/count", http_method="GET", status_code=200,
+    handler=None, handler_name="count",
+    operation=OpenAPIOperation(
+        operation_id="metrics.count",
+        responses={200: OpenAPIResponse(
+            "Current count",
+            content={"application/json": TypeAdapter(Annotated[int, Field(ge=0)])},
+        )},
+    ),
+)
+generator = OpenAPIGenerator(
+    title="Metrics", version="1.0", schema_generator=ContractSchema,
+    security_schemes={"bearer": {"type": "http", "scheme": "bearer"}},
+    security=[{"bearer": []}],
+)
+spec = generator.generate([metadata])
+```
+
+Security schemes and global/per-operation requirements describe documentation only;
+**they never enforce authentication or authorization**. Configure runtime security
+filters separately. To use the same customization at the actual documentation endpoint:
+
+```python
+from pyfly.web.adapters.starlette import create_app
+
+app = create_app(context=context, openapi_generator=generator)
+```
+
+The supplied generator controls the `/openapi.json` document's info, schemes and schema
+policy. `create_app`'s `title` still controls documentation UI titles. The custom
+`GenerateJsonSchema` subclass is used for every schema input and shared definition;
+this supports consumer-specific Pydantic hooks without monkey-patching the generator.
+
+Source files: `src/pyfly/web/openapi.py`, `src/pyfly/web/openapi_metadata.py`,
+`src/pyfly/web/openapi_schema.py`.
 
 ---
 
@@ -2000,6 +2165,7 @@ app = create_app(
 | `debug`            | `bool`                       | `False`    | Starlette debug mode                                      |
 | `context`          | `ApplicationContext \| None` | `None`     | DI context for auto-discovering `@rest_controller` beans  |
 | `docs_enabled`     | `bool`                       | `True`     | Mount OpenAPI spec, Swagger UI, and ReDoc                 |
+| `openapi_generator` | `OpenAPIGenerator \| None` | `None` | Supply the generator for `/openapi.json` |
 | `extra_routes`     | `list[Route] \| None`        | `None`     | Additional Starlette routes to mount                      |
 | `actuator_enabled` | `bool`                       | `False`    | Mount actuator health/info endpoints                      |
 | `cors`             | `CORSConfig \| None`         | `None`     | CORS configuration. When `None` and a `context` is given, it is auto-built from `pyfly.web.cors.*` (disabled unless `pyfly.web.cors.enabled` is true) |
@@ -2044,16 +2210,17 @@ The `ControllerRegistrar` (`src/pyfly/web/adapters/starlette/controller.py`) is 
 `collect_route_metadata(context)` performs the same discovery but returns `RouteMetadata` objects instead of `Route` objects. Each `RouteMetadata` contains:
 
 - `path`, `http_method`, `status_code`
-- `handler`, `handler_name`
-- `parameters` -- list of OpenAPI parameter dicts extracted from type hints
-- `request_body_model` -- the Pydantic model class if `Body[BaseModel]` or `Valid[BaseModel]` is used
+- `handler`, `handler_name`, `mapping_name`
+- `operation` -- optional `OpenAPIOperation` overrides, also attached by `@openapi_operation`
+- `parameters` -- compatible parameter dictionaries; `parameter_types` retains rich Python schema inputs by `(location, name)`
+- `request_body_model` -- the Python schema input from `Body[T]` or `Valid[T]`, including non-binding `Annotated` metadata
 - `return_type` -- the handler's return type annotation
 - `tag` -- derived from the controller class name (e.g., `OrderController` becomes `Order`)
 - `summary` -- first line of the handler's docstring
 - `description` -- remaining lines of the handler's docstring (after a blank separator)
 - `deprecated` -- `True` if the handler is marked with `__pyfly_deprecated__`
 
-This metadata is consumed by `OpenAPIGenerator` to build the spec. The `Valid` wrapper is automatically peeled during metadata extraction, so `Valid[Body[CreateOrderRequest]]` produces the same OpenAPI schema as `Body[CreateOrderRequest]`.
+This metadata is consumed by `OpenAPIGenerator` to build the spec. Binding markers are removed while Pydantic constraints remain intact, so `Valid[Body[CreateOrderRequest]]` produces the same OpenAPI schema as `Body[CreateOrderRequest]`.
 
 ### Exception Handler Discovery
 

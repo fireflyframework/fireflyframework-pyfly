@@ -40,6 +40,15 @@ from pyfly.web.message_converters import (
     XmlMessageConverter,
     default_message_converters,
 )
+from pyfly.web.openapi_metadata import (
+    OpenAPIHeader,
+    OpenAPIOperation,
+    OpenAPIParameter,
+    OpenAPIRequestBody,
+    OpenAPIResponse,
+    RouteMetadata,
+    openapi_operation,
+)
 from pyfly.web.params import Body, Cookie, File, Form, Header, PathVar, QueryParam, UploadedFile, Valid
 from pyfly.web.ports.filter import WebFilter
 from pyfly.web.security_headers import SecurityHeadersConfig
@@ -48,6 +57,13 @@ from pyfly.web.urls import reverse, static_url
 from pyfly.web.views import ModelAndView, Redirect
 
 __all__ = [
+    "OpenAPIHeader",
+    "OpenAPIOperation",
+    "OpenAPIParameter",
+    "OpenAPIRequestBody",
+    "OpenAPIResponse",
+    "RouteMetadata",
+    "openapi_operation",
     "ModelAndView",
     "Redirect",
     "Body",

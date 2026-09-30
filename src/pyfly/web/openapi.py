@@ -16,15 +16,25 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, cast, get_args, get_origin
+from collections.abc import Mapping
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
+
+from pyfly.web.openapi_metadata import (
+    UNSET,
+    OpenAPIOperation,
+    OpenAPIRequestBody,
+    OpenAPIResponse,
+    RouteMetadata,
+    SecurityRequirements,
+    _validate_security,
+)
+from pyfly.web.openapi_schema import SchemaRegistry
 
 if TYPE_CHECKING:
-    from pyfly.web.adapters.starlette.controller import RouteMetadata
     from pyfly.web.adapters.starlette.mounted_routes import MountedRoute
-
-_PATH_PARAM_RE = re.compile(r"\{(\w+)\}")
 
 # Standard validation error schema (matches FastAPI's 422 response)
 _VALIDATION_ERROR_SCHEMA = {
@@ -66,26 +76,16 @@ _HTTP_VALIDATION_ERROR_SCHEMA = {
 
 
 def _path_slug(path: str) -> str:
-    """``/api/telegram/{botId}/updates`` → ``api_telegram_botId_updates``: the part of a
-    qualified operationId that names the path, with nothing an identifier cannot carry."""
     return re.sub(r"[^A-Za-z0-9]+", "_", path).strip("_")
 
 
 class OpenAPIGenerator:
-    """Generate an OpenAPI 3.1 specification dict.
+    """Generate OpenAPI 3.1 without acquiring beans or invoking handlers.
 
-    Automatically derives:
-    - Response schemas from handler return type hints
-    - Tags from ``@rest_controller`` class names
-    - Summary/description from handler docstrings
-    - Validation error responses for endpoints with request bodies
-    - Pydantic model schemas with proper ``$ref`` resolution
-
-    Usage::
-
-        gen = OpenAPIGenerator(title="My API", version="1.0.0")
-        spec = gen.generate()                       # empty paths
-        spec = gen.generate(route_metadata=metadata) # real paths
+    All typed inputs share Pydantic definitions. Requests/parameters use validation
+    mode; responses/headers use serialization mode, both by alias. schema_generator
+    accepts a GenerateJsonSchema subclass. Security settings describe documentation
+    only; use runtime security filters to enforce authentication and authorization.
     """
 
     def __init__(
@@ -93,11 +93,18 @@ class OpenAPIGenerator:
         title: str,
         version: str,
         description: str = "",
+        *,
+        schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+        security_schemes: Mapping[str, dict[str, Any]] | None = None,
+        security: SecurityRequirements | None = None,
     ) -> None:
         self._title = title
         self._version = version
         self._description = description
-        self._schemas: dict[str, Any] = {}
+        self._schema_generator = schema_generator
+        self._security_schemes = deepcopy(dict(security_schemes or {}))
+        _validate_security(security)
+        self._security = deepcopy(security)
 
     def generate(
         self,
@@ -105,294 +112,215 @@ class OpenAPIGenerator:
         websocket_routes: list[dict[str, str]] | None = None,
         mounted_routes: list[MountedRoute] | None = None,
     ) -> dict[str, Any]:
-        """Generate a complete OpenAPI 3.1 spec as a dict.
+        """Build a fresh document; controller operations take precedence over mounts.
 
-        ``websocket_routes`` — from ``ControllerRegistrar.collect_websocket_routes()`` — is published
-        under the ``x-pyfly-websocket-routes`` extension rather than as operations. WebSocket has no
-        OpenAPI representation, but leaving it out entirely made the document quietly incomplete: a
-        service could delete a socket route and a CI diff of /openapi.json would report no change.
-
-        ``mounted_routes`` — from ``collect_mounted_routes()`` over ``create_app(extra_routes=...)`` —
-        are the plain Starlette routes and mounted sub-applications served beside the controllers.
-        They become operations marked ``x-pyfly-mounted: true`` (no typed contract can be read from
-        an ASGI endpoint) with their path parameters declared and a unique ``operationId``, and
-        never overwrite a controller's operation on the same path and method; a mount that could
-        not be walked is listed under ``x-pyfly-mounts``. Same reason as above:
-        a service whose webhooks live in sub-apps had a document that described none of them.
+        Duplicate controller path/method declarations and explicit operation IDs fail.
+        Implicit ID collisions are resolved in sorted path/method order, controllers
+        first, with suffixes checked against every preferred name in the document.
+        Opaque mounts and WebSockets retain their x-pyfly-* inventory extensions.
         """
-        self._schemas = {}
-
+        registry = SchemaRegistry(self._schema_generator)
         paths: dict[str, Any] = {}
-        tags: list[dict[str, str]] = []
-        if route_metadata:
-            paths = self._build_paths(route_metadata)
-            tags = self._collect_tags(route_metadata)
+        entries: list[tuple[str, str, str, bool, bool]] = []
+        validation_keys: list[tuple[str, str]] = []
+        for meta in sorted(route_metadata or (), key=lambda item: (item.path, item.http_method.lower())):
+            method = meta.http_method.lower()
+            if method in paths.get(meta.path, {}):
+                raise ValueError(f"Duplicate controller operation: {method.upper()} {meta.path}")
+            override = meta.operation or OpenAPIOperation()
+            operation = self._operation(meta, override, registry)
+            paths.setdefault(meta.path, {})[method] = operation
+            preferred = override.operation_id or meta.mapping_name or meta.handler_name
+            entries.append((meta.path, method, preferred, override.operation_id is not None, False))
+            if operation["responses"].get("422") is _INFERRED_VALIDATION:
+                validation_keys.append((meta.path, method))
+                operation["responses"].pop("422")
 
-        # operationIds must be unique across the document (OpenAPI 3.1). A mounted route's name
-        # is its endpoint's ``__name__`` unless the route was named, and six sub-applications
-        # each carrying a ``health`` endpoint are the normal case, not the exception. The first
-        # holder of a name keeps it (the controllers' ids are taken first, so a controller never
-        # loses its id to a mounted twin); every later one is qualified by method and path,
-        # which is deterministic, so a diff of the document stays stable.
-        taken: set[str] = {
-            str(operation.get("operationId"))
-            for operations in paths.values()
-            for operation in operations.values()
-            if isinstance(operation, dict) and operation.get("operationId")
-        }
         opaque_mounts: list[dict[str, str]] = []
-        for mounted in mounted_routes or ():
+        for mounted in sorted(mounted_routes or (), key=lambda item: (item.path, item.method or "", item.name)):
             if mounted.method is None:
                 opaque_mounts.append({"path": mounted.path, "name": mounted.name})
                 continue
-            operations = paths.setdefault(mounted.path, {})
-            method_key = mounted.method.lower()
-            if method_key in operations:
+            method = mounted.method.lower()
+            if method in paths.get(mounted.path, {}):
                 continue
-            operation_id = mounted.name
-            if operation_id in taken:
-                operation_id = f"{mounted.name}_{method_key}_{_path_slug(mounted.path)}"
-            taken.add(operation_id)
-            operation: dict[str, Any] = {"operationId": operation_id}
+            operation = {"responses": {"default": {"description": "Successful response"}}, "x-pyfly-mounted": True}
             if mounted.summary:
                 operation["summary"] = mounted.summary
             if mounted.parameters:
                 operation["parameters"] = [parameter.to_openapi() for parameter in mounted.parameters]
-            operation["responses"] = {"default": {"description": "Successful response"}}
-            operation["x-pyfly-mounted"] = True
-            operations[method_key] = operation
-
-        spec: dict[str, Any] = {
-            "openapi": "3.1.0",
-            "info": self._build_info(),
-            "paths": paths,
-        }
-
+            paths.setdefault(mounted.path, {})[method] = operation
+            entries.append((mounted.path, method, mounted.name, False, True))
+        self._assign_ids(paths, entries)
+        info = {"title": self._title, "version": self._version}
+        if self._description:
+            info["description"] = self._description
+        spec: dict[str, Any] = {"openapi": "3.1.0", "info": info, "paths": paths}
+        tags = sorted({tag for ops in paths.values() for op in ops.values() for tag in op.get("tags", [])})
         if tags:
-            spec["tags"] = tags
-
-        if self._schemas:
-            spec["components"] = {"schemas": self._schemas}
-
+            spec["tags"] = [{"name": tag} for tag in tags]
+        if self._security is not None:
+            spec["security"] = [dict(requirement) for requirement in self._security]
         if websocket_routes:
-            spec["x-pyfly-websocket-routes"] = websocket_routes
-
+            spec["x-pyfly-websocket-routes"] = deepcopy(websocket_routes)
         if opaque_mounts:
             spec["x-pyfly-mounts"] = opaque_mounts
 
+        # Inject built-in errors after user names are known: user HTTPValidationError
+        # models must never overwrite the built-in error (or vice versa).
+        spec, schemas = registry.resolve(spec)
+        if validation_keys:
+            names: list[str] = []
+            for base in ("ValidationError", "HTTPValidationError"):
+                name = base
+                suffix = 2
+                while name in schemas or name in names:
+                    name = f"{base}_{suffix}"
+                    suffix += 1
+                names.append(name)
+            schemas[names[0]] = deepcopy(_VALIDATION_ERROR_SCHEMA)
+            schemas[names[1]] = deepcopy(_HTTP_VALIDATION_ERROR_SCHEMA)
+            schemas[names[1]]["properties"]["detail"]["items"]["$ref"] = f"#/components/schemas/{names[0]}"
+            for path, method in validation_keys:
+                spec["paths"][path][method]["responses"]["422"] = {
+                    "description": "Validation Error",
+                    "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{names[1]}"}}},
+                }
+        components: dict[str, Any] = {}
+        if schemas:
+            components["schemas"] = schemas
+        if self._security_schemes:
+            components["securitySchemes"] = deepcopy(self._security_schemes)
+        if components:
+            spec["components"] = components
         return spec
 
-    # ------------------------------------------------------------------
-    # Info
-    # ------------------------------------------------------------------
-
-    def _build_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {
-            "title": self._title,
-            "version": self._version,
-        }
-        if self._description:
-            info["description"] = self._description
-        return info
-
-    # ------------------------------------------------------------------
-    # Tags
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def _collect_tags(route_metadata: list[RouteMetadata]) -> list[dict[str, str]]:
-        """Collect unique tags from route metadata, preserving discovery order."""
-        seen: set[str] = set()
-        tags: list[dict[str, str]] = []
-        for meta in route_metadata:
-            if meta.tag and meta.tag not in seen:
-                seen.add(meta.tag)
-                tags.append({"name": meta.tag})
-        return tags
+    def _assign_ids(paths: dict[str, Any], entries: list[tuple[str, str, str, bool, bool]]) -> None:
+        explicit: set[str] = set()
+        for _path, _method, preferred, is_explicit, _mounted in entries:
+            if is_explicit:
+                if preferred in explicit:
+                    raise ValueError(f"Duplicate explicit operation ID: {preferred}")
+                explicit.add(preferred)
+        reserved = {entry[2] for entry in entries}
+        taken = set(explicit)
+        for path, method, preferred, is_explicit, _mounted in sorted(entries, key=lambda e: (e[4], e[0], e[1])):
+            if is_explicit:
+                operation_id = preferred
+            elif preferred not in taken:
+                operation_id = preferred
+                taken.add(operation_id)
+            else:
+                base = f"{preferred}_{method}_{_path_slug(path)}"
+                operation_id = base
+                suffix = 2
+                while operation_id in taken or operation_id in reserved:
+                    operation_id = f"{base}_{suffix}"
+                    suffix += 1
+                taken.add(operation_id)
+            paths[path][method]["operationId"] = operation_id
 
-    # ------------------------------------------------------------------
-    # Paths
-    # ------------------------------------------------------------------
+    def _operation(self, meta: RouteMetadata, override: OpenAPIOperation, registry: SchemaRegistry) -> dict[str, Any]:
+        context = f"{meta.http_method.upper()} {meta.path}"
+        operation: dict[str, Any] = {}
+        for key in ("summary", "description", "deprecated"):
+            value = getattr(override, key)
+            if value is None:
+                value = getattr(meta, key)
+            if value:
+                operation[key] = value
+        tags = override.tags if override.tags is not None else ([meta.tag] if meta.tag else [])
+        if tags:
+            operation["tags"] = list(tags)
+        if override.security is not None:
+            operation["security"] = deepcopy([dict(requirement) for requirement in override.security])
 
-    def _build_paths(self, route_metadata: list[RouteMetadata]) -> dict[str, Any]:
-        """Build the ``paths`` dict from a list of RouteMetadata."""
-        paths: dict[str, Any] = {}
-
-        for meta in route_metadata:
-            path = meta.path
-            method_key = meta.http_method.lower()
-
-            if path not in paths:
-                paths[path] = {}
-
-            operation: dict[str, Any] = {
-                "operationId": meta.handler_name,
-                "responses": self._build_responses(meta),
-            }
-
-            # Tag
-            if meta.tag:
-                operation["tags"] = [meta.tag]
-
-            # Summary and description from docstrings
-            if meta.summary:
-                operation["summary"] = meta.summary
-            if meta.description:
-                operation["description"] = meta.description
-
-            # Deprecated
-            if meta.deprecated:
-                operation["deprecated"] = True
-
-            # Parameters
-            if meta.parameters:
-                operation["parameters"] = meta.parameters
-
-            # Request body
-            if meta.request_body_model is not None:
-                ref = self._register_model(meta.request_body_model)
-                operation["requestBody"] = {
-                    "required": True,
-                    "content": {
-                        "application/json": {
-                            "schema": {"$ref": ref},
-                        }
-                    },
+        parameters: list[dict[str, Any]] = []
+        if override.parameters is not None:
+            for parameter in override.parameters:
+                item: dict[str, Any] = {
+                    "name": parameter.name,
+                    "in": parameter.location,
+                    "required": parameter.required,
+                    "schema": registry.schema(
+                        parameter.schema, "validation", context=context, default=parameter.default
+                    ),
                 }
-
-            paths[path][method_key] = operation
-
-        return paths
-
-    # ------------------------------------------------------------------
-    # Responses
-    # ------------------------------------------------------------------
-
-    def _build_responses(self, meta: RouteMetadata) -> dict[str, Any]:
-        """Build the ``responses`` dict for a single operation."""
-        status = str(meta.status_code)
-        responses: dict[str, Any] = {}
-
-        if meta.status_code == 204:
-            responses[status] = {"description": "No Content"}
-        elif meta.return_type is not None and self._is_pydantic_model(meta.return_type):
-            ref = self._register_model(meta.return_type)
-            responses[status] = {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {"$ref": ref},
-                    }
-                },
-            }
-        elif meta.return_type is not None and self._is_list_of_pydantic(meta.return_type):
-            inner = self._get_list_inner_type(meta.return_type)
-            ref = self._register_model(inner)
-            responses[status] = {
-                "description": "Successful response",
-                "content": {
-                    "application/json": {
-                        "schema": {
-                            "type": "array",
-                            "items": {"$ref": ref},
-                        }
-                    }
-                },
-            }
-        elif meta.media_type != "application/json":
-            # An @sse_mapping: the body is a stream of text/event-stream frames, not a JSON document,
-            # and saying so is the difference between a described stream and an undescribed one.
-            responses[status] = {
-                "description": "Event stream",
-                "content": {meta.media_type: {"schema": {"type": "string"}}},
-            }
+                if parameter.description:
+                    item["description"] = parameter.description
+                parameters.append(item)
         else:
-            responses[status] = {"description": "Successful response"}
+            parameters = deepcopy(meta.parameters)
+            for item in parameters:
+                identity = (item["in"], item["name"])
+                if identity in meta.parameter_types:
+                    item["schema"] = registry.schema(
+                        meta.parameter_types[identity],
+                        "validation",
+                        context=context,
+                        default=item.get("schema", {}).get("default", UNSET),
+                    )
+        if parameters:
+            operation["parameters"] = parameters
 
-        # Add 422 Validation Error for endpoints with request bodies
-        if meta.request_body_model is not None:
-            self._ensure_validation_schemas()
-            responses["422"] = {
-                "description": "Validation Error",
-                "content": {
-                    "application/json": {
-                        "schema": {"$ref": "#/components/schemas/HTTPValidationError"},
-                    }
-                },
+        body = override.request_body
+        if body is UNSET and meta.request_body_model is not None:
+            body = OpenAPIRequestBody(content={"application/json": meta.request_body_model})
+        if isinstance(body, OpenAPIRequestBody):
+            operation["requestBody"] = {
+                "required": body.required,
+                "content": self._content(body.content, "validation", registry, context),
             }
+            if body.description:
+                operation["requestBody"]["description"] = body.description
 
-        return responses
-
-    # ------------------------------------------------------------------
-    # Schema registration
-    # ------------------------------------------------------------------
-
-    def _register_model(self, model: type) -> str:
-        """Register a Pydantic model in ``components.schemas`` and return a ``$ref`` string.
-
-        Handles Pydantic v2's ``$defs`` by hoisting nested model schemas
-        into ``components/schemas`` and rewriting internal ``$ref`` paths.
-        """
-        name = model.__name__
-        if name not in self._schemas:
-            schema = model.model_json_schema()  # type: ignore[attr-defined]
-
-            # Hoist $defs into components/schemas
-            defs = schema.pop("$defs", None)
-            if defs:
-                for def_name, def_schema in defs.items():
-                    if def_name not in self._schemas:
-                        self._schemas[def_name] = self._rewrite_refs(def_schema)
-
-            self._schemas[name] = self._rewrite_refs(schema)
-
-        return f"#/components/schemas/{name}"
-
-    def _ensure_validation_schemas(self) -> None:
-        """Register the standard validation error schemas if not already present."""
-        if "ValidationError" not in self._schemas:
-            self._schemas["ValidationError"] = _VALIDATION_ERROR_SCHEMA
-        if "HTTPValidationError" not in self._schemas:
-            self._schemas["HTTPValidationError"] = _HTTP_VALIDATION_ERROR_SCHEMA
+        responses: dict[str, Any] = {}
+        if not override.replace_responses:
+            status = str(meta.status_code)
+            # A status override also suppresses generation of its inferred schema.
+            if not any(str(key) == status for key in override.responses or {}):
+                response: dict[str, Any] = {"description": "Successful response"}
+                if meta.status_code == 204:
+                    response = {"description": "No Content"}
+                elif meta.media_type != "application/json":
+                    response = {
+                        "description": "Event stream",
+                        "content": {meta.media_type: {"schema": {"type": "string"}}},
+                    }
+                elif meta.return_type is not None and meta.return_type is not type(None):
+                    schema = registry.schema(meta.return_type, "serialization", context=context, explicit=False)
+                    if schema is not None:
+                        response["content"] = {"application/json": {"schema": schema}}
+                responses[status] = response
+            if "requestBody" in operation:
+                responses["422"] = _INFERRED_VALIDATION
+        for status_key, response_override in (override.responses or {}).items():
+            responses[str(status_key)] = self._response(response_override, registry, context)
+        operation["responses"] = responses
+        return operation
 
     @staticmethod
-    def _rewrite_refs(schema: Any) -> Any:
-        """Rewrite ``$ref: #/$defs/Name`` → ``$ref: #/components/schemas/Name``."""
-        if isinstance(schema, dict):
-            result = {}
-            for key, value in schema.items():
-                if key == "$ref" and isinstance(value, str) and value.startswith("#/$defs/"):
-                    result[key] = value.replace("#/$defs/", "#/components/schemas/")
-                else:
-                    result[key] = OpenAPIGenerator._rewrite_refs(value)
-            return result
-        if isinstance(schema, list):
-            return [OpenAPIGenerator._rewrite_refs(item) for item in schema]
-        return schema
+    def _content(
+        content: Mapping[str, Any], mode: JsonSchemaMode, registry: SchemaRegistry, context: str
+    ) -> dict[str, Any]:
+        return {media: {"schema": registry.schema(schema, mode, context=context)} for media, schema in content.items()}
 
-    # ------------------------------------------------------------------
-    # Type introspection helpers
-    # ------------------------------------------------------------------
+    def _response(self, response: OpenAPIResponse, registry: SchemaRegistry, context: str) -> dict[str, Any]:
+        result: dict[str, Any] = {"description": response.description}
+        if response.content:
+            result["content"] = self._content(response.content, "serialization", registry, context)
+        if response.headers:
+            headers: dict[str, Any] = {}
+            for name, header in response.headers.items():
+                item: dict[str, Any] = {"schema": registry.schema(header.schema, "serialization", context=context)}
+                if header.description:
+                    item["description"] = header.description
+                if header.required:
+                    item["required"] = True
+                headers[name] = item
+            result["headers"] = headers
+        return result
 
-    @staticmethod
-    def _is_pydantic_model(t: type) -> bool:
-        """Check if a type is a Pydantic BaseModel subclass."""
-        try:
-            return isinstance(t, type) and issubclass(t, BaseModel)
-        except TypeError:
-            return False
 
-    @staticmethod
-    def _is_list_of_pydantic(t: Any) -> bool:
-        """Check if a type is ``list[SomePydanticModel]``."""
-        origin = get_origin(t)
-        if origin is list:
-            args = get_args(t)
-            if args:
-                return OpenAPIGenerator._is_pydantic_model(args[0])
-        return False
-
-    @staticmethod
-    def _get_list_inner_type(t: Any) -> type:
-        """Extract the inner type from ``list[T]``."""
-        return cast(type, get_args(t)[0])
+_INFERRED_VALIDATION = object()

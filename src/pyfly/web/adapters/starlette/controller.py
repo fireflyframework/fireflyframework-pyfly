@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import inspect
 import typing
-from dataclasses import dataclass, field
 from typing import Any
 
 from starlette.requests import Request
@@ -26,7 +25,8 @@ from starlette.routing import Route
 
 from pyfly.web.adapters.starlette.resolver import ParameterResolver
 from pyfly.web.adapters.starlette.view_response import dispatch_response
-from pyfly.web.params import Body, Cookie, Header, PathVar, QueryParam, inspect_binding
+from pyfly.web.openapi_metadata import RouteMetadata as RouteMetadata
+from pyfly.web.params import Body, Cookie, Header, PathVar, QueryParam, _Binding, inspect_binding
 
 _MISSING = object()
 
@@ -42,29 +42,22 @@ def _py_type_to_openapi(t: type) -> str:
     return "string"
 
 
-@dataclass
-class RouteMetadata:
-    """Metadata extracted from a single controller handler method."""
+def _static_handler(cls: type, name: str) -> Any:
+    """Read only ordinary/static/class methods; never execute user descriptors."""
+    value = inspect.getattr_static(cls, name, None)
+    if isinstance(value, (staticmethod, classmethod)):
+        return value.__func__
+    return value if inspect.isfunction(value) else None
 
-    path: str
-    http_method: str
-    status_code: int
-    handler: Any
-    handler_name: str
-    parameters: list[dict[str, Any]] = field(default_factory=list)
-    request_body_model: type | None = None
-    return_type: type | None = None
-    tag: str = ""
-    summary: str = ""
-    description: str = ""
-    deprecated: bool = False
-    media_type: str = "application/json"
-    """Media type of the success response.
 
-    ``application/json`` for an ordinary mapping, ``text/event-stream`` for an ``@sse_mapping``. SSE is
-    plain HTTP — a GET whose body is a stream of events — so it is perfectly describable in OpenAPI, and
-    it only ever went missing because the collector looked at a single attribute.
-    """
+def _schema_type(hint: Any) -> Any:
+    """Remove binding sentinels while preserving Pydantic's Annotated constraints."""
+    metadata = getattr(hint, "__metadata__", ())
+    if not metadata:
+        return hint
+    inner = typing.get_args(hint)[0]
+    constraints = tuple(item for item in metadata if not isinstance(item, _Binding))
+    return typing.Annotated[(inner, *constraints)] if constraints else inner
 
 
 async def _maybe_await(result: Any) -> Any:
@@ -108,7 +101,7 @@ class ControllerRegistrar:
             base_path = getattr(cls, "__pyfly_request_mapping__", "")
 
             for attr_name in dir(cls):
-                method_obj = getattr(cls, attr_name, None)
+                method_obj = _static_handler(cls, attr_name)
                 if method_obj is None:
                     continue
 
@@ -148,7 +141,7 @@ class ControllerRegistrar:
             tag = self._derive_tag(cls)
 
             for attr_name in dir(cls):
-                method_obj = getattr(cls, attr_name, None)
+                method_obj = _static_handler(cls, attr_name)
                 if method_obj is None:
                     continue
 
@@ -178,9 +171,16 @@ class ControllerRegistrar:
 
                 # Extract parameter metadata and request body model from type hints
                 params, body_model = self._extract_param_metadata(method_obj)
+                hints = typing.get_type_hints(method_obj, include_extras=True)
+                parameter_types = {}
+                for name, hint in hints.items():
+                    binding, _inner, _valid = inspect_binding(hint)
+                    location = {PathVar: "path", QueryParam: "query", Header: "header", Cookie: "cookie"}.get(binding)
+                    if location is not None:
+                        wire_name = name.replace("_", "-") if binding is Header else name
+                        parameter_types[location, wire_name] = _schema_type(hint)
 
                 # Extract return type
-                hints = typing.get_type_hints(method_obj, include_extras=True)
                 return_type = hints.get("return")
                 from pyfly.web.views import ModelAndView
 
@@ -208,6 +208,9 @@ class ControllerRegistrar:
                         description=description,
                         deprecated=deprecated,
                         media_type=media_type,
+                        mapping_name=mapping.get("name") if mapping is not None else None,
+                        operation=getattr(method_obj, "__pyfly_openapi__", None),
+                        parameter_types=parameter_types,
                     )
                 )
 
@@ -232,7 +235,7 @@ class ControllerRegistrar:
             base_path = getattr(cls, "__pyfly_request_mapping__", "")
 
             for attr_name in dir(cls):
-                method_obj = getattr(cls, attr_name, None)
+                method_obj = _static_handler(cls, attr_name)
                 ws_mapping = getattr(method_obj, "__pyfly_ws_mapping__", None) if method_obj else None
 
                 if ws_mapping is None:
@@ -277,69 +280,33 @@ class ControllerRegistrar:
             description = "\n".join(line.strip() for line in lines[2:]).strip()
         return summary, description
 
-    def _extract_param_metadata(self, handler: Any) -> tuple[list[dict[str, Any]], type | None]:
-        """Extract OpenAPI parameter dicts and request body model from handler type hints."""
-        from pydantic import BaseModel
-
+    def _extract_param_metadata(self, handler: Any) -> tuple[list[dict[str, Any]], Any]:
+        """Keep legacy parameter dictionaries alongside rich types on RouteMetadata."""
         hints = typing.get_type_hints(handler, include_extras=True)
-        sig = inspect.signature(handler)
         params: list[dict[str, Any]] = []
-        body_model: type | None = None
-
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-
+        body_model: Any = None
+        for name, param in inspect.signature(handler).parameters.items():
             hint = hints.get(name)
             if hint is None:
                 continue
-
             binding, inner_type, _validate = inspect_binding(hint)
-            if binding is None:
+            if binding is Body:
+                body_model = _schema_type(hint)
                 continue
-
+            location = {PathVar: "path", QueryParam: "query", Header: "header", Cookie: "cookie"}.get(binding)
+            if location is None:
+                continue
             default = param.default if param.default is not inspect.Parameter.empty else _MISSING
-
-            if binding is PathVar:
-                params.append(
-                    {
-                        "name": name,
-                        "in": "path",
-                        "required": True,
-                        "schema": {"type": _py_type_to_openapi(inner_type)},
-                    }
-                )
-            elif binding is QueryParam:
-                p: dict[str, Any] = {
-                    "name": name,
-                    "in": "query",
-                    "required": default is _MISSING,
-                    "schema": {"type": _py_type_to_openapi(inner_type)},
-                }
-                if default is not _MISSING:
-                    p["schema"]["default"] = default
-                params.append(p)
-            elif binding is Header:
-                params.append(
-                    {
-                        "name": name.replace("_", "-"),
-                        "in": "header",
-                        "required": default is _MISSING,
-                        "schema": {"type": _py_type_to_openapi(inner_type)},
-                    }
-                )
-            elif binding is Cookie:
-                params.append(
-                    {
-                        "name": name,
-                        "in": "cookie",
-                        "required": default is _MISSING,
-                        "schema": {"type": _py_type_to_openapi(inner_type)},
-                    }
-                )
-            elif binding is Body and isinstance(inner_type, type) and issubclass(inner_type, BaseModel):
-                body_model = inner_type
-
+            required = binding is PathVar or (default is _MISSING and type(None) not in typing.get_args(inner_type))
+            item: dict[str, Any] = {
+                "name": name.replace("_", "-") if binding is Header else name,
+                "in": location,
+                "required": required,
+                "schema": {"type": _py_type_to_openapi(inner_type)},
+            }
+            if default is not _MISSING:
+                item["schema"]["default"] = default
+            params.append(item)
         return params, body_model
 
     def _collect_exception_handlers(self, instance: Any) -> dict[type[Exception], Any]:

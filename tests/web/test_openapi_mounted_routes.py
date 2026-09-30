@@ -182,8 +182,8 @@ class TestGeneratorEmitsMountedRoutes:
 
     def test_operation_ids_are_unique_across_the_document(self) -> None:
         """Six sub-apps each with a ``health`` endpoint produced six ``operationId: health`` —
-        an OpenAPI document that does not validate. The first keeps the bare name; the others
-        are qualified by method and path, deterministically, so a diff of the document is stable."""
+        an OpenAPI document that does not validate. The first in sorted path/method order
+        keeps the bare name; the others are qualified by method and path, deterministically."""
         from pyfly.web.adapters.starlette.controller import RouteMetadata
 
         meta = RouteMetadata(path="/status", http_method="GET", status_code=200, handler=ping, handler_name="health")
@@ -213,8 +213,8 @@ class TestGeneratorEmitsMountedRoutes:
             spec["paths"]["/api/telegram/{botId}/health"]["get"]["operationId"]
             == "health_get_api_telegram_botId_health"
         )
-        assert spec["paths"]["/api/events"]["post"]["operationId"] == "events"
-        assert spec["paths"]["/api/events"]["get"]["operationId"] == "events_get_api_events"
+        assert spec["paths"]["/api/events"]["post"]["operationId"] == "events_post_api_events"
+        assert spec["paths"]["/api/events"]["get"]["operationId"] == "events"
 
     def test_a_controller_operation_is_never_overwritten_by_a_mounted_one(self) -> None:
         from pyfly.web.adapters.starlette.controller import RouteMetadata
