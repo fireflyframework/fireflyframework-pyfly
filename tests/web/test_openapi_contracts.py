@@ -560,3 +560,33 @@ def test_nullable_body_default_does_not_invent_optional_runtime_binding():
     body = spec["paths"]["/nullable"]["post"]["requestBody"]
     assert body["required"] is True
     assert {"type": "null"} in body["content"]["application/json"]["schema"]["anyOf"]
+
+
+@pytest.mark.parametrize(
+    "binding,location,required",
+    [(QueryParam, "query", False), (Header, "header", False), (Cookie, "cookie", False), (PathVar, "path", True)],
+)
+async def test_none_only_parameters_match_omission_behavior(binding, location, required):
+    from pyfly.web.adapters.starlette.resolver import ParameterResolver
+
+    path = "/none/{value}" if location == "path" else "/none"
+
+    @rest_controller
+    class NoneOnlyController:
+        @get_mapping(path)
+        def handle(self, value: binding[type(None)]) -> str:
+            return "ok"
+
+    spec = generate(*ControllerRegistrar().collect_route_metadata(context(NoneOnlyController)))
+    param = spec["paths"][path]["get"]["parameters"][0]
+    assert param["in"] == location
+    assert param["schema"] == {"type": "null"}
+    assert param["required"] is required
+
+    resolver = ParameterResolver(NoneOnlyController.handle)
+    request = Request({"type": "http", "headers": [], "query_string": b"", "path_params": {}})
+    if required:
+        with pytest.raises(ValueError, match="Missing path variable"):
+            await resolver.resolve(request)
+    else:
+        assert await resolver.resolve(request) == {"value": None}

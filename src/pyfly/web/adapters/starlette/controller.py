@@ -297,7 +297,8 @@ class ControllerRegistrar:
             if location is None:
                 continue
             default = param.default if param.default is not inspect.Parameter.empty else _MISSING
-            required = binding is PathVar or (default is _MISSING and type(None) not in typing.get_args(inner_type))
+            permits_none = inner_type is type(None) or type(None) in typing.get_args(inner_type)
+            required = binding is PathVar or (default is _MISSING and not permits_none)
             item: dict[str, Any] = {
                 "name": name.replace("_", "-") if binding is Header else name,
                 "in": location,
