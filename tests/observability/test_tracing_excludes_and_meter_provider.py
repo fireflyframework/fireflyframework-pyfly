@@ -140,16 +140,26 @@ class TestMeterProvider:
     def test_no_endpoint_means_a_provider_with_no_reader(self, monkeypatch: Any) -> None:
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", raising=False)
-        provider = MeterProviderAutoConfiguration().meter_provider(Config({}))
+        provider = MeterProviderAutoConfiguration().meter_provider(
+            Config({"pyfly": {"observability": {"metrics": {"register-global": False}}}})
+        )
         assert isinstance(provider, MeterProvider)
         assert list(provider._sdk_config.metric_readers) == []
         # Instruments still work — a service records; nothing is exported.
         provider.get_meter("t").create_counter("requests").add(1)
+        provider.shutdown()
 
     def test_an_endpoint_wires_an_otlp_http_reader(self, monkeypatch: Any) -> None:
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", raising=False)
         cfg = Config(
-            {"pyfly": {"observability": {"tracing": {"otlp": {"endpoint": "http://collector:4318/v1/traces"}}}}}
+            {
+                "pyfly": {
+                    "observability": {
+                        "metrics": {"register-global": False},
+                        "tracing": {"otlp": {"endpoint": "http://collector:4318/v1/traces"}},
+                    }
+                }
+            }
         )
         provider = MeterProviderAutoConfiguration().meter_provider(cfg)
         (reader,) = provider._sdk_config.metric_readers
@@ -158,7 +168,15 @@ class TestMeterProvider:
         provider.shutdown()
 
     def test_the_metrics_endpoint_may_be_set_on_its_own(self) -> None:
-        cfg = Config({"pyfly": {"observability": {"metrics": {"otlp": {"endpoint": "http://m:4318/v1/metrics"}}}}})
+        cfg = Config(
+            {
+                "pyfly": {
+                    "observability": {
+                        "metrics": {"register-global": False, "otlp": {"endpoint": "http://m:4318/v1/metrics"}}
+                    }
+                }
+            }
+        )
         provider = MeterProviderAutoConfiguration().meter_provider(cfg)
         (reader,) = provider._sdk_config.metric_readers
         assert reader._exporter._endpoint == "http://m:4318/v1/metrics"
@@ -176,7 +194,8 @@ class TestMeterProvider:
             await ctx.stop()
 
     def test_the_two_auto_configurations_share_the_service_name(self) -> None:
-        cfg = Config({"pyfly": {"app": {"name": "orders"}}})
+        cfg = Config({"pyfly": {"app": {"name": "orders"}, "observability": {"metrics": {"register-global": False}}}})
         provider = MeterProviderAutoConfiguration().meter_provider(cfg)
         assert provider._sdk_config.resource.attributes["service.name"] == "orders"
         assert TracingAutoConfiguration._service_name(cfg) == "orders"
+        provider.shutdown()

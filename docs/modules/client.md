@@ -453,8 +453,91 @@ This abstraction allows:
   HTTP library.
 
 The default implementation is `HttpxClientAdapter`, which wraps
-`httpx.AsyncClient`. It accepts `base_url`, `timeout`, and `headers` in its
-constructor.
+`httpx.AsyncClient`. Its existing `base_url`, `timeout`, `headers`, and
+`request(method, url, **kwargs)` calls retain their behavior. `request()` eagerly
+buffers responses and does **not** impose a response-size limit.
+
+### Bounded responses and transport ownership
+
+Use the optional `BoundedHttpClientPort` capability when the caller needs a
+response payload limit. It extends `HttpClientPort` with
+`request_bounded(method, url, *, max_response_bytes, **kwargs)`; existing structural
+implementations of `HttpClientPort` do not need to add this method.
+
+```python
+from pyfly.client import HttpxClientAdapter, ResponseTooLargeException
+
+adapter = HttpxClientAdapter(trust_env=False, verify=True, retries=0)
+try:
+    response = await adapter.request_bounded(
+        "GET", "https://api.example.com/items", max_response_bytes=64 * 1024,
+        headers={"Authorization": "Bearer ..."},
+    )
+    response.raise_for_status()
+    items = response.json()
+except ResponseTooLargeException:
+    # The response was closed without retaining the overflowing chunk.
+    raise
+finally:
+    await adapter.stop()
+```
+
+The bounded path checks each raw chunk **before** appending it. An oversized
+response raises `ResponseTooLargeException`; `Content-Length` is never trusted as
+the sole limit. Zero permits an empty body. Success returns a buffered
+`httpx.Response` with status, headers, request, and extensions preserved. This
+method closes the underlying response on success, size/encoding rejection,
+read failure, and cancellation, including cancellation while closing. It waits
+for cleanup to finish before returning or propagating cancellation; a custom
+transport's close operation must therefore terminate.
+
+The guarantee is deliberately narrow:
+
+- `Accept-Encoding: identity` is sent, and any response `Content-Encoding` other
+  than `identity` (case-insensitive) is rejected before consumption, with
+  `UnsupportedContentEncodingException`. There is no automatic decompression.
+- Automatic redirects are disabled even if enabled on a supplied client;
+  `follow_redirects=True` is rejected. A redirect response is subject to the same
+  body cap and is returned for application handling. Applications must validate
+  each destination before explicitly requesting another hop.
+- HTTPX auth challenge flows can buffer intermediate responses, so this method
+  disables client auth and rejects a per-call `auth` value. Pass explicit
+  authorization headers. Supplied clients with any event hooks are rejected
+  before dispatch because hooks can buffer or bypass policy.
+- The limit applies to the retained payload, not total process memory. Transport
+  chunks are already allocated before the adapter receives them; buffering and
+  the final conversion may temporarily hold copies of up to the limit. Request
+  bodies, HTTP headers, transport buffers, and custom transport allocations are
+  outside the cap. A custom transport or client subclass is trusted not to buffer
+  upstream bodies internally; already-buffered custom responses are checked but
+  their prior allocation cannot be prevented.
+- There is no retry wrapper on either method. HTTPX's normal transport uses zero
+  connection retries by default. Explicit `retries=N` opts into HTTPX connection
+  retries only and requires `trust_env=False`; configure any proxy explicitly.
+  Supplied clients/transports own their retry behavior. Application/declarative
+  retry wrappers remain separate and can repeat operations.
+
+Constructor controls and ownership:
+
+| Argument | Behavior |
+|---|---|
+| `client=AsyncClient(...)` | Uses that public client unchanged for ordinary requests. Borrowed by default; `owns_client=True` transfers closing responsibility to the adapter. Configure all client settings on that client; conflicting adapter settings are rejected. |
+| `transport=AsyncBaseTransport(...)` | Creates an owned client over the supplied transport. The transport is borrowed by default; `owns_transport=True` transfers closing responsibility. Configure TLS, proxy, and retries on the custom transport itself. |
+| `verify=True/False/SSLContext` | TLS verification for an internally constructed default client/transport; default is `True`. |
+| `proxy=str/Proxy` | Explicit proxy for the default transport. |
+| `trust_env=False` | Disables HTTPX environment proxy and TLS trust configuration for the owned default transport. If omitted, the existing HTTPX `True` default is preserved. Custom transports must independently disable environment use when appropriate. |
+| `retries=0` | No transport connection retries by default. Positive values require explicit `trust_env=False`; negative/non-integer values are rejected. |
+
+`start()` is a no-op and repeated `stop()` is safe. Internally created clients are
+always owned. Borrowed clients/transports must be closed by their owner.
+
+For DNS resolution, address validation, connected-peer checks, pool isolation,
+and SSRF rules, provide an application-owned `httpx.AsyncBaseTransport` (or an
+`AsyncClient` configured with one). These are public extension points: no private
+PyFly `_client` mutation is needed. PyFly does not choose destination policy,
+pin DNS, validate peers, or authorize redirects. A transport implementing those
+rules must validate before writing and preserve TLS hostname verification; a
+response hook runs too late to prevent a disallowed outbound request.
 
 ### Implementing a Custom Adapter
 

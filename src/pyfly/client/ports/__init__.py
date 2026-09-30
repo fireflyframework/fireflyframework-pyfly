@@ -13,6 +13,6 @@
 # limitations under the License.
 """Client ports — abstract interfaces for service communication."""
 
-from pyfly.client.ports.outbound import HttpClientPort
+from pyfly.client.ports.outbound import BoundedHttpClientPort, HttpClientPort
 
-__all__ = ["HttpClientPort"]
+__all__ = ["BoundedHttpClientPort", "HttpClientPort"]

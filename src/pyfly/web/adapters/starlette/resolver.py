@@ -175,6 +175,8 @@ class ParameterResolver:
 
     async def _resolve_body(self, request: Request, param: ResolvedParam) -> Any:
         body_bytes = await request.body()
+        if param.inner_type is bytes:
+            return body_bytes
         # Scalar/str bodies are format-agnostic — keep the simple constructor path.
         if not (isinstance(param.inner_type, type) and issubclass(param.inner_type, BaseModel)):
             return param.inner_type(body_bytes.decode())

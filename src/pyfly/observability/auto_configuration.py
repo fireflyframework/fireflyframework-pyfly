@@ -16,6 +16,7 @@
 # NOTE: No `from __future__ import annotations` — typing.get_type_hints()
 # must resolve return types at runtime for @bean method registration.
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -26,24 +27,30 @@ except ImportError:
     MetricsRegistry = object  # type: ignore[misc,assignment]
 
 try:
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.trace import TracerProvider
 except ImportError:
     TracerProvider = object  # type: ignore[misc,assignment]
 
 try:
-    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.metrics import MeterProvider
 except ImportError:
     MeterProvider = object  # type: ignore[misc,assignment]
 
 from pyfly.container.bean import bean
-from pyfly.context.conditions import auto_configuration, conditional_on_class
+from pyfly.context.conditions import auto_configuration, conditional_on_class, conditional_on_missing_bean
+from pyfly.context.lifecycle import pre_destroy
 from pyfly.core.config import Config
 
 _logger = logging.getLogger(__name__)
 
 
+def _register_global(config: Config, signal: str) -> bool:
+    return str(config.get(f"pyfly.observability.{signal}.register-global", True)).lower() == "true"
+
+
 @auto_configuration
 @conditional_on_class("prometheus_client")
+@conditional_on_missing_bean(MetricsRegistry)
 class MetricsAutoConfiguration:
     """Auto-configures a MetricsRegistry bean when prometheus_client is installed."""
 
@@ -60,9 +67,19 @@ class MetricsAutoConfiguration:
 
 
 @auto_configuration
-@conditional_on_class("opentelemetry")
+@conditional_on_class("opentelemetry.sdk.trace")
+@conditional_on_missing_bean(TracerProvider)
 class TracingAutoConfiguration:
     """Auto-configures an OpenTelemetry TracerProvider when opentelemetry is installed."""
+
+    def __init__(self) -> None:
+        self._owned_provider: Any = None
+
+    @pre_destroy
+    async def close(self) -> None:
+        if self._owned_provider is not None:
+            provider, self._owned_provider = self._owned_provider, None
+            await asyncio.to_thread(provider.shutdown)
 
     @staticmethod
     def _service_name(config: Config) -> str:
@@ -84,13 +101,26 @@ class TracingAutoConfiguration:
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider as _TracerProvider
 
+        register_global = _register_global(config, "tracing")
+        if register_global:
+            current = trace.get_tracer_provider()
+            if not isinstance(current, trace.ProxyTracerProvider):
+                return current
         service_name = self._service_name(config)
         resource = Resource.create({"service.name": service_name})
-        provider = _TracerProvider(resource=resource)
+        provider = _TracerProvider(resource=resource, shutdown_on_exit=register_global)
+        self._owned_provider = provider
         # Attach a span processor + exporter (audit #153). Without one, every
         # @span span is recorded into the provider and immediately discarded.
         self._install_span_processor(provider, config)
-        trace.set_tracer_provider(provider)
+        if register_global:
+            trace.set_tracer_provider(provider)
+            current = trace.get_tracer_provider()
+            if current is not provider:
+                provider.shutdown()
+            # Installed globals belong to the process (the SDK's atexit handler), not this context.
+            self._owned_provider = None
+            return current
         return provider
 
     _OTLP_TRACES_PATH = "/v1/traces"
@@ -172,6 +202,7 @@ class TracingAutoConfiguration:
 
 @auto_configuration
 @conditional_on_class("opentelemetry.sdk.metrics")
+@conditional_on_missing_bean(MeterProvider)
 class MeterProviderAutoConfiguration:
     """Auto-configures an OpenTelemetry ``MeterProvider`` beside the ``TracerProvider``.
 
@@ -183,6 +214,17 @@ class MeterProviderAutoConfiguration:
     it. With no endpoint at all the provider has no reader: instruments still work, nothing is
     exported, and tests stay offline.
     """
+
+    def __init__(self) -> None:
+        self._owned_provider: Any = None
+        self._pending_resource: Any = None
+
+    @pre_destroy
+    async def close(self) -> None:
+        resource = self._owned_provider if self._owned_provider is not None else self._pending_resource
+        self._owned_provider = self._pending_resource = None
+        if resource is not None:
+            await asyncio.to_thread(resource.shutdown)
 
     _OTLP_METRICS_PATH = "/v1/metrics"
     _OTLP_TRACES_PATH = "/v1/traces"
@@ -208,8 +250,15 @@ class MeterProviderAutoConfiguration:
     @bean
     def meter_provider(self, config: Config) -> MeterProvider:
         from opentelemetry import metrics
+        from opentelemetry.metrics._internal import _ProxyMeterProvider
         from opentelemetry.sdk.metrics import MeterProvider as _MeterProvider
         from opentelemetry.sdk.resources import Resource
+
+        register_global = _register_global(config, "metrics")
+        if register_global:
+            current = metrics.get_meter_provider()
+            if not isinstance(current, _ProxyMeterProvider):
+                return current
 
         explicit = config.get("pyfly.observability.metrics.otlp.endpoint") or os.environ.get(
             "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
@@ -234,7 +283,12 @@ class MeterProviderAutoConfiguration:
                     "installed — metrics will be dropped. Install it or unset the endpoint."
                 )
             else:
-                readers.append(PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint)))
+                # Transfer ownership only after each enclosing constructor succeeds.
+                exporter = OTLPMetricExporter(endpoint=endpoint)
+                self._pending_resource = exporter
+                reader = PeriodicExportingMetricReader(exporter)
+                self._pending_resource = reader
+                readers.append(reader)
         else:
             _logger.info(
                 "Metrics are active but no OTLP endpoint is configured — instruments record, nothing is exported. "
@@ -244,6 +298,15 @@ class MeterProviderAutoConfiguration:
         provider = _MeterProvider(
             resource=Resource.create({"service.name": TracingAutoConfiguration._service_name(config)}),
             metric_readers=readers,
+            shutdown_on_exit=register_global,
         )
-        metrics.set_meter_provider(provider)
+        self._owned_provider = provider
+        self._pending_resource = None
+        if register_global:
+            metrics.set_meter_provider(provider)
+            current = metrics.get_meter_provider()
+            if current is not provider:
+                provider.shutdown()
+            self._owned_provider = None
+            return current
         return provider

@@ -104,6 +104,8 @@ class TestVendorIsolation:
                 "bad = [l for l in lines "
                 "if 'adapters/' not in l and 'admin/server/' not in l "
                 "and '/security/' not in l "
+                # Standalone OAuth acquisition is an optional HTTP adapter, independent of web security.
+                "and '/oauth2/acquisition.py:' not in l "
                 "and '/notifications/providers/' not in l "
                 "and '/client/protocols/' not in l "
                 "and '/config_server/' not in l "

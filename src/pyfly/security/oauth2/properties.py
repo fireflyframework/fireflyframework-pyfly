@@ -81,6 +81,17 @@ class ResourceServerProperties:
     clock_skew_seconds: int = 60
     jwks_timeout_seconds: int = 30
     jwks_cache_seconds: int = 300
+    jwks_min_refresh_seconds: int = 30
+    jwks_max_bytes: int = 262144
+    jwks_max_keys: int = 100
+    max_token_bytes: int = 16384
+    discovery_max_bytes: int = 65536
+
+    # Optional provider-specific access-token policy; disabled when empty.
+    allowed_token_types: str = ""
+    required_token_use: str = ""
+    allowed_client_ids: str = ""
+    client_id_claim: str = "client_id"
 
     # --- claim mapping ----------------------------------------------------
     principal_claim_names: str = "oid,sub"
@@ -127,3 +138,9 @@ class ResourceServerProperties:
 
     def exclude_pattern_list(self) -> list[str]:
         return _csv(self.exclude_patterns)
+
+    def token_type_list(self) -> list[str]:
+        return _csv(self.allowed_token_types)
+
+    def client_id_list(self) -> list[str]:
+        return _csv(self.allowed_client_ids)

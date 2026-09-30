@@ -37,7 +37,8 @@ class TestSpanProcessorWiring:
     def test_console_exporter_wires_processor(self):
         provider = TracerProvider()
         TracingAutoConfiguration._install_span_processor(
-            provider, Config({"pyfly": {"observability": {"tracing": {"exporter": "console"}}}})
+            provider,
+            Config({"pyfly": {"observability": {"tracing": {"exporter": "console", "register-global": False}}}}),
         )
         assert len(_processors(provider)) == 1
 
@@ -56,9 +57,10 @@ class TestSpanProcessorWiring:
 
     def test_tracer_provider_bean_installs_processor(self):
         provider = TracingAutoConfiguration().tracer_provider(
-            Config({"pyfly": {"observability": {"tracing": {"exporter": "console"}}}})
+            Config({"pyfly": {"observability": {"tracing": {"exporter": "console", "register-global": False}}}})
         )
         assert len(_processors(provider)) == 1
+        provider.shutdown()
 
 
 class TestOtlpEndpointNormalisation:

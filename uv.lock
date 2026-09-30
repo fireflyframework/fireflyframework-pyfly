@@ -2337,7 +2337,7 @@ wheels = [
 
 [[package]]
 name = "pyfly"
-version = "26.9.9"
+version = "26.9.10"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -2447,6 +2447,9 @@ mysql = [
 ]
 notifications = [
     { name = "jinja2" },
+]
+oauth2-client = [
+    { name = "httpx" },
 ]
 observability = [
     { name = "opentelemetry-api" },
@@ -2566,6 +2569,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'client'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'idp-azure'", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'idp-keycloak'", specifier = ">=0.28.1" },
+    { name = "httpx", marker = "extra == 'oauth2-client'", specifier = ">=0.28.1" },
     { name = "hypercorn", marker = "extra == 'hypercorn'", specifier = ">=0.18.0" },
     { name = "jinja2", marker = "extra == 'cli'", specifier = ">=3.1.6" },
     { name = "jinja2", marker = "extra == 'notifications'", specifier = ">=3.1.6" },
@@ -2600,7 +2604,7 @@ requires-dist = [
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'web-fastapi'", specifier = ">=0.22.1" },
     { name = "websockets", marker = "extra == 'websocket'", specifier = ">=12.0" },
 ]
-provides-extras = ["templates", "webapp", "web", "data-relational", "testing", "argon2", "testcontainers", "data-document", "postgresql", "mysql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "client", "config-server-git", "grpc", "websocket", "idp-azure", "idp-keycloak", "idp-cognito", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "notifications", "cli", "shell", "web-fast", "web-fastapi", "full"]
+provides-extras = ["templates", "webapp", "web", "data-relational", "testing", "argon2", "testcontainers", "data-document", "postgresql", "mysql", "eda", "fastapi", "granian", "hypercorn", "kafka", "rabbitmq", "redis", "cache", "oauth2-client", "client", "config-server-git", "grpc", "websocket", "idp-azure", "idp-keycloak", "idp-cognito", "ecm-aws", "ecm-azure", "observability", "scheduling", "pii", "security", "notifications", "cli", "shell", "web-fast", "web-fastapi", "full"]
 
 [package.metadata.requires-dev]
 browser = [{ name = "playwright", specifier = ">=1.63.0" }]

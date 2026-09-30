@@ -55,7 +55,7 @@ class StripeSignatureValidator:
         try:
             parts = dict(pair.split("=", 1) for pair in signature.split(",") if "=" in pair)
             timestamp_str = parts.get("t", "")
-            if not timestamp_str:
+            if not timestamp_str.isascii() or not timestamp_str.isdecimal():
                 return False
             timestamp = int(timestamp_str)
         except (ValueError, AttributeError):
@@ -68,7 +68,7 @@ class StripeSignatureValidator:
         if not v1_values:
             return False
 
-        signed_payload = f"{timestamp}.{body.decode('utf-8', errors='replace')}".encode()
+        signed_payload = timestamp_str.encode("ascii") + b"." + body
         expected = hmac.new(self._secret, signed_payload, hashlib.sha256).hexdigest()
         return any(hmac.compare_digest(expected, v1) for v1 in v1_values)
 

@@ -13,7 +13,7 @@ from pyfly.webhooks.event_listener import (
     WebhookEvent,
     WebhookEventStore,
 )
-from pyfly.webhooks.signature import NoOpSignatureValidator, SignatureValidator
+from pyfly.webhooks.signature import SignatureValidator
 
 _logger = logging.getLogger(__name__)
 
@@ -27,7 +27,11 @@ class WebhookProcessor:
         *,
         signature_validators: dict[str, SignatureValidator] | None = None,
         event_store: WebhookEventStore | None = None,
+        max_body_bytes: int = 1024 * 1024,
     ) -> None:
+        if max_body_bytes < 1:
+            raise ValueError("max_body_bytes must be positive")
+        self._max_body_bytes = max_body_bytes
         self._listeners: dict[str, list[AbstractWebhookEventListener]] = {}
         for listener in listeners or []:
             self._listeners.setdefault(listener.source, []).append(listener)
@@ -49,15 +53,28 @@ class WebhookProcessor:
         signature_header: str = "X-Signature",
         idempotency_header: str = "X-Idempotency-Key",
     ) -> WebhookEvent:
-        validator = self._validators.get(source, NoOpSignatureValidator())
-        if not validator.is_valid(body=raw_body, signature=headers.get(signature_header)):
+        if len(raw_body) > self._max_body_bytes:
+            raise ValueError("Webhook body exceeds configured limit")
+        normalized: dict[str, str] = {}
+        for name, value in headers.items():
+            name = name.lower()
+            if name in normalized:
+                raise ValueError("ambiguous webhook header")
+            normalized[name] = value
+        validator = self._validators.get(source)
+        if validator is None:
+            raise ValueError("No signature validator configured for webhook source")
+        if not validator.is_valid(body=raw_body, signature=normalized.get(signature_header.lower())):
             msg = f"invalid signature for source '{source}'"
             raise ValueError(msg)
 
         body: dict[str, object] = {}
         if raw_body:
             try:
-                body = json.loads(raw_body)
+                decoded = json.loads(raw_body)
+                if not isinstance(decoded, dict):
+                    raise ValueError("Webhook JSON must be an object")
+                body = decoded
             except Exception:  # noqa: BLE001
                 body = {"_raw": raw_body.decode("utf-8", errors="replace")}
 
@@ -67,7 +84,7 @@ class WebhookProcessor:
             headers=dict(headers),
             body=body,
             raw_body=raw_body,
-            idempotency_key=headers.get(idempotency_header),
+            idempotency_key=normalized.get(idempotency_header.lower()),
         )
 
         if event.idempotency_key:

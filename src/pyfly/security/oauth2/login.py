@@ -342,15 +342,14 @@ class OAuth2LoginHandler:
                     data=data,
                     headers={"Accept": "application/json"},
                 )
-        except httpx.HTTPError as exc:
-            logger.error("Token exchange transport error: %s", exc)
+        except httpx.HTTPError:
+            logger.error("Token exchange transport error")
             return {}
 
         if response.status_code != 200:
             logger.error(
-                "Token exchange failed (HTTP %d): %s",
+                "Token exchange failed (HTTP %d)",
                 response.status_code,
-                response.text,
             )
             return {}
 
@@ -400,15 +399,14 @@ class OAuth2LoginHandler:
                         "Accept": "application/json",
                     },
                 )
-        except httpx.HTTPError as exc:
-            logger.warning("User info fetch transport error: %s", exc)
+        except httpx.HTTPError:
+            logger.warning("User info fetch transport error")
             return {}
 
         if response.status_code != 200:
             logger.warning(
-                "User info fetch failed (HTTP %d): %s",
+                "User info fetch failed (HTTP %d)",
                 response.status_code,
-                response.text,
             )
             return {}
 

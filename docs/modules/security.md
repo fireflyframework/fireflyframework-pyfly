@@ -1607,6 +1607,80 @@ pyfly:
 
 The resource server validates bearer tokens against a remote JWKS with config-driven claim mapping; the client supports declarative `ClientRegistration`s with PKCE on by default; the authorization server issues and manages tokens. See the [OAuth2 guide](oauth2.md) for the resource server, client/login, authorization server, DPoP/mTLS, and the full configuration reference.
 
+
+### Bounded JWKS validation and trusted discovery
+
+`JWKSTokenValidator` caches a single JWKS snapshot. Parsed signing keys expire with
+that snapshot; successful refreshes replace it, including removal of retired keys.
+A failed unknown-key refresh preserves existing keys only until their original
+expiry. Once expired, validation fails until a refresh succeeds. This bounds the
+revocation delay to `jwks-cache-seconds` rather than caching individual keys forever.
+
+Refreshes are serialized per validator. After the initial successful load, one
+immediate unknown-key refresh supports rotation; later attempts share a cooldown,
+including failed fetches and requests for different unknown `kid` values. The
+cooldown begins when a fetch completes, so a slow fetch cannot consume the cooldown. Initial
+outages are also throttled. There is no growing cache of rejected key identifiers.
+The cooldown can delay recognition of a new key, so providers should publish keys
+before signing with them. Limits are per validator instance and process.
+
+These properties use the prefix `pyfly.security.oauth2.resource-server`:
+
+| Property | Default | Behavior |
+|---|---:|---|
+| `jwks-cache-seconds` | `300` | Maximum lifetime of a fetched key snapshot |
+| `jwks-min-refresh-seconds` | `30` | Shared minimum interval between refresh attempts |
+| `jwks-timeout-seconds` | `30` | HTTP socket timeout and response-body deadline |
+| `jwks-max-bytes` | `262144` | Maximum JWKS document bytes |
+| `jwks-max-keys` | `100` | Maximum entries in the returned JWKS |
+| `max-token-bytes` | `16384` | Reject larger tokens before parsing or fetching |
+| `discovery-max-bytes` | `65536` | Maximum OIDC discovery document bytes |
+| `allowed-token-types` | empty | Optional comma-separated exact JOSE `typ` allowlist |
+| `required-token-use` | empty | Optional required `token_use` claim |
+| `allowed-client-ids` | empty | Optional comma-separated client allowlist |
+| `client-id-claim` | `client_id` | Claim checked against the client allowlist |
+
+Limits must be positive and finite; byte and key counts require integers.
+Clock skew must be finite and nonnegative. JWTs require an allowed asymmetric algorithm,
+a nonempty string `kid`, a valid signature and `exp`; configured issuer, audience,
+`nbf` and `iat` checks retain the configured clock-skew tolerance. JWK `alg`, `use`
+and `key_ops` constraints apply. Duplicate signing key identifiers are rejected.
+Token-provided `jku` and `x5u` never choose the fetch endpoint.
+
+Discovery requires the returned issuer to match `issuer-uri` exactly, including
+trailing slashes. `issuer-uri` also pins token issuer validation when `jwks-uri`
+is supplied explicitly; configuring a different `issuer` fails at startup. Fetches
+require HTTPS, reject redirects and compressed documents, and bound the response
+read. Body reads check a monotonic deadline between bounded chunks; one blocking
+read may additionally take the socket timeout. DNS resolution and response headers
+still depend on the standard library transport's timeouts, so this is not a strict
+end-to-end wall-clock cancellation guarantee. HTTP is supported only on loopback for development; a discovered HTTP JWKS
+endpoint must share the loopback issuer origin. An exact-match trusted issuer may
+advertise a different HTTPS origin for its keys, as used by some providers. Only
+configure issuers you trust. These checks follow [OIDC Discovery issuer validation](https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderConfigurationValidation)
+and the [JWT best current practices](https://www.rfc-editor.org/rfc/rfc8725.html).
+
+Token class and client policies are opt-in because provider token shapes differ.
+For example, Cognito access tokens can be restricted without requiring `aud`:
+
+```yaml
+pyfly:
+  security:
+    oauth2:
+      resource-server:
+        enabled: true
+        issuer-uri: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_POOL"
+        required-token-use: "access"
+        allowed-client-ids: "my-app-client-id"
+        authenticate-error-mode: "401"
+```
+
+Use `allowed-token-types: "at+jwt"` only if your provider issues that type, or
+`client-id-claim: "azp"` if its signed access tokens identify the client using `azp`.
+These checks supplement issuer and audience checks; choose them from the provider's
+access-token contract. Direct constructor callers retain the same validation and
+context methods, with equivalent optional keyword arguments using underscores.
+
 ---
 
 ## Secure-by-Default & Hardening
