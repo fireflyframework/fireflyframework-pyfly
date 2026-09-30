@@ -31,6 +31,7 @@ do bespoke claim mapping) transparently overrides the default via
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from http.client import HTTPException
 from typing import Any
@@ -40,7 +41,15 @@ import jwt
 
 from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.context import SecurityContext
-from pyfly.security.oauth2._jwks import BoundedJWKSClient, fetch_json, validate_endpoint, validate_limit
+from pyfly.security.oauth2._jwks import (
+    AsyncBoundedJWKSClient,
+    BoundedJWKSClient,
+    fetch_json,
+    remaining_seconds,
+    validate_endpoint,
+    validate_limit,
+)
+from pyfly.security.oauth2.jwks import AsyncJWKSFetcher, JWKSFetcher
 
 # Default clock-skew tolerance, in seconds. Matches Spring Security's
 # ``JwtTimestampValidator`` default (60s). Without it, a token whose ``iat`` /
@@ -181,7 +190,7 @@ class JWKSTokenValidator:
             audiences are configured.
         claim_mappings: Config-driven claim→context mapping (default:
             multi-IdP defaults).
-        jwks_timeout: HTTP timeout (seconds) for JWKS fetches.
+        jwks_timeout: Cooperative timeout (seconds) for each JWKS refresh.
         jwks_cache_seconds: JWK-set and signing-key lifespan (seconds).
         jwks_min_refresh_seconds: Minimum interval between refresh attempts
             after the initial successful load (also throttles outages).
@@ -193,6 +202,9 @@ class JWKSTokenValidator:
         allowed_client_ids: Optional client claim allowlist.
         client_id_claim: Claim checked against ``allowed_client_ids``; default
             ``client_id``. Set ``azp`` for providers using that claim.
+        jwks_fetcher: Optional borrowed synchronous raw-byte fetcher.
+        async_jwks_fetcher: Borrowed async raw-byte fetcher, required for
+            ``validate_async``. Used on a single event loop with a separate cache.
     """
 
     def __init__(
@@ -215,6 +227,8 @@ class JWKSTokenValidator:
         required_token_use: str | None = None,
         allowed_client_ids: list[str] | None = None,
         client_id_claim: str = "client_id",
+        jwks_fetcher: JWKSFetcher | None = None,
+        async_jwks_fetcher: AsyncJWKSFetcher | None = None,
     ) -> None:
         self._jwks_client = BoundedJWKSClient(
             jwks_uri,
@@ -223,6 +237,20 @@ class JWKSTokenValidator:
             min_refresh_seconds=jwks_min_refresh_seconds,
             max_bytes=jwks_max_bytes,
             max_keys=jwks_max_keys,
+            fetcher=jwks_fetcher,
+        )
+        self._async_jwks_client = (
+            AsyncBoundedJWKSClient(
+                jwks_uri,
+                lifespan=jwks_cache_seconds,
+                timeout=jwks_timeout,
+                min_refresh_seconds=jwks_min_refresh_seconds,
+                max_bytes=jwks_max_bytes,
+                max_keys=jwks_max_keys,
+                async_fetcher=async_jwks_fetcher,
+            )
+            if async_jwks_fetcher is not None
+            else None
         )
         validate_limit(max_token_bytes, "max_token_bytes", integer=True)
         validate_limit(leeway, "leeway", allow_zero=True)
@@ -243,7 +271,7 @@ class JWKSTokenValidator:
         self._validate_audience = validate_audience
         self._mappings = claim_mappings or ClaimMappings()
 
-    def validate(self, token: str) -> dict[str, Any]:
+    def validate(self, token: str, *, timeout: float | None = None) -> dict[str, Any]:
         """Validate a JWT and return its decoded payload.
 
         Verifies the signature (via the JWKS key matching the token's ``kid``),
@@ -251,43 +279,80 @@ class JWKSTokenValidator:
         validation is enabled), and ``exp`` — with ``leeway`` seconds of
         clock-skew tolerance.
 
+        ``timeout`` optionally supplies a positive finite cooperative budget
+        covering lock waiting, retrieval, parsing and JWT verification. Synchronous
+        work cannot be forcibly cancelled; late results are rejected. ``None``
+        retains the per-refresh timeout without a total validation deadline.
+
         Raises:
             SecurityException: If the token is invalid, expired, or its key is
                 not found.
         """
-        verify_aud = self._validate_audience and bool(self._audiences)
+        deadline = None
+        if timeout is not None:
+            validate_limit(timeout, "timeout")
+            deadline = time.monotonic() + timeout
         try:
-            if not isinstance(token, str) or len(token) > self._max_token_bytes or not token.isascii():
-                raise jwt.InvalidTokenError("Token exceeds configured limit or is not ASCII")
-            header = jwt.get_unverified_header(token)
-            algorithm, kid = header.get("alg"), header.get("kid")
-            if not isinstance(algorithm, str) or algorithm not in self._algorithms:
-                raise jwt.InvalidAlgorithmError("Token algorithm is not allowed")
-            if not isinstance(kid, str) or not kid:
-                raise jwt.InvalidTokenError("Token requires a signing key identifier")
-            if self._allowed_token_types and header.get("typ") not in self._allowed_token_types:
-                raise jwt.InvalidTokenError("Token type is not allowed")
-            signing_key = self._jwks_client.get_signing_key(kid, algorithm)
-            payload = jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=self._algorithms,
-                issuer=self._issuer,
-                # Pass the list when verifying; ``None`` disables PyJWT's own aud check.
-                audience=self._audiences if verify_aud else None,
-                leeway=self._leeway,
-                options={"require": ["exp"], "verify_aud": verify_aud},
-            )
-            if self._required_token_use is not None and payload.get("token_use") != self._required_token_use:
-                raise jwt.InvalidTokenError("Token use is not allowed")
-            if self._allowed_client_ids and payload.get(self._client_id_claim) not in self._allowed_client_ids:
-                raise jwt.InvalidTokenError("Token client is not allowed")
-            return payload
-        except (jwt.PyJWTError, ValueError, TypeError, OverflowError, RecursionError) as exc:
-            raise SecurityException(
-                f"Token validation failed: {exc}",
-                code="INVALID_TOKEN",
-            ) from exc
+            kid, algorithm = self._token_header(token)
+            signing_key = self._jwks_client.get_signing_key(kid, algorithm, deadline=deadline)
+            return self._decode_token(token, signing_key, deadline)
+        except (jwt.PyJWTError, ValueError, TypeError, OverflowError, RecursionError, TimeoutError) as exc:
+            raise SecurityException(f"Token validation failed: {exc}", code="INVALID_TOKEN") from exc
+
+    async def validate_async(self, token: str, *, timeout: float | None = None) -> dict[str, Any]:
+        """Validate with an explicit borrowed async fetcher on one event loop.
+
+        The optional positive finite timeout covers lock waiting, fetching and
+        validation. Cancellation propagates through the directly awaited fetcher
+        and waits for its cleanup. Blocking work and cleanup remain cooperative;
+        late results cannot publish keys or return successfully. Sync and async
+        validation use independent caches. Context helpers remain synchronous.
+        """
+        if self._async_jwks_client is None:
+            raise ValueError("validate_async requires async_jwks_fetcher")
+        deadline = None
+        if timeout is not None:
+            validate_limit(timeout, "timeout")
+            deadline = time.monotonic() + timeout
+        try:
+            kid, algorithm = self._token_header(token)
+            signing_key = await self._async_jwks_client.get_signing_key_async(kid, algorithm, deadline=deadline)
+            return self._decode_token(token, signing_key, deadline)
+        except (jwt.PyJWTError, ValueError, TypeError, OverflowError, RecursionError, TimeoutError) as exc:
+            raise SecurityException(f"Token validation failed: {exc}", code="INVALID_TOKEN") from exc
+
+    def _token_header(self, token: str) -> tuple[str, str]:
+        if not isinstance(token, str) or len(token) > self._max_token_bytes or not token.isascii():
+            raise jwt.InvalidTokenError("Token exceeds configured limit or is not ASCII")
+        header = jwt.get_unverified_header(token)
+        algorithm, kid = header.get("alg"), header.get("kid")
+        if not isinstance(algorithm, str) or algorithm not in self._algorithms:
+            raise jwt.InvalidAlgorithmError("Token algorithm is not allowed")
+        if not isinstance(kid, str) or not kid:
+            raise jwt.InvalidTokenError("Token requires a signing key identifier")
+        if self._allowed_token_types and header.get("typ") not in self._allowed_token_types:
+            raise jwt.InvalidTokenError("Token type is not allowed")
+        return kid, algorithm
+
+    def _decode_token(self, token: str, signing_key: jwt.PyJWK, deadline: float | None) -> dict[str, Any]:
+        verify_aud = self._validate_audience and bool(self._audiences)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=self._algorithms,
+            issuer=self._issuer,
+            # Pass the list when verifying; ``None`` disables PyJWT's own aud check.
+            audience=self._audiences if verify_aud else None,
+            leeway=self._leeway,
+            options={"require": ["exp"], "verify_aud": verify_aud},
+        )
+        if self._required_token_use is not None and payload.get("token_use") != self._required_token_use:
+            raise jwt.InvalidTokenError("Token use is not allowed")
+        if self._allowed_client_ids and payload.get(self._client_id_claim) not in self._allowed_client_ids:
+            raise jwt.InvalidTokenError("Token client is not allowed")
+        if deadline is not None:
+            remaining_seconds(deadline)
+        return payload
 
     def to_security_context(self, token: str) -> SecurityContext:
         """Validate *token* and build a :class:`SecurityContext` from its claims,

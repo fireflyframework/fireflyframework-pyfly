@@ -1,6 +1,6 @@
 # Copyright 2026 Firefly Software Foundation.
 # Licensed under the Apache License, Version 2.0.
-"""Bounded authorization-code/PKCE and RFC 8628 device acquisition."""
+"""Bounded authorization-code/PKCE, client-credentials and device acquisition."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import quote_plus, urlsplit
 
 if TYPE_CHECKING:
     import httpx
@@ -156,6 +156,19 @@ async def _close_safely(close: Callable[[], Awaitable[None]]) -> None:
             raise cancelled
 
 
+def _scope_value(scopes: tuple[str, ...]) -> str:
+    if not isinstance(scopes, tuple) or len(scopes) > 64:
+        raise ValueError("scopes must be a tuple containing at most 64 tokens")
+    if any(
+        not isinstance(scope, str) or not re.fullmatch(r"[\x21\x23-\x5b\x5d-\x7e]{1,256}", scope) for scope in scopes
+    ):
+        raise ValueError("scope tokens must contain 1 to 256 RFC 6749 scope characters")
+    value = " ".join(scopes)
+    if len(value) > 4096:
+        raise ValueError("serialized scope must not exceed 4096 characters")
+    return value
+
+
 class OAuth2Client:
     """Async acquisition client owning its HTTPX client and supplied transport.
 
@@ -214,17 +227,27 @@ class OAuth2Client:
     async def aclose(self) -> None:
         await _close_safely(self._http.aclose)
 
-    async def _post(self, endpoint: str, data: dict[str, str], *, timeout: float | None = None) -> dict[str, Any]:
+    async def _post(
+        self,
+        endpoint: str,
+        data: dict[str, str],
+        *,
+        timeout: float | None = None,
+        authentication: Literal["client_secret_basic", "client_secret_post"] = "client_secret_post",
+    ) -> dict[str, Any]:
         import httpx
 
-        data = {**data, "client_id": self._client_id}
-        if self._secret:
-            data["client_secret"] = self._secret
+        headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
+        if authentication == "client_secret_basic":
+            credentials = f"{quote_plus(self._client_id)}:{quote_plus(self._secret or '')}"
+            headers["Authorization"] = "Basic " + base64.b64encode(credentials.encode("ascii")).decode("ascii")
+        else:
+            data = {**data, "client_id": self._client_id}
+            if self._secret:
+                data["client_secret"] = self._secret
         try:
             async with asyncio.timeout(self._timeout if timeout is None else min(timeout, self._timeout)):
-                request = self._http.build_request(
-                    "POST", endpoint, data=data, headers={"Accept": "application/json", "Accept-Encoding": "identity"}
-                )
+                request = self._http.build_request("POST", endpoint, data=data, headers=headers)
                 response = await self._http.send(request, stream=True)
                 try:
                     if (
@@ -279,6 +302,55 @@ class OAuth2Client:
             id_token=_text(doc, "id_token") if "id_token" in doc else None,
             scope=_text(doc, "scope") if "scope" in doc else None,
         )
+
+    async def client_credentials(
+        self,
+        *,
+        scopes: tuple[str, ...] = (),
+        authentication: Literal["client_secret_basic", "client_secret_post"] = "client_secret_basic",
+        timeout: float | None = None,
+    ) -> OAuth2Tokens:
+        """Acquire a machine Bearer token using bounded, explicit confidential credentials.
+
+        Scopes are RFC 6749 tokens: at most 64, 256 characters each and 4096
+        serialized characters. The positive finite timeout can only shorten the
+        constructor's request limit; cancellation waits for transport cleanup.
+        No refresh or ID tokens, authentication fallback or retries are accepted.
+        """
+        for credential in (self._client_id, self._secret):
+            if (
+                not isinstance(credential, str)
+                or not 1 <= len(credential) <= 4096
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in credential)
+            ):
+                raise ValueError("Confidential credentials require bounded nonempty strings without controls")
+            try:
+                credential.encode("utf-8")
+            except UnicodeError:
+                raise ValueError("Confidential credentials must be valid UTF-8") from None
+        if authentication not in ("client_secret_basic", "client_secret_post"):
+            raise ValueError("Unsupported client authentication method")
+        if timeout is not None:
+            try:
+                timeout = _positive(timeout)
+            except OAuth2ClientError:
+                raise ValueError("timeout must be a positive finite number") from None
+        scope = _scope_value(scopes)
+        data = {"grant_type": "client_credentials"}
+        if scope:
+            data["scope"] = scope
+        doc = await self._post(self._endpoints.token_endpoint, data, timeout=timeout, authentication=authentication)
+        if "refresh_token" in doc or "id_token" in doc:
+            raise OAuth2ClientError("invalid_response")
+        tokens = self._tokens(doc)
+        if not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", tokens.access_token):
+            raise OAuth2ClientError("invalid_response")
+        if tokens.scope is not None:
+            try:
+                _scope_value(tuple(tokens.scope.split(" ")))
+            except ValueError:
+                raise OAuth2ClientError("invalid_response") from None
+        return tokens
 
     async def exchange_code(self, code: str, *, redirect_uri: str, code_verifier: str) -> OAuth2Tokens:
         """Exchange only after caller verifies callback state/issuer/URI and replay.

@@ -67,8 +67,63 @@ redirect URI/path and issuer (including mix-up/replay protection). The library
 creates no callback listener or browser process. `OAuth2Tokens.id_token` is an
 opaque value, not verified identity; never substitute it for `access_token`.
 Credential storage, refresh serialization/rotation and local roles remain the
-application's responsibility. An explicitly supplied confidential-client secret
-uses form authentication; public clients send no secret.
+application's responsibility. Authorization-code and device operations use form
+authentication for an explicitly supplied confidential-client secret; public
+clients send no secret.
+
+For machine access, use the public client-credentials operation:
+
+```python
+import os
+
+async def acquire_machine_token(remaining_seconds: float):
+    async with OAuth2Client(
+        os.environ["OAUTH_CLIENT_ID"],
+        OAuth2Endpoints("https://identity.example.com/oauth/token"),
+        client_secret=os.environ["OAUTH_CLIENT_SECRET"],
+        timeout=10.0,
+    ) as client:
+        return await client.client_credentials(
+            scopes=("api.read",),
+            timeout=remaining_seconds,
+        )
+```
+
+The exact signature is
+`client_credentials(*, scopes: tuple[str, ...] = (), authentication: Literal["client_secret_basic", "client_secret_post"] = "client_secret_basic", timeout: float | None = None) -> OAuth2Tokens`.
+It defaults to HTTP Basic, form-encoding each credential before base64 encoding
+as required by [RFC 6749 section 2.3.1](https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1).
+Choose `authentication="client_secret_post"` explicitly when the trusted provider
+requires credentials in the form body. A request uses only the chosen method;
+there is no authentication fallback. Both credentials must be nonempty UTF-8
+strings of at most 4096 characters with no C0/C1 control characters. Invalid
+credentials, scopes, authentication methods or timeouts fail before HTTP with
+redacted `ValueError` messages.
+
+Scopes must be a tuple of at most 64 nonempty tokens, each at most 256 ASCII
+characters, with at most 4096 characters including the separating spaces.
+They follow [RFC 6749 scope syntax](https://www.rfc-editor.org/rfc/rfc6749#section-3.3):
+printable ASCII excluding spaces, double quotes and backslashes within a token.
+An empty tuple omits the scope parameter. The operation adds only `grant_type`,
+optional `scope` and the selected client authentication; arbitrary extra form
+fields are not accepted.
+
+Machine acquisition accepts only valid Bearer token responses, including the
+[RFC 6750 token syntax](https://www.rfc-editor.org/rfc/rfc6750#section-2.1), and
+applies the same scope limits to a returned scope. The presence of either
+`refresh_token` or `id_token`, even with a null value, fails with
+`OAuth2ClientError("invalid_response")`. This is a strict machine-token contract;
+authorization-code and device token response behavior is unchanged. No refresh
+grant, persistence, automatic renewal or retry is performed. Scope and access
+policy remain the application's responsibility.
+
+The per-call `timeout` must be finite and positive; booleans are not accepted.
+It bounds the request and response read by the smaller of this value and the
+constructor timeout. Omit it to use the constructor limit, or pass the caller's
+remaining operation budget. Cancellation propagates, and resource cleanup is
+awaited before returning, so cleanup may exceed that budget. As with every
+operation on this client, a supplied transport must cooperate with cancellation
+and finish its close operations.
 
 Endpoints are explicit trusted configuration, never taken from a token. HTTPS is
 required; `allow_loopback_http=True` permits HTTP only for literal loopback or
