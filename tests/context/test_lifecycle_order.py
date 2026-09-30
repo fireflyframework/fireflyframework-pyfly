@@ -670,13 +670,23 @@ async def test_a_failed_start_stops_the_lifecycle_beans_it_started_in_reverse_or
     with pytest.raises(BeanCreationException) as raised:
         await ctx.start()
 
-    # The start's own failure is the one raised, although a bean failed to stop; the bean that failed to start
-    # and the one that never started are not stopped.
+    # Preserve the primary error while destroying all products and stopping every attempted start.
     assert isinstance(raised.value.__cause__, ConnectionError)
-    assert EVENTS == ["early.start", "default.start", "broker.start", "default.stop", "early.stop"]
+    assert EVENTS == [
+        "early.start",
+        "default.start",
+        "broker.start",
+        "early.pre_destroy",
+        "default.pre_destroy",
+        "consumer.pre_destroy",
+        "broker.pre_destroy",
+        "broker.stop",
+        "default.stop",
+        "early.stop",
+    ]
     EVENTS.clear()
 
-    await ctx.stop()  # still releases the rest, and stops nothing twice
+    await ctx.stop()  # the failed run was already released
     assert [event for event in EVENTS if event.endswith(".stop")] == []
 
 
@@ -704,7 +714,7 @@ async def test_a_start_that_fails_after_the_lifecycle_beans_started_stops_them()
     ctx.register_bean(_BrokenInitConfiguration)
     with pytest.raises(BeanCreationException, match="bad configuration"):
         await ctx.start()
-    assert EVENTS == ["early.start", "early.stop"]
+    assert EVENTS == ["early.start", "early.pre_destroy", "early.stop"]
     await ctx.stop()
 
 

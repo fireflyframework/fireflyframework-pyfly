@@ -373,11 +373,17 @@ class OAuth2ResourceServerAutoConfiguration:
         props = config.bind(ResourceServerProperties)
 
         jwks_uri = props.jwks_uri
-        issuer = props.issuer or None
+        issuer = props.issuer or props.issuer_uri or None
+        if props.issuer and props.issuer_uri and props.issuer != props.issuer_uri:
+            raise SecurityException("issuer and issuer-uri must match exactly", code="OIDC_DISCOVERY_FAILED")
         # OIDC discovery (Spring's ``issuer-uri``): derive the JWKS endpoint and
         # the authoritative issuer from the provider's discovery document.
         if not jwks_uri and props.issuer_uri:
-            jwks_uri, discovered_issuer = discover_oidc(props.issuer_uri, timeout=float(props.jwks_timeout_seconds))
+            jwks_uri, discovered_issuer = discover_oidc(
+                props.issuer_uri,
+                timeout=float(props.jwks_timeout_seconds),
+                max_bytes=props.discovery_max_bytes,
+            )
             issuer = issuer or discovered_issuer
 
         mappings = ClaimMappings(
@@ -398,6 +404,14 @@ class OAuth2ResourceServerAutoConfiguration:
             claim_mappings=mappings,
             jwks_timeout=float(props.jwks_timeout_seconds),
             jwks_cache_seconds=props.jwks_cache_seconds,
+            jwks_min_refresh_seconds=props.jwks_min_refresh_seconds,
+            jwks_max_bytes=props.jwks_max_bytes,
+            jwks_max_keys=props.jwks_max_keys,
+            max_token_bytes=props.max_token_bytes,
+            allowed_token_types=props.token_type_list(),
+            required_token_use=props.required_token_use or None,
+            allowed_client_ids=props.client_id_list(),
+            client_id_claim=props.client_id_claim,
         )
 
     @bean

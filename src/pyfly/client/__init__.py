@@ -13,9 +13,11 @@
 # limitations under the License.
 """PyFly Client — REST + SOAP + gRPC + GraphQL + WebSocket clients with circuit breaker and retry."""
 
+from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
 from pyfly.client.circuit_breaker import CircuitBreaker, CircuitState
 from pyfly.client.declarative import delete, get, http_client, patch, post, put, service_client
-from pyfly.client.ports.outbound import HttpClientPort
+from pyfly.client.exceptions import ResponseTooLargeException, UnsupportedContentEncodingException
+from pyfly.client.ports.outbound import BoundedHttpClientPort, HttpClientPort
 from pyfly.client.post_processor import HttpClientBeanPostProcessor
 from pyfly.client.protocols import (
     GraphQLClient,
@@ -29,6 +31,7 @@ from pyfly.client.protocols import (
 from pyfly.client.retry import RetryPolicy
 
 __all__ = [
+    "BoundedHttpClientPort",
     "CircuitBreaker",
     "CircuitState",
     "GraphQLClient",
@@ -36,6 +39,9 @@ __all__ = [
     "GrpcClientBuilder",
     "HttpClientBeanPostProcessor",
     "HttpClientPort",
+    "HttpxClientAdapter",
+    "ResponseTooLargeException",
+    "UnsupportedContentEncodingException",
     "RetryPolicy",
     "SoapClient",
     "SoapClientBuilder",

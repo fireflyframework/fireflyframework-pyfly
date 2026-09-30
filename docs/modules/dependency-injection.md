@@ -1424,12 +1424,18 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
    CQRS handlers, `@scheduled` methods, and `@async_method` to their targets.
 7. **Publish lifecycle events** -- `ContextRefreshedEvent`, then `ApplicationReadyEvent`.
 
-A start that fails at any step stops the lifecycle beans it had started, highest phase first and in
-reverse start order within a phase (as `stop()` does, and as Spring does when a refresh fails), then
-raises its failure as `BeanCreationException`. A bean that fails to stop then is logged
-(`adapter_stop_failed`) and does not replace that failure. `stop()` still releases the rest of the
-failed run, and does not stop those beans again. Through 26.09.07 they kept running until the caller
-called `stop()`.
+A failed or cancelled start runs the full `stop()` cleanup sequence before returning control:
+`@pre_destroy`, lifecycle stops, declared bean destroy methods, scoped eviction and resource
+registry disposal. The bean whose `start()` allocated resources and then raised is included;
+a bean whose `start()` was never attempted is not stopped. The original `BeanCreationException`
+or cancellation remains the failure reported to the caller, even when cleanup fails. A later
+`stop()` is a no-op, and a subsequent `start()` rebuilds the partial run's registrations.
+
+Hooks run once per instance even when a bean has interface and concrete aliases. Decorating
+`start()` with `@post_construct`, or `stop()` with `@pre_destroy`, does not call that same method
+a second time. The same rule applies to an explicitly declared `destroy_method` overlapping a
+lifecycle hook. `stop()` should tolerate partial initialization because startup may fail after
+allocating only some resources.
 
 #### Lifecycle phases
 
@@ -1459,8 +1465,15 @@ class OutboxRelay:
 
 ### The stop() Lifecycle
 
-When `ApplicationContext.stop()` is called (each step bounded per bean by
-`pyfly.context.shutdown-timeout`, 30 s by default):
+When `ApplicationContext.stop()` is called, asynchronous cleanup is bounded by
+`pyfly.context.shutdown-timeout` (30 s by default). Each `@pre_destroy` method gets its own
+budget, so a failed, timed out or self-cancelled hook does not prevent later hooks from running.
+Cancellation of the caller running `stop()` is re-raised after the remaining cleanup finishes.
+Synchronous user hooks still run inline and must return promptly; Python cannot interrupt a
+blocking synchronous method on the event loop. Timed-out async work is cancelled without delaying
+other cleanup; code that suppresses cancellation may continue until it cooperates, because Python
+cannot forcibly terminate it. The context retains and observes such tasks until they finish.
+The sequence is:
 
 1. **`ContextClosedEvent` is published**, while every bean still works (Spring publishes it first
    too).

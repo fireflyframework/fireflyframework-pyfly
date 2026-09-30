@@ -31,16 +31,16 @@ do bespoke claim mapping) transparently overrides the default via
 
 from __future__ import annotations
 
-import json
-import urllib.request
 from dataclasses import dataclass, field
+from http.client import HTTPException
 from typing import Any
+from urllib.parse import urlsplit
 
 import jwt
-from jwt import PyJWKClient
 
 from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.context import SecurityContext
+from pyfly.security.oauth2._jwks import BoundedJWKSClient, fetch_json, validate_endpoint, validate_limit
 
 # Default clock-skew tolerance, in seconds. Matches Spring Security's
 # ``JwtTimestampValidator`` default (60s). Without it, a token whose ``iat`` /
@@ -134,34 +134,31 @@ def _flatten_strs(values: list[Any]) -> list[str]:
     return out
 
 
-def discover_oidc(issuer_uri: str, *, timeout: float = 10.0) -> tuple[str, str]:
-    """Fetch an OIDC provider's discovery document and return
-    ``(jwks_uri, issuer)``.
+def discover_oidc(issuer_uri: str, *, timeout: float = 10.0, max_bytes: int = 65536) -> tuple[str, str]:
+    """Fetch bounded OIDC metadata from the configured issuer without redirects.
 
-    Mirrors Spring's ``issuer-uri``: GET ``<issuer_uri>/.well-known/openid-configuration``
-    and read ``jwks_uri`` + ``issuer``. The returned ``issuer`` is the
-    authoritative value from the document (used to validate the ``iss`` claim).
-
-    Raises:
-        SecurityException: If the document cannot be fetched or lacks ``jwks_uri``.
+    The metadata issuer must match *issuer_uri* exactly. HTTPS JWKS endpoints
+    advertised by that trusted issuer may use a different origin; loopback HTTP
+    development endpoints must share the issuer's origin.
     """
-    base = issuer_uri.rstrip("/")
-    well_known = f"{base}/.well-known/openid-configuration"
     try:
-        with urllib.request.urlopen(well_known, timeout=timeout) as resp:  # noqa: S310 (https config URL)
-            doc = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:  # network / JSON / URL errors
-        raise SecurityException(
-            f"OIDC discovery failed for issuer-uri {issuer_uri!r}: {exc}",
-            code="OIDC_DISCOVERY_FAILED",
-        ) from exc
-    jwks_uri = doc.get("jwks_uri")
-    if not jwks_uri:
-        raise SecurityException(
-            f"OIDC discovery document at {well_known!r} has no 'jwks_uri'.",
-            code="OIDC_DISCOVERY_FAILED",
-        )
-    return str(jwks_uri), str(doc.get("issuer") or base)
+        validate_endpoint(issuer_uri)
+        if urlsplit(issuer_uri).query:
+            raise ValueError("Issuer must not contain a query")
+        well_known = f"{issuer_uri.rstrip('/')}/.well-known/openid-configuration"
+        doc = fetch_json(well_known, timeout=timeout, max_bytes=max_bytes)
+        if doc.get("issuer") != issuer_uri:
+            raise ValueError("Discovery issuer does not exactly match the configured issuer")
+        jwks_uri = doc.get("jwks_uri")
+        if not isinstance(jwks_uri, str) or not jwks_uri:
+            raise ValueError("Discovery document has no valid jwks_uri")
+        validate_endpoint(jwks_uri)
+        endpoint, issuer = urlsplit(jwks_uri), urlsplit(issuer_uri)
+        if endpoint.scheme == "http" and (endpoint.scheme, endpoint.netloc) != (issuer.scheme, issuer.netloc):
+            raise ValueError("HTTP JWKS endpoint must share the loopback issuer origin")
+        return jwks_uri, issuer_uri
+    except (OSError, HTTPException, ValueError, TypeError, RecursionError) as exc:
+        raise SecurityException("OIDC discovery failed", code="OIDC_DISCOVERY_FAILED") from exc
 
 
 class JWKSTokenValidator:
@@ -185,7 +182,17 @@ class JWKSTokenValidator:
         claim_mappings: Config-driven claim→context mapping (default:
             multi-IdP defaults).
         jwks_timeout: HTTP timeout (seconds) for JWKS fetches.
-        jwks_cache_seconds: JWK-set cache lifespan (seconds).
+        jwks_cache_seconds: JWK-set and signing-key lifespan (seconds).
+        jwks_min_refresh_seconds: Minimum interval between refresh attempts
+            after the initial successful load (also throttles outages).
+        jwks_max_bytes: Maximum JWKS response bytes (default: 262144).
+        jwks_max_keys: Maximum number of keys in a JWKS (default: 100).
+        max_token_bytes: Maximum ASCII compact-token bytes (default: 16384).
+        allowed_token_types: Optional exact JOSE ``typ`` allowlist.
+        required_token_use: Optional required ``token_use`` claim, e.g. ``access``.
+        allowed_client_ids: Optional client claim allowlist.
+        client_id_claim: Claim checked against ``allowed_client_ids``; default
+            ``client_id``. Set ``azp`` for providers using that claim.
     """
 
     def __init__(
@@ -199,18 +206,39 @@ class JWKSTokenValidator:
         validate_audience: bool = True,
         claim_mappings: ClaimMappings | None = None,
         jwks_timeout: float = 30.0,
-        jwks_cache_seconds: int = 300,
+        jwks_cache_seconds: float = 300,
+        jwks_min_refresh_seconds: float = 30,
+        jwks_max_bytes: int = 262144,
+        jwks_max_keys: int = 100,
+        max_token_bytes: int = 16384,
+        allowed_token_types: list[str] | None = None,
+        required_token_use: str | None = None,
+        allowed_client_ids: list[str] | None = None,
+        client_id_claim: str = "client_id",
     ) -> None:
-        self._jwks_client = PyJWKClient(
+        self._jwks_client = BoundedJWKSClient(
             jwks_uri,
-            cache_keys=True,
-            cache_jwk_set=True,
             lifespan=jwks_cache_seconds,
             timeout=jwks_timeout,
+            min_refresh_seconds=jwks_min_refresh_seconds,
+            max_bytes=jwks_max_bytes,
+            max_keys=jwks_max_keys,
         )
+        validate_limit(max_token_bytes, "max_token_bytes", integer=True)
+        validate_limit(leeway, "leeway", allow_zero=True)
+        self._max_token_bytes = max_token_bytes
+        self._allowed_token_types = tuple(allowed_token_types or [])
+        self._required_token_use = required_token_use
+        self._allowed_client_ids = tuple(allowed_client_ids or [])
+        self._client_id_claim = client_id_claim
         self._issuer = issuer
         self._audiences = [a for a in (audiences or []) if a]
-        self._algorithms = algorithms or ["RS256"]
+        self._algorithms = list(algorithms or ["RS256"])
+        if any(
+            alg not in jwt.algorithms.get_default_algorithms() or alg == "none" or alg.startswith("HS")
+            for alg in self._algorithms
+        ):
+            raise ValueError("JWKS validation requires asymmetric signing algorithms")
         self._leeway = leeway
         self._validate_audience = validate_audience
         self._mappings = claim_mappings or ClaimMappings()
@@ -229,7 +257,17 @@ class JWKSTokenValidator:
         """
         verify_aud = self._validate_audience and bool(self._audiences)
         try:
-            signing_key = self._jwks_client.get_signing_key_from_jwt(token)
+            if not isinstance(token, str) or len(token) > self._max_token_bytes or not token.isascii():
+                raise jwt.InvalidTokenError("Token exceeds configured limit or is not ASCII")
+            header = jwt.get_unverified_header(token)
+            algorithm, kid = header.get("alg"), header.get("kid")
+            if not isinstance(algorithm, str) or algorithm not in self._algorithms:
+                raise jwt.InvalidAlgorithmError("Token algorithm is not allowed")
+            if not isinstance(kid, str) or not kid:
+                raise jwt.InvalidTokenError("Token requires a signing key identifier")
+            if self._allowed_token_types and header.get("typ") not in self._allowed_token_types:
+                raise jwt.InvalidTokenError("Token type is not allowed")
+            signing_key = self._jwks_client.get_signing_key(kid, algorithm)
             payload = jwt.decode(
                 token,
                 signing_key.key,
@@ -240,8 +278,12 @@ class JWKSTokenValidator:
                 leeway=self._leeway,
                 options={"require": ["exp"], "verify_aud": verify_aud},
             )
+            if self._required_token_use is not None and payload.get("token_use") != self._required_token_use:
+                raise jwt.InvalidTokenError("Token use is not allowed")
+            if self._allowed_client_ids and payload.get(self._client_id_claim) not in self._allowed_client_ids:
+                raise jwt.InvalidTokenError("Token client is not allowed")
             return payload
-        except jwt.PyJWTError as exc:
+        except (jwt.PyJWTError, ValueError, TypeError, OverflowError, RecursionError) as exc:
             raise SecurityException(
                 f"Token validation failed: {exc}",
                 code="INVALID_TOKEN",

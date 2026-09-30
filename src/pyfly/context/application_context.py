@@ -177,6 +177,8 @@ class ApplicationContext:
         self._event_bus = ApplicationEventBus()
         self._post_processors: list[BeanPostProcessor] = []
         self._started = False
+        self._stopped = False
+        self._lifecycle_calls: dict[int, tuple[Any, set[str]]] = {}
         #: Instances the container was HANDED rather than built; stop() must not release them.
         self._preexisting_instances: set[int] = set()
         #: Registration keys the last start() pipeline added; dropped at the next start so a restart
@@ -206,6 +208,7 @@ class ApplicationContext:
         #: processed; completed once the auto-configurations have registered theirs.
         self._deferred_bean_methods: list[_DeferredBeanMethod] = []
         self._background_tasks: list[asyncio.Task[Any]] = []
+        self._cleanup_tasks: set[asyncio.Future[Any]] = set()
         self._wiring_counts: dict[str, int] = {}
         #: Non-singleton instances the container created during start() before the batched
         #: post-processing passes (step 5), which process them; ``None`` outside that window.
@@ -327,38 +330,42 @@ class ApplicationContext:
 
         :meth:`stop` clears the flag, so a stopped context can be started again and rebuilds normally.
 
-        A start that fails stops the lifecycle beans it had started, highest phase first and in reverse start
-        order within a phase (as :meth:`stop` does, and as Spring does when a refresh fails), then raises its
-        failure: a bean that fails to stop is logged, and does not replace it. Through 26.09.07 they kept running
-        until the caller called :meth:`stop`, which still releases the rest of the failed run.
+        A failed or cancelled start runs the full shutdown sequence before raising its original
+        failure, including the bean whose start allocated resources and then failed. Cleanup failures
+        are logged without replacing the startup failure; a later stop does not destroy anything twice.
         """
         if self._started:
             logger.debug("context_start_ignored", extra={"reason": "already started"})
             return
 
+        self._stopped = False
+        self._lifecycle_calls.clear()
+        registrations_before = set(self._container._registrations) - self._pipeline_registrations
+        all_before = set(self._container._all) - self._pipeline_all
+        named_before = set(self._container._named) - self._pipeline_named
+        bindings_before = self._binding_pairs() - self._pipeline_bindings
         try:
-            await self._do_start()
-        except BeanCreationException:
+            try:
+                await self._do_start()
+            finally:
+                # Capture partial registrations too: a retry must rebuild a failed run.
+                self._pipeline_registrations = frozenset(self._container._registrations) - registrations_before
+                self._pipeline_all = frozenset(self._container._all) - all_before
+                self._pipeline_named = frozenset(self._container._named) - named_before
+                self._pipeline_bindings = self._binding_pairs() - bindings_before
+        except BaseException as exc:
             self._startup_created = None
-            await self._stop_lifecycle_beans_of_failed_start()
-            raise
-        except Exception as exc:
-            self._startup_created = None
-            await self._stop_lifecycle_beans_of_failed_start()
+            try:
+                await self.stop()
+            except BaseException:
+                logger.warning("failed_start_cleanup_failed", exc_info=True)
+            if isinstance(exc, BeanCreationException) or not isinstance(exc, Exception):
+                raise
             raise BeanCreationException(
                 subsystem="startup",
                 provider=type(exc).__qualname__,
                 reason=str(exc),
             ) from exc
-
-    async def _stop_lifecycle_beans_of_failed_start(self) -> None:
-        """Stop the lifecycle beans a failed start had started (see :meth:`start`), each within
-        ``pyfly.context.shutdown-timeout``; a later :meth:`stop` does not stop them again."""
-        shutdown_timeout = float(self._config.get("pyfly.context.shutdown-timeout", 30))
-        stop_order = self._lifecycle_stop_order()
-        self._lifecycle_beans = []
-        for bean in stop_order:
-            await self._stop_lifecycle_bean(bean, shutdown_timeout)
 
     async def _do_start(self) -> None:
         """Internal startup logic."""
@@ -390,11 +397,6 @@ class ApplicationContext:
                 if not implementations:
                     del self._container._bindings[interface]
         self._container.allow_creation()
-
-        registrations_before = set(self._container._registrations.keys())
-        all_before = set(self._container._all.keys())
-        named_before = set(self._container._named.keys())
-        bindings_before = self._binding_pairs()
 
         # Every instance the container creates from now on goes through the init pipeline. Until
         # the batched passes of step 5 run, the hook only collects the non-singleton ones (the
@@ -534,13 +536,6 @@ class ApplicationContext:
         await self._event_bus.publish(ContextRefreshedEvent())
         await self._event_bus.publish(ApplicationReadyEvent())
         await self._invoke_runners()
-        # Everything this pipeline added, so the next start can drop it and begin from the same
-        # registry a cold start begins from.
-        self._pipeline_registrations = frozenset(self._container._registrations.keys()) - registrations_before
-        self._pipeline_all = frozenset(self._container._all.keys()) - all_before
-        self._pipeline_named = frozenset(self._container._named.keys()) - named_before
-        self._pipeline_bindings = self._binding_pairs() - bindings_before
-
         self._started = True
 
     def _binding_pairs(self) -> frozenset[tuple[type, type]]:
@@ -585,6 +580,10 @@ class ApplicationContext:
         """
         from pyfly.kernel.lifecycle import deferring_disposal, is_resource_registry
 
+        if self._stopped:
+            return
+        caller = asyncio.current_task()
+        cancellations_before = caller.cancelling() if caller is not None else 0
         shutdown_timeout = float(self._config.get("pyfly.context.shutdown-timeout", 30))
         # The resource registries are disposed in step 5 and nowhere earlier: a lifecycle bean that
         # closes one on stop (the datasource registry's) would otherwise close it at its own place in
@@ -604,18 +603,21 @@ class ApplicationContext:
                 continue
             disposed.add(id(instance))
             try:
-                await asyncio.wait_for(instance.dispose_all(), timeout=shutdown_timeout)
+                await self._await_shutdown(instance.dispose_all(), shutdown_timeout)
             except TimeoutError:
                 logger.warning(
                     "resource_registry_dispose_timeout",
                     extra={"bean": type(instance).__qualname__, "timeout_s": shutdown_timeout},
                 )
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning(
                     "resource_registry_dispose_failed", extra={"bean": type(instance).__qualname__}, exc_info=True
                 )
 
         self._release_run(live)
+        # Isolate a hook's self-cancellation, but preserve cancellation of the caller after cleanup.
+        if caller is not None and caller.cancelling() > cancellations_before:
+            raise asyncio.CancelledError
 
     async def _drain_destroy_and_stop(self, shutdown_timeout: float) -> list[Any]:
         """Steps 1 to 4 of :meth:`stop`; returns every singleton, in the order they were destroyed."""
@@ -623,10 +625,10 @@ class ApplicationContext:
 
         # 1. Tell the application first, while it still works.
         try:
-            await asyncio.wait_for(self._event_bus.publish(ContextClosedEvent()), timeout=shutdown_timeout)
+            await self._await_shutdown(self._event_bus.publish(ContextClosedEvent()), shutdown_timeout)
         except TimeoutError:
             logger.warning("context_closed_event_timeout", extra={"timeout_s": shutdown_timeout})
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             logger.warning("context_closed_event_failed", exc_info=True)
 
         # 2. Drain: nothing dispatches new work into the beans about to be destroyed.
@@ -634,17 +636,22 @@ class ApplicationContext:
             if not task.done():
                 task.cancel()
         if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            try:
+                await self._await_shutdown(
+                    asyncio.gather(*self._background_tasks, return_exceptions=True), shutdown_timeout
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                logger.warning("background_tasks_drain_timeout", extra={"timeout_s": shutdown_timeout})
             self._background_tasks.clear()
 
         stopped: set[int] = set()
         if self._task_scheduler is not None:
             stopped.add(id(self._task_scheduler))
             try:
-                await asyncio.wait_for(self._task_scheduler.stop(), timeout=shutdown_timeout)
+                await self._await_shutdown(self._task_scheduler.stop(), shutdown_timeout)
             except TimeoutError:
                 logger.warning("task_scheduler_stop_timeout", extra={"timeout_s": shutdown_timeout})
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.debug("task_scheduler_stop_failed", exc_info=True)
 
         stop_order = self._lifecycle_stop_order()
@@ -742,9 +749,19 @@ class ApplicationContext:
         self._container._scoped_proxies.clear()
         self._task_scheduler = None
         self._creation_order.clear()
+        self._lifecycle_calls.clear()
         self._wiring_counts = {}
         self._container.refuse_creation(_STOPPED)
         self._started = False
+        self._stopped = True
+
+    def _claim_lifecycle_call(self, instance: Any, method_name: str) -> bool:
+        """Claim a hook once per instance and run, including overlapping lifecycle declarations."""
+        _, called = self._lifecycle_calls.setdefault(id(instance), (instance, set()))
+        if method_name in called:
+            return False
+        called.add(method_name)
+        return True
 
     async def _destroy_scoped_instance(self, key: str, instance: Any, *, timeout: float | None = None) -> None:
         """Destroy *instance*, which its scope evicted (a refresh) or still held at stop under *key*.
@@ -763,6 +780,7 @@ class ApplicationContext:
         await self._destroy_instance(instance, declared, limit, infer=True)
         if self._has_lifecycle_methods(instance):
             await self._stop_lifecycle_bean(instance, limit)
+        self._lifecycle_calls.pop(id(instance), None)
 
     def _scoped_registration(self, key: str) -> Registration | None:
         """The scoped registration whose instances a scope caches under *key*."""
@@ -786,10 +804,23 @@ class ApplicationContext:
 
     async def _pre_destroy_instance(self, instance: Any, timeout: float) -> None:
         """Run the ``@pre_destroy`` methods of *instance* within *timeout*."""
-        try:
-            await asyncio.wait_for(self._call_pre_destroy(instance), timeout=timeout)
-        except TimeoutError:
-            logger.warning("pre_destroy_timeout", extra={"bean": type(instance).__qualname__, "timeout_s": timeout})
+        for attr_name, method in _marked_members(instance, "__pyfly_pre_destroy__"):
+            if attr_name == "stop" and any(bean is instance for bean in self._lifecycle_beans):
+                continue  # Lifecycle phases own the ordering of stop(), even when decorated.
+            if not self._claim_lifecycle_call(instance, attr_name):
+                continue
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    await self._await_shutdown(result, timeout)
+            except TimeoutError:
+                logger.warning("pre_destroy_timeout", extra={"bean": type(instance).__qualname__, "timeout_s": timeout})
+            except (Exception, asyncio.CancelledError):
+                logger.warning(
+                    "pre_destroy_failed",
+                    extra={"bean": type(instance).__qualname__, "method": attr_name},
+                    exc_info=True,
+                )
 
     async def _call_destroy_method(self, instance: Any, declared: str | None, timeout: float, *, infer: bool) -> None:
         """Call the destroy method of *instance* (see :meth:`_destroy_instance`) within *timeout*.
@@ -800,17 +831,17 @@ class ApplicationContext:
         """
         name = type(instance).__qualname__
         method_name = self._destroy_method_name(instance, declared, infer=infer)
-        if method_name is None:
+        if method_name is None or not self._claim_lifecycle_call(instance, method_name):
             return
         try:
             if method_name == "dispose":
                 _close_connections_on_return(instance)  # installed at creation already: a safety net
             result = getattr(instance, method_name)()
             if inspect.isawaitable(result):
-                await asyncio.wait_for(result, timeout=timeout)
+                await self._await_shutdown(result, timeout)
         except TimeoutError:
             logger.warning("destroy_method_timeout", extra={"bean": name, "method": method_name, "timeout_s": timeout})
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             logger.warning("destroy_method_failed", extra={"bean": name, "method": method_name}, exc_info=True)
 
     def _destroy_method_name(self, instance: Any, declared: str | None, *, infer: bool) -> str | None:
@@ -838,14 +869,39 @@ class ApplicationContext:
                 return candidate
         return None
 
+    async def _await_shutdown(self, awaitable: Any, timeout: float) -> Any:
+        """Bound the wait even when user code suppresses cancellation.
+
+        Keep timed-out work referenced until it finishes and retrieve late exceptions. Cancellation
+        cannot forcibly terminate a coroutine or a worker thread; other resources must still close.
+        """
+        task = asyncio.ensure_future(awaitable)
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_task_done)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+            if not done:
+                raise TimeoutError
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+
+    def _cleanup_task_done(self, task: asyncio.Future[Any]) -> None:
+        self._cleanup_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
     async def _stop_lifecycle_bean(self, bean: Any, timeout: float) -> None:
         """Stop one lifecycle bean within *timeout*; a failure is logged and does not stop the others."""
         name = type(bean).__qualname__
+        if not self._claim_lifecycle_call(bean, "stop"):
+            return
         try:
-            await asyncio.wait_for(bean.stop(), timeout=timeout)
+            await self._await_shutdown(bean.stop(), timeout)
         except TimeoutError:
             logger.warning("adapter_stop_timeout", extra={"adapter": name, "timeout_s": timeout})
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             logger.warning("adapter_stop_failed", extra={"adapter": name}, exc_info=True)
 
     def _lifecycle_stop_order(self) -> list[Any]:
@@ -938,6 +994,10 @@ class ApplicationContext:
         candidates.sort(key=lambda bean: (lifecycle_phase(bean), self._creation_index(bean)))
 
         for adapter in candidates:
+            # start() may allocate before raising or being cancelled; it already needs an owner.
+            self._lifecycle_beans.append(adapter)
+            if not self._claim_lifecycle_call(adapter, "start"):
+                continue
             try:
                 await adapter.start()
             except Exception as exc:
@@ -946,7 +1006,6 @@ class ApplicationContext:
                     provider=type(adapter).__name__,
                     reason=str(exc),
                 ) from exc
-            self._lifecycle_beans.append(adapter)
 
     @staticmethod
     def _has_lifecycle_methods(instance: object) -> bool:
@@ -1604,6 +1663,13 @@ class ApplicationContext:
             static_attr = inspect.getattr_static(instance, attr_name, None)
             if isinstance(static_attr, (property, functools.cached_property)):
                 continue
+            if hasattr(type(static_attr), "__get__") and not (
+                inspect.isfunction(static_attr)
+                or isinstance(static_attr, (staticmethod, classmethod))
+                or inspect.ismethoddescriptor(static_attr)
+                and type(static_attr).__module__ == "builtins"
+            ):
+                continue
             try:
                 member = getattr(instance, attr_name)
             except Exception:
@@ -2052,6 +2118,15 @@ class ApplicationContext:
     async def _call_post_construct(self, instance: Any) -> None:
         """Call all @post_construct methods on an instance."""
         for attr_name, method in _marked_members(instance, "__pyfly_post_construct__"):
+            if (
+                attr_name == "start"
+                and self._has_lifecycle_methods(instance)
+                and not any(bean is instance for bean in self._lifecycle_beans)
+                and any(reg.instance is instance for reg in self._all_registrations())
+            ):
+                self._lifecycle_beans.append(instance)
+            if not self._claim_lifecycle_call(instance, attr_name):
+                continue
             try:
                 result = method()
                 if inspect.isawaitable(result):
@@ -2062,20 +2137,3 @@ class ApplicationContext:
                     provider=type(instance).__qualname__,
                     reason=f"@post_construct method '{attr_name}' failed: {exc}",
                 ) from exc
-
-    async def _call_pre_destroy(self, instance: Any) -> None:
-        """Call all @pre_destroy methods on an instance."""
-        for attr_name, method in _marked_members(instance, "__pyfly_pre_destroy__"):
-            try:
-                result = method()
-                if inspect.isawaitable(result):
-                    await result
-            except Exception as exc:
-                logger.warning(
-                    "pre_destroy_failed",
-                    extra={
-                        "bean": type(instance).__qualname__,
-                        "method": attr_name,
-                        "error": str(exc),
-                    },
-                )

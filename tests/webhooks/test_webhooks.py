@@ -12,7 +12,7 @@ import pytest
 
 from pyfly.webhooks.event_listener import AbstractWebhookEventListener, WebhookEvent
 from pyfly.webhooks.processor import WebhookProcessor
-from pyfly.webhooks.signature import HmacSignatureValidator
+from pyfly.webhooks.signature import HmacSignatureValidator, NoOpSignatureValidator
 
 
 class StubListener(AbstractWebhookEventListener):
@@ -57,7 +57,7 @@ async def test_processor_rejects_invalid_signature() -> None:
 @pytest.mark.asyncio
 async def test_processor_dedupes_idempotency_keys() -> None:
     listener = StubListener()
-    processor = WebhookProcessor(listeners=[listener])
+    processor = WebhookProcessor(listeners=[listener], signature_validators={"stripe": NoOpSignatureValidator()})
     headers = {"X-Idempotency-Key": "abc"}
     await processor.process(source="stripe", raw_body=b"{}", headers=headers)
     await processor.process(source="stripe", raw_body=b"{}", headers=headers)

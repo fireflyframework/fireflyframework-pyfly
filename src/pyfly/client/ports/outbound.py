@@ -27,3 +27,10 @@ class HttpClientPort(Protocol):
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
+
+
+@runtime_checkable
+class BoundedHttpClientPort(HttpClientPort, Protocol):
+    """Optional bounded-response capability, separate from existing implementations."""
+
+    async def request_bounded(self, method: str, url: str, *, max_response_bytes: int, **kwargs: Any) -> Any: ...

@@ -508,7 +508,7 @@ async def wrapper(*args: Any, **kwargs: Any) -> Any:
 ### OpenTelemetry Integration
 
 When the `opentelemetry` libraries are installed, `TracingAutoConfiguration`
-builds the global `TracerProvider` **and** attaches a `BatchSpanProcessor` with
+reuses an existing global `TracerProvider`, or builds one **and** attaches a `BatchSpanProcessor` with
 an exporter for you, so `@span` traces are actually exported. (Previously the
 auto-configured provider had no span processor, so every span was recorded and
 immediately discarded.)
@@ -907,7 +907,7 @@ PyFly auto-configures observability infrastructure when the required libraries a
 
 ### MetricsAutoConfiguration
 
-**Conditions:** `prometheus_client` library installed.
+**Conditions:** `prometheus_client` library installed and no user `MetricsRegistry` bean.
 
 | Bean | Type | Description |
 |------|------|-------------|
@@ -931,7 +931,8 @@ class OrderService:
 
 ### TracingAutoConfiguration
 
-**Conditions:** `opentelemetry` libraries installed (`opentelemetry-api`, `opentelemetry-sdk`).
+**Conditions:** `opentelemetry.sdk.trace` installed and no user bean implementing the OpenTelemetry
+API `TracerProvider` (SDK subclasses also count).
 
 | Bean | Type | Config Keys |
 |------|------|-------------|
@@ -948,7 +949,9 @@ pyfly:
         endpoint: "http://localhost:4318"  # OTLP/HTTP exporter endpoint
 ```
 
-The auto-configured `TracerProvider` creates an OpenTelemetry `TracerProvider` with a `Resource` containing the service name, attaches a `BatchSpanProcessor` with the configured exporter (so spans are actually exported), and sets it as the global tracer provider. See [OpenTelemetry Integration](#opentelemetry-integration) for exporter selection rules, including the `OTEL_EXPORTER_OTLP_ENDPOINT` auto-detection.
+By default the auto-configuration reuses an existing global provider. If none has been installed,
+it creates an OpenTelemetry SDK `TracerProvider` with a `Resource` containing the service name,
+attaches a `BatchSpanProcessor` with the configured exporter, and installs it globally. See [OpenTelemetry Integration](#opentelemetry-integration) for exporter selection rules, including the `OTEL_EXPORTER_OTLP_ENDPOINT` auto-detection.
 
 The `TracingFilter` that opens a `SERVER` span per request skips the paths in
 `pyfly.observability.tracing.exclude-patterns` (a list or a comma-separated string of `fnmatch`
@@ -959,22 +962,55 @@ instance — `TracingFilter(exclude_patterns=[...])` — not on the class.
 
 ### MeterProviderAutoConfiguration
 
-**Conditions:** `opentelemetry-sdk` installed (`opentelemetry.sdk.metrics` importable).
+**Conditions:** `opentelemetry.sdk.metrics` installed and no user bean implementing the OpenTelemetry
+API `MeterProvider` (SDK subclasses also count).
 
 | Bean | Type | Config Keys |
 |------|------|-------------|
 | `meter_provider` | `MeterProvider` | `pyfly.observability.metrics.otlp.endpoint`, else derived from `pyfly.observability.tracing.otlp.endpoint` / `OTEL_EXPORTER_OTLP_ENDPOINT` |
 
-Registers an OpenTelemetry `MeterProvider` (with the same `service.name` as the tracer provider)
-as the global one, so OTel metric instruments an application records are exported rather than
+Reuses an existing global meter provider, or registers an OpenTelemetry SDK `MeterProvider`
+(with the same configured `service.name` as a newly created tracer provider) as the global one, so OTel metric instruments an application records are exported rather than
 dropped by the API's no-op provider. The reader is OTLP/HTTP to the metrics endpoint: the one
 configured under `metrics.otlp.endpoint` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, else the
 traces endpoint with `/v1/traces` rewritten to `/v1/metrics` (a base URL gains `/v1/metrics`).
 With no endpoint at all the provider has no reader: instruments still work, nothing is exported.
 
+### Provider ownership and isolated contexts
+
+Default providers are **process owned**: OpenTelemetry's SDK shuts them down at process exit.
+Stopping or failing an application context does not shut down a global provider another context
+or library may still use. Later contexts reuse the installed provider without allocating an extra
+exporter or attempting to override OpenTelemetry's write-once global. Configuration for a new
+exporter or service name applies only when creating a provider; it does not reconfigure an
+already installed global. An embedder that installs its own global owns its shutdown.
+
+For an isolated context, disable global installation per signal:
+
+```yaml
+pyfly:
+  observability:
+    tracing:
+      register-global: false
+    metrics:
+      register-global: false
+```
+
+These context-owned SDK providers are shut down when the context stops or startup fails, and
+rebuilt on restart. SDK shutdown runs outside the event loop. Inject the API `TracerProvider`
+or `MeterProvider` into your `@service` constructor and obtain instruments from that instance.
+The framework's `@span`, HTTP tracing filter and libraries using OpenTelemetry's global API
+continue to use the process globals; this option does not redirect their instrumentation.
+It is intended for applications that explicitly inject their providers.
+
 ### Overriding Auto-Configured Beans
 
-Provide your own beans via `@configuration` + `@bean` to override the auto-configured versions:
+Provide your own beans via `@configuration` + `@bean` to override the auto-configured versions.
+The matching auto-configuration backs off before constructing exporters or mutating globals.
+This works with API interface return annotations, SDK types and deferred user factories.
+A user provider's shutdown remains explicit: use `@bean(destroy_method="shutdown")` for a
+context-owned provider, or omit it when your process owns the provider. Registering a bean alone
+does not install it globally; configure global instrumentation explicitly when required.
 
 ```python
 from pyfly.container.bean import bean

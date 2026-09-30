@@ -160,3 +160,25 @@ ok = validator.is_valid(
     signature=request.headers["X-Twilio-Signature"],
 )
 ```
+
+## Secure ingress and migration
+
+Sources without an explicitly registered signature validator now fail closed.
+For an already-authenticated internal source, register `NoOpSignatureValidator()`
+explicitly; merely registering a listener no longer disables authentication.
+Signature and idempotency header names are case-insensitive, and duplicate names
+with different casing are rejected. The HTTP boundary must also reject duplicate
+raw header fields before converting them into a dictionary.
+
+`WebhookProcessor(max_body_bytes=1_048_576)` rejects oversized input before
+signature validation or JSON parsing. This bounds processor input, not HTTP
+server allocation: read `request.stream()` with a counter at ingress for a true
+request-body limit. `Body[bytes]` preserves the original bytes, including empty
+and non-UTF-8 payloads, but uses the usual eager body binding and has no standalone
+streaming cap. The form-size setting applies only to form binding.
+
+HMAC validators consume original bytes. Stripe verification signs the original
+ASCII timestamp plus `b"."` plus the unchanged body; no decode/re-encode occurs.
+The in-memory/Redis duplicate check and listener dispatch do not constitute a
+transaction with application data. Durable atomic receipt/workflow creation and
+business deduplication belong in the application.

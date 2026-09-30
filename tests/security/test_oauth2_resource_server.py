@@ -27,6 +27,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import jwt
@@ -62,6 +63,11 @@ class _JwksState:
     def __init__(self) -> None:
         self.keys = [_jwk(KEY1.public_key(), "k1")]
         self.issuer = ""  # set by the fixture once the port is known
+        self.requests = 0
+        self.status = 200
+        self.discovery_override: Any = None
+        self.raw_body: bytes | None = None
+        self.redirect: str | None = None
 
     def document(self) -> dict[str, Any]:
         return {"keys": self.keys}
@@ -77,10 +83,15 @@ def jwks() -> Iterator[tuple[str, str, _JwksState]]:
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
+            state.requests += 1
             is_discovery = self.path.endswith("/.well-known/openid-configuration")
             payload = state.discovery() if is_discovery else state.document()
-            body = json.dumps(payload).encode()
-            self.send_response(200)
+            if is_discovery and state.discovery_override is not None:
+                payload = state.discovery_override
+            body = state.raw_body if state.raw_body is not None else json.dumps(payload).encode()
+            self.send_response(state.status)
+            if state.redirect:
+                self.send_header("Location", state.redirect)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -97,6 +108,7 @@ def jwks() -> Iterator[tuple[str, str, _JwksState]]:
         yield f"{state.issuer}/jwks", state.issuer, state
     finally:
         httpd.shutdown()
+        httpd.server_close()
 
 
 def _mint(payload: dict[str, Any], *, key: Any = KEY1, kid: str = "k1") -> str:
@@ -418,3 +430,394 @@ class TestClaimMappingOptions:
         jwks_uri, _, _ = jwks
         v = JWKSTokenValidator(jwks_uri=jwks_uri)
         assert isinstance(v.to_security_context(_mint({"sub": "u"})), SecurityContext)
+
+
+class TestBoundedJWKS:
+    def test_removed_cached_key_expires(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri, jwks_cache_seconds=0.02)
+        token = _mint({"sub": "u"})
+        assert validator.validate(token)["sub"] == "u"
+        state.keys = [_jwk(KEY2.public_key(), "k2")]
+        time.sleep(0.03)
+        with pytest.raises(SecurityException):
+            validator.validate(token)
+
+    def test_unknown_kids_share_refresh_budget(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri)
+        validator.validate(_mint({}))
+        for index in range(12):
+            with pytest.raises(SecurityException):
+                validator.validate(_mint({}, kid=f"unknown-{index}"))
+        assert state.requests == 2
+
+    def test_concurrent_cold_cache_fetches_once(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri)
+        token = _mint({"sub": "u"})
+        barrier = threading.Barrier(8)
+
+        def validate(_: int) -> str:
+            barrier.wait()
+            return str(validator.validate(token)["sub"])
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            assert list(pool.map(validate, range(8))) == ["u"] * 8
+        assert state.requests == 1
+
+    def test_outage_preserves_valid_keys_but_never_extends_expiry(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri, jwks_cache_seconds=0.1)
+        token = _mint({"sub": "u"})
+        validator.validate(token)
+        state.status = 503
+        with pytest.raises(SecurityException):
+            validator.validate(_mint({}, kid="unknown"))
+        assert validator.validate(token)["sub"] == "u"
+        time.sleep(0.11)
+        with pytest.raises(SecurityException):
+            validator.validate(token)
+        assert state.requests == 2
+
+    def test_initial_outage_is_rate_limited(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri)
+        state.status = 503
+        for _ in range(5):
+            with pytest.raises(SecurityException):
+                validator.validate(_mint({}))
+        assert state.requests == 1
+
+    def test_rotation_refreshes_once_and_drops_removed_keys(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri)
+        validator.validate(_mint({}))
+        state.keys = [_jwk(KEY2.public_key(), "k2")]
+        assert validator.validate(_mint({"sub": "rotated"}, key=KEY2, kid="k2"))["sub"] == "rotated"
+        with pytest.raises(SecurityException):
+            validator.validate(_mint({}))
+        assert state.requests == 2
+
+    def test_document_byte_limit(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        state.raw_body = json.dumps({"keys": state.keys, "padding": "x" * 262144}).encode()
+        with pytest.raises(SecurityException):
+            JWKSTokenValidator(uri).validate(_mint({}))
+
+    def test_key_count_limit(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        state.keys += [_jwk(KEY2.public_key(), f"k{i}") for i in range(101)]
+        with pytest.raises(SecurityException):
+            JWKSTokenValidator(uri).validate(_mint({}))
+
+    def test_token_byte_limit_before_fetch(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        with pytest.raises(SecurityException):
+            JWKSTokenValidator(uri).validate(_mint({"padding": "x" * 16384}))
+        assert state.requests == 0
+
+    def test_disallowed_algorithm_does_not_fetch(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        token = jwt.encode({"exp": int(time.time()) + 60}, KEY1, algorithm="RS384", headers={"kid": "k1"})
+        with pytest.raises(SecurityException):
+            JWKSTokenValidator(uri).validate(token)
+        assert state.requests == 0
+
+    def test_optional_token_class_and_client_policy(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, _ = jwks
+        validator = JWKSTokenValidator(uri, required_token_use="access", allowed_client_ids=["app"])
+        assert validator.validate(_mint({"token_use": "access", "client_id": "app"}))["client_id"] == "app"
+        for claims in ({}, {"token_use": "id", "client_id": "app"}, {"token_use": "access", "client_id": "other"}):
+            with pytest.raises(SecurityException):
+                validator.validate(_mint(claims))
+
+    def test_optional_header_type_policy(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri, allowed_token_types=["at+jwt"])
+        with pytest.raises(SecurityException):
+            validator.validate(_mint({}))
+        assert state.requests == 0
+        token = jwt.encode(
+            {"exp": int(time.time()) + 60}, KEY1, algorithm="RS256", headers={"kid": "k1", "typ": "at+jwt"}
+        )
+        assert validator.validate(token)["exp"]
+
+    @pytest.mark.parametrize(
+        "document", [[], {}, {"issuer": "https://other.example", "jwks_uri": "https://other.example/jwks"}]
+    )
+    def test_discovery_requires_exact_issuer(self, jwks: tuple[str, str, _JwksState], document: Any) -> None:
+        _, issuer, state = jwks
+        state.discovery_override = document
+        with pytest.raises(SecurityException) as error:
+            discover_oidc(issuer)
+        assert error.value.code == "OIDC_DISCOVERY_FAILED"
+
+    def test_discovery_is_bounded(self, jwks: tuple[str, str, _JwksState]) -> None:
+        _, issuer, state = jwks
+        state.discovery_override = {**state.discovery(), "padding": "x" * 65536}
+        with pytest.raises(SecurityException):
+            discover_oidc(issuer)
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "file:///etc/passwd",
+            "http://example.com/jwks",
+            "http://127.0.0.1:1/jwks",
+            "https://user:pass@example.com/jwks",
+        ],
+    )
+    def test_discovery_rejects_untrusted_endpoint(self, jwks: tuple[str, str, _JwksState], endpoint: str) -> None:
+        _, issuer, state = jwks
+        state.discovery_override = {"issuer": issuer, "jwks_uri": endpoint}
+        with pytest.raises(SecurityException):
+            discover_oidc(issuer)
+
+    def test_redirect_is_not_followed(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, issuer, state = jwks
+        state.status = 302
+        state.redirect = f"{issuer}/redirect-target"
+        with pytest.raises(SecurityException):
+            JWKSTokenValidator(uri).validate(_mint({}))
+        assert state.requests == 1
+
+    def test_concurrent_unknown_keys_share_one_refresh(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri)
+        validator.validate(_mint({}))
+        tokens = [_mint({}, kid=f"unknown-{i}") for i in range(8)]
+        barrier = threading.Barrier(8)
+
+        def validate(token: str) -> bool:
+            barrier.wait()
+            with pytest.raises(SecurityException):
+                validator.validate(token)
+            return True
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            assert all(pool.map(validate, tokens))
+        assert state.requests == 2
+
+    def test_refresh_recovers_after_cooldown(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        validator = JWKSTokenValidator(uri, jwks_min_refresh_seconds=0.02)
+        state.status = 503
+        token = _mint({"sub": "u"})
+        with pytest.raises(SecurityException):
+            validator.validate(token)
+        state.status = 200
+        time.sleep(0.03)
+        assert validator.validate(token)["sub"] == "u"
+        assert state.requests == 2
+
+    @pytest.mark.parametrize("body", [b"[]", b"not json", b'{"keys":null}', b'{"keys":[null]}'])
+    def test_malformed_jwks_fails_closed(self, jwks: tuple[str, str, _JwksState], body: bytes) -> None:
+        uri, _, state = jwks
+        state.raw_body = body
+        with pytest.raises(SecurityException) as error:
+            JWKSTokenValidator(uri).validate(_mint({}))
+        assert error.value.code == "INVALID_TOKEN"
+
+    @pytest.mark.parametrize("change", [{"alg": "RS384"}, {"use": "enc"}, {"key_ops": ["sign"]}])
+    def test_signing_key_constraints_are_enforced(
+        self, jwks: tuple[str, str, _JwksState], change: dict[str, Any]
+    ) -> None:
+        uri, _, state = jwks
+        state.keys[0].update(change)
+        with pytest.raises(SecurityException):
+            JWKSTokenValidator(uri).validate(_mint({}))
+
+    def test_jwk_without_alg_supports_configured_algorithm(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        del state.keys[0]["alg"]
+        token = jwt.encode({"exp": int(time.time()) + 60}, KEY1, algorithm="RS384", headers={"kid": "k1"})
+        assert JWKSTokenValidator(uri, algorithms=["RS384"]).validate(token)["exp"]
+
+    def test_token_key_urls_never_select_endpoint(self, jwks: tuple[str, str, _JwksState]) -> None:
+        uri, _, state = jwks
+        token = jwt.encode(
+            {"exp": int(time.time()) + 60},
+            KEY1,
+            algorithm="RS256",
+            headers={"kid": "k1", "jku": "http://127.0.0.1:1/jwks", "x5u": "file:///etc/passwd"},
+        )
+        assert JWKSTokenValidator(uri).validate(token)["exp"]
+        assert state.requests == 1
+
+    def test_discovery_accepts_cross_origin_https_from_trusted_issuer(self, jwks: tuple[str, str, _JwksState]) -> None:
+        _, issuer, state = jwks
+        state.discovery_override = {"issuer": issuer, "jwks_uri": "https://keys.example.com/jwks"}
+        assert discover_oidc(issuer) == ("https://keys.example.com/jwks", issuer)
+
+    def test_discovery_does_not_strip_issuer_trailing_slash(self, jwks: tuple[str, str, _JwksState]) -> None:
+        _, issuer, state = jwks
+        with pytest.raises(SecurityException):
+            discover_oidc(issuer + "/")
+        state.discovery_override = {"issuer": issuer + "/", "jwks_uri": f"{issuer}/jwks"}
+        assert discover_oidc(issuer + "/")[1] == issuer + "/"
+
+    @pytest.mark.parametrize("uri", ["file:///etc/passwd", "http://example.com/jwks", "https://u:p@x/jwks"])
+    def test_invalid_configured_endpoints_rejected(self, uri: str) -> None:
+        with pytest.raises(ValueError):
+            JWKSTokenValidator(uri)
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {"jwks_cache_seconds": 0},
+            {"jwks_min_refresh_seconds": -1},
+            {"jwks_timeout": float("inf")},
+            {"jwks_max_bytes": 0},
+            {"jwks_max_keys": 0},
+            {"max_token_bytes": -1},
+            {"algorithms": ["HS256"]},
+            {"algorithms": ["none"]},
+        ],
+    )
+    def test_invalid_limits_and_symmetric_algorithms_rejected(self, options: dict[str, Any]) -> None:
+        with pytest.raises(ValueError):
+            JWKSTokenValidator("https://issuer.example/jwks", **options)
+
+    def test_auto_configuration_pins_issuer_with_explicit_jwks(self, jwks: tuple[str, str, _JwksState]) -> None:
+        from pyfly.core.config import Config
+        from pyfly.security.auto_configuration import OAuth2ResourceServerAutoConfiguration
+
+        uri, issuer, _ = jwks
+        config = Config(
+            {
+                "pyfly": {
+                    "security": {
+                        "oauth2": {
+                            "resource-server": {
+                                "jwks-uri": uri,
+                                "issuer-uri": issuer,
+                                "required-token-use": "access",
+                                "allowed-client-ids": "app",
+                                "client-id-claim": "azp",
+                                "allowed-token-types": "JWT",
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        validator = OAuth2ResourceServerAutoConfiguration().jwks_token_validator(config)
+        valid = {"iss": issuer, "token_use": "access", "azp": "app"}
+        assert validator.validate(_mint(valid))["azp"] == "app"
+        for change in ({"iss": "wrong"}, {"token_use": "id"}, {"azp": "other"}):
+            with pytest.raises(SecurityException):
+                validator.validate(_mint({**valid, **change}))
+
+    def test_auto_configuration_rejects_conflicting_issuers(self) -> None:
+        from pyfly.core.config import Config
+        from pyfly.security.auto_configuration import OAuth2ResourceServerAutoConfiguration
+
+        config = Config(
+            {
+                "pyfly": {
+                    "security": {
+                        "oauth2": {
+                            "resource-server": {
+                                "jwks-uri": "https://issuer.example/jwks",
+                                "issuer-uri": "https://issuer.example",
+                                "issuer": "https://other.example",
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        with pytest.raises(SecurityException):
+            OAuth2ResourceServerAutoConfiguration().jwks_token_validator(config)
+
+    @pytest.mark.parametrize("discovery", [False, True])
+    def test_malformed_http_response_is_a_security_failure(
+        self, monkeypatch: pytest.MonkeyPatch, discovery: bool
+    ) -> None:
+        from http.client import BadStatusLine
+        from urllib.request import OpenerDirector
+
+        def invalid_response(*args: Any, **kwargs: Any) -> Any:
+            raise BadStatusLine("invalid status")
+
+        monkeypatch.setattr(OpenerDirector, "open", invalid_response)
+        with pytest.raises(SecurityException):
+            if discovery:
+                discover_oidc("https://issuer.example")
+            else:
+                JWKSTokenValidator("https://issuer.example/jwks").validate(_mint({}))
+
+    def test_drip_body_exceeds_fetch_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+        from urllib.request import OpenerDirector
+
+        from pyfly.security.oauth2 import _jwks
+
+        now = [0.0]
+        monkeypatch.setattr(_jwks, "time", SimpleNamespace(monotonic=lambda: now[0]))
+        body = json.dumps({"keys": [_jwk(KEY1.public_key(), "k1")]}).encode()
+
+        class SlowResponse:
+            status = 200
+            headers = {"Content-Encoding": "identity"}
+
+            def __enter__(self) -> SlowResponse:
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                pass
+
+            def read(self, amount: int) -> bytes:
+                now[0] += 2
+                return body[:amount]
+
+            def read1(self, amount: int) -> bytes:
+                return self.read(amount)
+
+        monkeypatch.setattr(OpenerDirector, "open", lambda *args, **kwargs: SlowResponse())
+        with pytest.raises(SecurityException):
+            JWKSTokenValidator("https://issuer.example/jwks", jwks_timeout=1).validate(_mint({}))
+
+    @pytest.mark.parametrize("outage", [False, True])
+    def test_slow_refresh_cooldown_starts_on_completion(
+        self, jwks: tuple[str, str, _JwksState], monkeypatch: pytest.MonkeyPatch, outage: bool
+    ) -> None:
+        from types import SimpleNamespace
+
+        from pyfly.security.oauth2 import _jwks
+
+        uri, _, state = jwks
+        now = [0.0]
+        monkeypatch.setattr(_jwks, "time", SimpleNamespace(monotonic=lambda: now[0]))
+        fetch = _jwks.fetch_json
+
+        def slow_fetch(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            try:
+                return fetch(*args, **kwargs)
+            finally:
+                now[0] += 60
+
+        monkeypatch.setattr(_jwks, "fetch_json", slow_fetch)
+        validator = JWKSTokenValidator(uri)
+        if outage:
+            state.status = 503
+        for _ in range(3):
+            with pytest.raises(SecurityException):
+                validator.validate(_mint({}, kid="unknown"))
+        assert state.requests == 1
+
+    @pytest.mark.parametrize(
+        "leeway",
+        [float("nan"), float("inf"), -1, True, 10**1000],
+        ids=["nan", "infinity", "negative", "bool", "overflow"],
+    )
+    def test_invalid_clock_skew_rejected(self, leeway: Any) -> None:
+        with pytest.raises(ValueError):
+            JWKSTokenValidator("https://issuer.example/jwks", leeway=leeway)
+
+    @pytest.mark.parametrize("option", ["jwks_max_bytes", "jwks_max_keys", "max_token_bytes"])
+    @pytest.mark.parametrize("value", [True, 1.5, 10**1000], ids=["bool", "fraction", "overflow"])
+    def test_byte_and_count_limits_require_finite_integers(self, option: str, value: Any) -> None:
+        with pytest.raises(ValueError):
+            JWKSTokenValidator("https://issuer.example/jwks", **{option: value})

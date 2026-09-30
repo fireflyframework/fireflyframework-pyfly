@@ -6,6 +6,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.10 (2026-09-29)
+
+Reusable infrastructure hardening discovered while building Firefly Weave.
+
+### Added
+
+- Public `HttpxClientAdapter` client/transport injection, ownership, TLS, proxy,
+  environment and connection-retry controls; separate `BoundedHttpClientPort` and
+  `request_bounded()` preserve existing `HttpClientPort` implementations.
+- Optional `pyfly[oauth2-client]` and standalone `pyfly.oauth2` code exchange,
+  S256 PKCE and device authorization primitives. Device polling handles cumulative
+  slow-down, timeout backoff, cancellation and monotonic expiry. No web/application
+  boot, credential storage, password grant or provider-admin dependency.
+- JWKS response/key/token limits, expiring snapshot cache, coordinated refresh and
+  explicit JOSE type, token-use and client-ID policy options.
+
+### Fixed
+
+- Cached JWKS keys expire with the snapshot; removed keys cannot survive indefinitely.
+  Unknown-key refreshes are throttled and coordinated. Failed refreshes preserve
+  still-fresh keys but never extend their deadline. Discovery checks the exact issuer.
+- Failed/cancelled startup releases partially started beans and other owned resources;
+  lifecycle aliases and overlapping declarations call each hook once. Cleanup
+  continues after individual failures, preserving the startup error. Native scanned
+  `@service` constructor injection and port/concrete aliases have regression coverage.
+- User tracing, meter and metrics beans suppress default infrastructure. Existing
+  process-global providers are reused; optional context-local providers have explicit
+  shutdown ownership. Pydantic introspection avoids deprecated instance field access.
+- `Body[bytes]` returns original bytes, including empty and non-UTF-8 payloads.
+  Stripe HMAC verification no longer decodes/re-encodes the signed body.
+- Login token/userinfo failures no longer log provider bodies or transport exception text.
+
+### Migration and limits
+
+- Webhook sources now require an explicit validator. For deliberately unsigned,
+  independently authenticated sources, register `NoOpSignatureValidator` explicitly.
+  Processor input defaults to 1 MiB; this is not an HTTP ingress streaming limit.
+- JWKS/discovery reject redirects, encoded responses and non-HTTPS remote endpoints
+  (loopback HTTP remains available). Tokens require a nonempty `kid` and asymmetric
+  configured algorithms. Optional token/client policy is not domain authorization.
+- Ordinary HTTP `request()` is unchanged and remains eager. The bounded API uses
+  identity encoding and disallows automatic redirects, auth challenge flows and
+  client event hooks; injected transports remain responsible for their allocations
+  and destination policy. No core SSRF policy is implied.
+- Default OTel globals are process-owned, preserving existing instrumentation;
+  `register-global=false` enables context ownership and requires explicit provider
+  injection into instrumentation. Async lifecycle hooks must cooperate with cancellation;
+  synchronous user hooks must not block the event loop.
+- OAuth callers own callback state/issuer/replay validation and secure persistence.
+  Returned ID tokens are opaque, not verified identity. See the standalone OAuth,
+  security, HTTP client, context, observability and webhook guides.
+
 ## v26.09.09 (2026-09-28)
 
 A fix found by the first application that moved to `26.09.08`. That application's integration suite

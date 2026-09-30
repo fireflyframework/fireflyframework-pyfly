@@ -47,6 +47,14 @@ class ServiceClientException(InfrastructureException):
         self.body = body
 
 
+class ResponseTooLargeException(ServiceClientException):
+    """The response exceeds the caller's bounded payload limit (not retryable)."""
+
+
+class UnsupportedContentEncodingException(ServiceClientException):
+    """A bounded response uses unsupported content encoding (not retryable)."""
+
+
 class ServiceValidationException(ServiceClientException):
     """HTTP 400 — the request was rejected as invalid."""
 
