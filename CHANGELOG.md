@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.11 (2026-09-30)
+
+### Fixed
+
+- `TaskScheduler.discover()` skips custom descriptors before binding
+  scheduled methods. Scanning a Pydantic settings instance no longer evaluates
+  `model_fields` or `model_computed_fields`, which emitted
+  `PydanticDeprecatedSince211` warnings in 26.09.10. Discovery still finds and
+  executes ordinary, inherited, static and class methods marked `@scheduled`.
+- Regression coverage verifies both the absence of Pydantic warnings and that
+  discovery never executes custom descriptor, property or cached-property getters.
+
+### Upgrading
+
+- No configuration or public API changes. No warning filters are required.
+  Custom descriptors are not evaluated to obtain scheduled callables; expose
+  scheduled jobs as methods.
+
 ## v26.09.10 (2026-09-29)
 
 Reusable infrastructure hardening discovered while building Firefly Weave.

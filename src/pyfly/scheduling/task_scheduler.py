@@ -123,8 +123,9 @@ class TaskScheduler:
     def discover(self, beans: list[Any]) -> int:
         """Scan beans for @scheduled methods. Return number of scheduled methods found.
 
-        For each bean, inspects all attributes. If an attribute is callable and
-        has ``__pyfly_scheduled__ == True``, it is recorded for later scheduling.
+        For each bean, inspects public attributes without evaluating custom
+        descriptors. Callable attributes marked ``__pyfly_scheduled__ == True``
+        are recorded for later scheduling.
         """
         count = 0
         for bean in beans:
@@ -136,6 +137,15 @@ class TaskScheduler:
                 # raising property must not break scheduled-task scanning.
                 static_attr = inspect.getattr_static(bean, name, None)
                 if isinstance(static_attr, (property, functools.cached_property)):
+                    continue
+                # Custom descriptors (including Pydantic's deprecated instance
+                # properties) can look like method descriptors on Python 3.12.
+                if hasattr(type(static_attr), "__get__") and not (
+                    inspect.isfunction(static_attr)
+                    or isinstance(static_attr, (staticmethod, classmethod))
+                    or inspect.ismethoddescriptor(static_attr)
+                    and type(static_attr).__module__ == "builtins"
+                ):
                     continue
                 try:
                     attr = getattr(bean, name)

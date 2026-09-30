@@ -457,7 +457,12 @@ scheduler = TaskScheduler(lock=RedisLock(redis_client))
 
 Call `discover()` with a list of bean instances. It scans every public attribute
 (names not starting with `_`) and records those marked with
-`__pyfly_scheduled__ = True`. Returns the number of scheduled methods found:
+`__pyfly_scheduled__ = True`. Since v26.09.11, discovery skips custom
+descriptors as well as properties and cached properties before binding methods.
+Pydantic settings can be included without instance-field deprecation warnings.
+Ordinary, inherited, static and class methods remain discoverable; expose jobs
+as methods rather than descriptor-produced callables. Returns the number of
+scheduled methods found:
 
 ```python
 beans = [metrics_collector, data_syncer, report_generator]
