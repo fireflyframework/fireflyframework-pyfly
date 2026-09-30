@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.09.12` | 2026-09-30 | Offline OpenAPI contracts, rich schema inference and explicit operation overrides. |
 | `26.09.11` | 2026-09-30 | Scheduled-method discovery avoids evaluating Pydantic and custom descriptors. |
 | `26.09.10` | 2026-09-29 | Bounded identity and HTTP primitives, lifecycle ownership, substitutable observability and exact-byte webhooks. |
 | `26.09.09` | 2026-09-28 | A restarted context drops the previous run's interface bindings with its registrations, so a second `start()` of the same context no longer fails with a `KeyError` (a test suite whose modules share an application). |
@@ -94,17 +95,17 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.09.11"
+print(pyfly.__version__)  # → "26.09.12"
 ```
 
 ```bash
-pyfly --version            # → 26.09.11
+pyfly --version            # → 26.09.12
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.09.11) (Python 3.13.9)
+:: PyFly Framework :: (v26.09.12) (Python 3.13.9)
 ```
 
 ---
