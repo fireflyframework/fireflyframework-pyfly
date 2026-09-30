@@ -1650,7 +1650,7 @@ Token-provided `jku` and `x5u` never choose the fetch endpoint.
 Discovery requires the returned issuer to match `issuer-uri` exactly, including
 trailing slashes. `issuer-uri` also pins token issuer validation when `jwks-uri`
 is supplied explicitly; configuring a different `issuer` fails at startup. Fetches
-require HTTPS, reject redirects and compressed documents, and bound the response
+require HTTPS, ignore ambient proxy settings, reject redirects and compressed documents, and bound the response
 read. Body reads check a monotonic deadline between bounded chunks; one blocking
 read may additionally take the socket timeout. DNS resolution and response headers
 still depend on the standard library transport's timeouts, so this is not a strict
@@ -1680,6 +1680,86 @@ Use `allowed-token-types: "at+jwt"` only if your provider issues that type, or
 These checks supplement issuer and audience checks; choose them from the provider's
 access-token contract. Direct constructor callers retain the same validation and
 context methods, with equivalent optional keyword arguments using underscores.
+
+
+### Borrowed JWKS transports and validation budgets
+
+Applications with an existing egress policy can inject a raw-byte fetcher into
+`JWKSTokenValidator`. Both protocols are public in `pyfly.security.oauth2`:
+
+```python
+from typing import Protocol
+
+class JWKSFetcher(Protocol):
+    def __call__(self, uri: str, *, timeout: float, max_bytes: int) -> bytes: ...
+
+class AsyncJWKSFetcher(Protocol):
+    async def __call__(self, uri: str, *, timeout: float, max_bytes: int) -> bytes: ...
+```
+
+The validator passes only its configured JWKS URI, the remaining refresh budget,
+and the document byte limit. Fetchers are borrowed: the application owns their
+lifecycle, and PyFly never closes them. The adapter must enforce the application's
+egress policy, HTTP 200, no redirects, identity encoding, and timeout and byte
+limits while reading. Because the adapter returns bytes rather than HTTP metadata,
+these transport checks are the adapter's responsibility. PyFly independently
+checks the returned type, byte count, JSON, key count, signing keys and token claims.
+Fetcher failures are reported as redacted `SecurityException` errors with code
+`INVALID_TOKEN`, without exposing callback exception text in normal tracebacks.
+
+For a synchronous adapter, pass `jwks_fetcher=fetcher` and call
+`validator.validate(token, timeout=remaining_budget)`. The optional timeout must be
+positive and finite; invalid values raise `ValueError` before fetching. It covers
+lock waiting, fetching, key parsing and JWT verification. A caller whose budget
+expires waiting for the refresh lock does not initiate a fetch or alter the cache
+or cooldown. The `jwks_timeout` constructor argument still caps each refresh.
+Omitting the per-call timeout preserves the existing per-refresh limit without a
+total validation deadline.
+
+Synchronous budgets are cooperative. The default standard-library transport uses
+the remaining budget when opening the request and checks the deadline around
+bounded reads. It has no supported public API to reset each read's socket timeout;
+DNS, an individual read, custom callbacks and cryptographic work may overrun the
+budget. There are no timeout worker threads. Late fetch or key-parse results are
+rejected before publishing a snapshot, and late JWT verification cannot return a
+successful payload. Failed refreshes preserve the old snapshot's original expiry.
+
+An async egress adapter can be awaited directly on its application's event loop:
+
+```python
+from typing import Any
+from pyfly.security.oauth2 import AsyncJWKSFetcher, JWKSTokenValidator
+
+def make_validator(fetcher: AsyncJWKSFetcher) -> JWKSTokenValidator:
+    return JWKSTokenValidator(
+        "https://issuer.example/keys",
+        issuer="https://issuer.example",
+        audiences=["api"],
+        async_jwks_fetcher=fetcher,
+    )
+
+async def authenticate(token: str, validator: JWKSTokenValidator) -> dict[str, Any]:
+    return await validator.validate_async(token, timeout=2.0)
+```
+
+Keep the validator for reuse in a long-lived application. `validate_async`
+requires an explicit `async_jwks_fetcher`; otherwise it raises `ValueError` before
+I/O. It never falls back to synchronous fetching, `asyncio.run`, a worker thread,
+or a hidden HTTP client. The sync and async paths use independent snapshots,
+locks and cooldowns. Use the async path on one event loop per validator instance.
+The existing `to_security_context` and `validate_and_context` helpers remain
+synchronous and do not accept a per-call budget.
+
+Async timeout and cancellation flow through the directly awaited fetcher in the
+caller's task. The adapter must propagate cancellation and finish transport
+cleanup before returning or raising; PyFly waits for that cleanup and starts no
+background fetch task. Cleanup may extend beyond the requested timeout. PyFly does not issue a second
+timeout cancellation during cleanup already started by caller cancellation; it
+does not shield cleanup against repeated external cancellation. Cancelling
+or timing out a lock waiter leaves the active refresh alone. A callback that
+suppresses a deadline cancellation and returns late still cannot publish keys.
+Synchronous parsing and crypto on the event loop cannot be preempted, so this is
+cooperative cancellation rather than a hard wall-clock guarantee.
 
 ---
 

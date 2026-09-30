@@ -31,6 +31,7 @@ from pyfly.security.oauth2.client import (
     keycloak,
 )
 from pyfly.security.oauth2.endpoints import AuthorizationServerEndpoints
+from pyfly.security.oauth2.jwks import AsyncJWKSFetcher, JWKSFetcher
 from pyfly.security.oauth2.login import OAuth2LoginHandler
 from pyfly.security.oauth2.properties import ResourceServerProperties
 from pyfly.security.oauth2.resource_server import (
@@ -42,6 +43,7 @@ from pyfly.security.oauth2.resource_server import (
 from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityFilter
 
 __all__ = [
+    "AsyncJWKSFetcher",
     "AtomicTokenStore",
     "AuthorizationServer",
     "AuthorizationServerEndpoints",
@@ -51,6 +53,7 @@ __all__ = [
     "GrantOutcome",
     "InMemoryClientRegistrationRepository",
     "InMemoryTokenStore",
+    "JWKSFetcher",
     "JWKSTokenValidator",
     "KeyValueTokenStore",
     "OAuth2LoginHandler",

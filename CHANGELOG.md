@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.15 (2026-09-30)
+
+### Added
+
+- Public typed synchronous and asynchronous JWKS fetch injection and caller
+  validation budgets, including
+  single-flight refresh lock waiting. Existing byte, key, cache, algorithm,
+  issuer and audience limits remain enforced. Custom fetch resources belong
+  to the caller; late results are rejected without publishing a new cache.
+- `OAuth2Client.client_credentials()` acquires Bearer tokens with bounded
+  scopes, explicit Basic or POST confidential-client authentication, and an
+  optional remaining timeout. Unsolicited refresh and ID tokens are rejected.
+
+### Fixed
+
+- Default JWKS networking disables environment proxies as well as redirects.
+  Fetch failures are redacted at the public token-validation boundary.
+
+### Compatibility
+
+- Existing authorization-code, device and opt-in device PKCE flows retain
+  their authentication defaults. No provider policy or refresh grant is added.
+- Synchronous JWKS deadlines are cooperative: blocking network operations and
+  injected fetchers cannot be preempted, and cancelling an outer thread does
+  not cancel its work. The API rejects results returned after the budget.
+  `validate_async()` awaits an explicitly supplied async fetcher, propagates
+  cancellation and waits for its cleanup, without background thread work.
+
 ## v26.09.14 (2026-09-30)
 
 ### Added

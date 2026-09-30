@@ -15,17 +15,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import math
 import threading
 import time
 import urllib.request
-from http.client import HTTPException
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
 import jwt
+
+from pyfly.security.oauth2.jwks import AsyncJWKSFetcher, JWKSFetcher
 
 
 def validate_endpoint(uri: str) -> None:
@@ -63,14 +67,21 @@ def validate_limit(value: float, name: str, *, integer: bool = False, allow_zero
         raise ValueError(f"Invalid numeric limit: {name}")
 
 
-def fetch_json(uri: str, *, timeout: float, max_bytes: int) -> dict[str, Any]:
+def remaining_seconds(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("JWKS operation deadline exceeded")
+    return remaining
+
+
+def _fetch_bytes(uri: str, *, timeout: float, max_bytes: int) -> bytes:
     validate_endpoint(uri)
     validate_limit(timeout, "timeout")
     validate_limit(max_bytes, "max_bytes", integer=True)
-    opener = urllib.request.build_opener(_NoRedirect())
-    request = urllib.request.Request(uri, headers={"Accept": "application/json", "Accept-Encoding": "identity"})
     deadline = time.monotonic() + timeout
-    with opener.open(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    request = urllib.request.Request(uri, headers={"Accept": "application/json", "Accept-Encoding": "identity"})
+    with opener.open(request, timeout=remaining_seconds(deadline)) as response:
         if response.status != 200:
             raise ValueError("Endpoint did not return HTTP 200")
         if response.headers.get("Content-Encoding", "identity").lower() != "identity":
@@ -89,10 +100,20 @@ def fetch_json(uri: str, *, timeout: float, max_bytes: int) -> dict[str, Any]:
                 raise ValueError("Document exceeds configured byte limit")
             if not chunk:
                 break
+    return bytes(body)
+
+
+def _parse_document(body: bytes, max_bytes: int) -> dict[str, Any]:
+    if not isinstance(body, bytes) or len(body) > max_bytes:
+        raise ValueError("JWKS fetcher must return bytes within the configured limit")
     document = json.loads(body)
     if not isinstance(document, dict):
         raise ValueError("Document must be a JSON object")
     return document
+
+
+def fetch_json(uri: str, *, timeout: float, max_bytes: int) -> dict[str, Any]:
+    return _parse_document(_fetch_bytes(uri, timeout=timeout, max_bytes=max_bytes), max_bytes)
 
 
 class BoundedJWKSClient:
@@ -111,6 +132,7 @@ class BoundedJWKSClient:
         min_refresh_seconds: float,
         max_bytes: int,
         max_keys: int,
+        fetcher: JWKSFetcher | None = None,
     ) -> None:
         validate_endpoint(uri)
         for name, value in (
@@ -122,6 +144,7 @@ class BoundedJWKSClient:
         validate_limit(max_bytes, "jwks_max_bytes", integer=True)
         validate_limit(max_keys, "jwks_max_keys", integer=True)
         self._uri = uri
+        self._fetcher = fetcher
         self._timeout = timeout
         self._lifespan = lifespan
         self._min_refresh_seconds = min_refresh_seconds
@@ -132,13 +155,23 @@ class BoundedJWKSClient:
         self._next_refresh_at = 0.0
         self._lock = threading.Lock()
 
-    def _fetch_keys(self) -> dict[str, tuple[jwt.PyJWK, str | None]]:
-        document = fetch_json(self._uri, timeout=self._timeout, max_bytes=self._max_bytes)
+    def _fetch_keys(self, deadline: float) -> dict[str, tuple[jwt.PyJWK, str | None]]:
+        if self._fetcher is None:
+            document = fetch_json(self._uri, timeout=remaining_seconds(deadline), max_bytes=self._max_bytes)
+        else:
+            body = self._fetcher(self._uri, timeout=remaining_seconds(deadline), max_bytes=self._max_bytes)
+            remaining_seconds(deadline)
+            document = _parse_document(body, self._max_bytes)
+        return self._parse_keys(document, deadline)
+
+    def _parse_keys(self, document: dict[str, Any], deadline: float) -> dict[str, tuple[jwt.PyJWK, str | None]]:
+        remaining_seconds(deadline)
         entries = document.get("keys")
         if not isinstance(entries, list) or not entries or len(entries) > self._max_keys:
             raise ValueError("JWKS must contain a nonempty, bounded keys array")
         keys: dict[str, tuple[jwt.PyJWK, str | None]] = {}
         for entry in entries:
+            remaining_seconds(deadline)
             if not isinstance(entry, dict):
                 raise ValueError("Invalid JWK entry")
             if entry.get("use", "sig") != "sig" or "verify" not in entry.get("key_ops", ["verify"]):
@@ -154,31 +187,56 @@ class BoundedJWKSClient:
             if algorithm is not None and not isinstance(algorithm, str):
                 raise ValueError("Invalid JWK algorithm")
             keys[kid] = (jwt.PyJWK.from_dict(entry), algorithm)
+        remaining_seconds(deadline)
         if not keys:
             raise ValueError("JWKS contains no usable signing keys")
         return keys
 
-    def get_signing_key(self, kid: str, algorithm: str) -> jwt.PyJWK:
-        with self._lock:
+    def get_signing_key(self, kid: str, algorithm: str, *, deadline: float | None = None) -> jwt.PyJWK:
+        if deadline is None:
+            self._lock.acquire()
+        elif not self._lock.acquire(timeout=min(remaining_seconds(deadline), threading.TIMEOUT_MAX)):
+            raise jwt.PyJWKClientError("JWKS operation deadline exceeded")
+        try:
+            if deadline is not None:
+                remaining_seconds(deadline)
+            cached = self._cached_key(kid, algorithm)
+            if cached is not None:
+                return cached
             now = time.monotonic()
-            if now < self._expires_at and kid in self._keys:
-                return self._matching_key(kid, algorithm)
-            if now < self._next_refresh_at:
-                raise jwt.PyJWKClientError("JWKS refresh is rate limited")
-            initial = not self._keys and self._expires_at == 0
+            refresh_deadline = now + self._timeout
+            if deadline is not None:
+                refresh_deadline = min(refresh_deadline, deadline)
             try:
-                keys = self._fetch_keys()
-            except (OSError, HTTPException, ValueError, TypeError, jwt.PyJWTError, RecursionError) as exc:
-                raise jwt.PyJWKClientError("Unable to refresh JWKS") from exc
+                keys = self._fetch_keys(refresh_deadline)
+                remaining_seconds(refresh_deadline)
+            except Exception:
+                # The borrowed callback may raise arbitrary exceptions containing
+                # credentials, URLs or response bytes. Keep them out of the chain.
+                raise jwt.PyJWKClientError("Unable to refresh JWKS") from None
             finally:
                 self._next_refresh_at = time.monotonic() + self._min_refresh_seconds
-            self._keys = keys
-            self._expires_at = time.monotonic() + self._lifespan
-            # A successful cold load can be followed by one immediate rotation
-            # refresh. Every subsequent refresh (including failures) is throttled.
-            if initial and kid in keys:
-                self._next_refresh_at = 0.0
+            return self._publish_keys(keys, kid, algorithm)
+        finally:
+            self._lock.release()
+
+    def _cached_key(self, kid: str, algorithm: str) -> jwt.PyJWK | None:
+        now = time.monotonic()
+        if now < self._expires_at and kid in self._keys:
             return self._matching_key(kid, algorithm)
+        if now < self._next_refresh_at:
+            raise jwt.PyJWKClientError("JWKS refresh is rate limited")
+        return None
+
+    def _publish_keys(self, keys: dict[str, tuple[jwt.PyJWK, str | None]], kid: str, algorithm: str) -> jwt.PyJWK:
+        initial = not self._keys and self._expires_at == 0
+        self._keys = keys
+        self._expires_at = time.monotonic() + self._lifespan
+        # One immediate rotation after a successful cold load; subsequent
+        # refresh attempts share the cooldown, including failures.
+        if initial and kid in keys:
+            self._next_refresh_at = 0.0
+        return self._matching_key(kid, algorithm)
 
     def _matching_key(self, kid: str, algorithm: str) -> jwt.PyJWK:
         entry = self._keys.get(kid)
@@ -188,3 +246,88 @@ class BoundedJWKSClient:
         if declared_algorithm is not None and declared_algorithm != algorithm:
             raise jwt.PyJWKClientError("Signing key algorithm does not match token")
         return key
+
+
+@asynccontextmanager
+async def _refresh_timeout(delay: float) -> AsyncIterator[None]:
+    # A regular asyncio.timeout would cancel again if external cancellation is
+    # already running the fetcher's cleanup when the refresh deadline arrives.
+    task = asyncio.current_task()
+    assert task is not None
+    cancellations = task.cancelling()
+    expired = False
+
+    def expire() -> None:
+        nonlocal expired
+        if task.cancelling() == cancellations:
+            expired = True
+            task.cancel()
+
+    handle = asyncio.get_running_loop().call_later(delay, expire)
+    try:
+        yield
+    except asyncio.CancelledError:
+        if expired and task.cancelling() == cancellations + 1:
+            raise TimeoutError("JWKS operation deadline exceeded") from None
+        raise
+    finally:
+        handle.cancel()
+        if expired:
+            task.uncancel()
+
+
+class AsyncBoundedJWKSClient(BoundedJWKSClient):
+    """Independent snapshot and single-flight lock for one event loop."""
+
+    def __init__(
+        self,
+        uri: str,
+        *,
+        timeout: float,
+        lifespan: float,
+        min_refresh_seconds: float,
+        max_bytes: int,
+        max_keys: int,
+        async_fetcher: AsyncJWKSFetcher,
+    ) -> None:
+        super().__init__(
+            uri,
+            timeout=timeout,
+            lifespan=lifespan,
+            min_refresh_seconds=min_refresh_seconds,
+            max_bytes=max_bytes,
+            max_keys=max_keys,
+        )
+        self._async_fetcher = async_fetcher
+        self._async_lock = asyncio.Lock()
+
+    async def get_signing_key_async(self, kid: str, algorithm: str, *, deadline: float | None = None) -> jwt.PyJWK:
+        if deadline is None:
+            await self._async_lock.acquire()
+        else:
+            async with asyncio.timeout(remaining_seconds(deadline)):
+                await self._async_lock.acquire()
+        try:
+            if deadline is not None:
+                remaining_seconds(deadline)
+            cached = self._cached_key(kid, algorithm)
+            if cached is not None:
+                return cached
+            refresh_deadline = time.monotonic() + self._timeout
+            if deadline is not None:
+                refresh_deadline = min(refresh_deadline, deadline)
+            try:
+                async with _refresh_timeout(remaining_seconds(refresh_deadline)):
+                    body = await self._async_fetcher(
+                        self._uri, timeout=remaining_seconds(refresh_deadline), max_bytes=self._max_bytes
+                    )
+                    remaining_seconds(refresh_deadline)
+                    keys = self._parse_keys(_parse_document(body, self._max_bytes), refresh_deadline)
+                    remaining_seconds(refresh_deadline)
+            except Exception:
+                raise jwt.PyJWKClientError("Unable to refresh JWKS") from None
+            finally:
+                self._next_refresh_at = time.monotonic() + self._min_refresh_seconds
+            return self._publish_keys(keys, kid, algorithm)
+        finally:
+            self._async_lock.release()

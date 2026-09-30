@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.09.15` | 2026-09-30 | Public JWKS fetch seam and caller budgets; bounded OAuth2 client credentials. |
 | `26.09.14` | 2026-09-30 | Opt-in S256 PKCE for device authorization and token polling. |
 | `26.09.13` | 2026-09-30 | Deterministic OpenAPI references for constrained named aliases across processes. |
 | `26.09.12` | 2026-09-30 | Offline OpenAPI contracts, rich schema inference and explicit operation overrides. |
@@ -97,17 +98,17 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.09.14"
+print(pyfly.__version__)  # → "26.09.15"
 ```
 
 ```bash
-pyfly --version            # → 26.09.14
+pyfly --version            # → 26.09.15
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.09.14) (Python 3.13.9)
+:: PyFly Framework :: (v26.09.15) (Python 3.13.9)
 ```
 
 ---
