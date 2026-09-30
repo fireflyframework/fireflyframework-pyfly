@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.12 (2026-09-30)
+
+### Added
+
+- Documentation-only `@openapi_operation` and public operation, request body,
+  parameter, response and response-header metadata for manual handlers. Declare
+  optional bodies, multiple media types/statuses and exact response headers
+  without changing function signatures, request binding or response dispatch.
+- Public framework-neutral `RouteMetadata` supports offline generation without
+  application startup, service resolution or optional web dependencies.
+- OpenAPI security schemes, global requirements and per-operation overrides,
+  including explicit public operations. These declarations describe the contract;
+  they neither grant access nor enforce authentication or authorization.
+- Public custom Pydantic `schema_generator` and `create_app(openapi_generator=...)`
+  extension points for consumer schema policies and the served specification.
+
+### Fixed
+
+- Generate unions, discriminated unions, `Annotated` types, containers, recursive
+  models, UUIDs, enums and parameter constraints using Pydantic. Input schemas use
+  validation mode; response schemas use serialization mode, preserving aliases.
+- Resolve schema references and discriminator mappings across colliding model
+  names and differing input/output schemas. Repeated exports and reversed route
+  discovery produce deterministic documents.
+- Respect explicit operation IDs and mapping names, qualify inferred name
+  collisions, and reject duplicate explicit IDs or controller path/method pairs.
+- Inspect controller methods without evaluating custom descriptors or properties.
+
+### Upgrading
+
+- Existing decorators and runtime bindings retain their behavior. Explicit
+  responses replace the declared status, including framework validation errors;
+  `replace_responses=True` replaces the whole inferred response map. An explicit
+  `request_body=None` suppresses body inference and `security=[]` overrides global
+  requirements for that operation.
+- Richer inferred schemas and collision-qualified IDs intentionally change the
+  generated specification. Set an explicit unique name/operation ID for clients
+  that require a fixed identifier. See the web guide for complete examples.
+
 ## v26.09.11 (2026-09-30)
 
 ### Fixed

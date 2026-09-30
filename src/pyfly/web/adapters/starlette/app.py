@@ -60,6 +60,7 @@ def create_app(
     actuator_enabled: bool | None = None,
     cors: CORSConfig | None = None,
     lifespan: object | None = None,
+    openapi_generator: OpenAPIGenerator | None = None,
 ) -> Starlette:
     """Create a Starlette application with PyFly enterprise middleware.
 
@@ -412,7 +413,7 @@ def create_app(
     if docs_enabled:
         from pyfly.web.adapters.starlette.mounted_routes import collect_mounted_routes
 
-        generator = OpenAPIGenerator(title=title, version=version, description=description)
+        generator = openapi_generator or OpenAPIGenerator(title=title, version=version, description=description)
         websocket_routes = registrar.collect_websocket_routes(context) if context is not None else []
         # The caller's own routes and sub-applications are served beside the controllers; the
         # document describes them too, or a diff of it cannot see them go.

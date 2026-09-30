@@ -624,8 +624,8 @@ class TestResponseSchemas:
         assert schema["$ref"] == "#/components/schemas/ItemResponse"
 
     @pytest.mark.asyncio
-    async def test_dict_return_type_has_no_response_schema(self):
-        """When return type is dict, no response body schema is generated."""
+    async def test_dict_return_type_has_object_response_schema(self):
+        """Serializable dict returns have an object schema."""
         ctx = ApplicationContext(Config({}))
         ctx.register_bean(CatalogService)
         ctx.register_bean(CatalogController)
@@ -639,7 +639,7 @@ class TestResponseSchemas:
 
         get_op = spec["paths"]["/api/items/{item_id}"]["get"]
         resp_200 = get_op["responses"]["200"]
-        assert "content" not in resp_200
+        assert resp_200["content"]["application/json"]["schema"] == {"type": "object", "additionalProperties": True}
         assert resp_200["description"] == "Successful response"
 
 
