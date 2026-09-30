@@ -34,7 +34,33 @@ proof = generate_pkce()
 returned tokens and device grants omit secret fields from `repr`. Token responses
 are never logged. `OAuth2ClientError.code` is an allowlisted protocol/error code;
 provider descriptions, bodies and transport exception strings are not exposed.
-Do not log or serialize token objects yourself.
+Treat PKCE pairs, device grants and token objects as opaque in-memory values. Do
+not log them or serialize them with `dataclasses.asdict()` or another serializer:
+`repr` redaction does not remove secrets from their fields.
+
+For a provider that supports or requires PKCE on device authorization, opt in per
+request:
+
+```python
+async def acquire_with_device_pkce():
+    async with OAuth2Client("my-public-client", endpoints) as client:
+        grant = await client.authorize_device(scopes=("openid", "api"), use_pkce=True)
+        # Display only grant.verification_uri and grant.user_code.
+        return await client.poll_device_token(grant)
+```
+
+`authorize_device(*, scopes=(), use_pkce=False)` keeps its existing wire format by
+default; not every device provider supports this extension. With `use_pkce=True`,
+the client generates a fresh S256 pair internally and sends `code_challenge` and
+`code_challenge_method=S256` to the device endpoint. It never sends the verifier
+there. The returned grant privately retains its verifier; every subsequent poll
+for that grant automatically sends the same `code_verifier` to the token endpoint.
+Concurrent grants have independent verifiers and can be polled in any order.
+`use_pkce` must be a boolean; truthy strings and integers are rejected before HTTP.
+There is no `plain` mode or fallback to an unprotected request after rejection.
+Keep the grant with its originating client until completion, cancellation or expiry;
+do not extract, persist or separately pass its private verifier. The S256 pair does
+not change the existing polling intervals, ownership check, deadline or cleanup.
 
 Before `exchange_code`, the caller must validate a one-time callback state,
 redirect URI/path and issuer (including mix-up/replay protection). The library

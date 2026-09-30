@@ -87,6 +87,8 @@ class OAuth2Tokens:
 
 @dataclass(frozen=True)
 class DeviceAuthorization:
+    """Opaque pending transaction; retain in memory and do not log or serialize it."""
+
     device_code: str = field(repr=False)
     user_code: str
     verification_uri: str
@@ -94,6 +96,7 @@ class DeviceAuthorization:
     interval: float
     verification_uri_complete: str | None = field(default=None, repr=False)
     _owner: object = field(default=None, repr=False, compare=False)
+    _code_verifier: str | None = field(default=None, repr=False, compare=False)
 
 
 def _endpoint(url: str, allow_loopback_http: bool) -> None:
@@ -297,12 +300,23 @@ class OAuth2Client:
         )
         return self._tokens(doc)
 
-    async def authorize_device(self, *, scopes: tuple[str, ...] = ()) -> DeviceAuthorization:
+    async def authorize_device(self, *, scopes: tuple[str, ...] = (), use_pkce: bool = False) -> DeviceAuthorization:
+        """Start a device grant, optionally binding it to an internally generated S256 proof.
+
+        Enable PKCE only for providers supporting it on their device endpoint. The
+        verifier stays with this grant and is reused by polling; no fallback occurs.
+        """
+        if not isinstance(use_pkce, bool):
+            raise TypeError("use_pkce must be a bool")
         endpoint = self._endpoints.device_authorization_endpoint
         if endpoint is None:
             raise ValueError("No device authorization endpoint configured")
         started = self._clock()
-        doc = await self._post(endpoint, {"scope": " ".join(scopes)} if scopes else {})
+        proof = generate_pkce() if use_pkce else None
+        data = {"scope": " ".join(scopes)} if scopes else {}
+        if proof is not None:
+            data.update(code_challenge=proof.challenge, code_challenge_method="S256")
+        doc = await self._post(endpoint, data)
         verification_uri = _text(doc, "verification_uri")
         complete = _text(doc, "verification_uri_complete") if "verification_uri_complete" in doc else None
         try:
@@ -319,12 +333,19 @@ class OAuth2Client:
             expires_at=started + _positive(doc.get("expires_in")),
             interval=_positive(doc.get("interval", 5)),
             _owner=self._owner,
+            _code_verifier=proof.verifier if proof is not None else None,
         )
 
     async def poll_device_token(self, grant: DeviceAuthorization) -> OAuth2Tokens:
         """Poll with cumulative slow_down, timeout backoff and a monotonic deadline."""
         if grant._owner is not self._owner:
             raise ValueError("Device grant belongs to another OAuth client")
+        data = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": grant.device_code,
+        }
+        if grant._code_verifier is not None:
+            data["code_verifier"] = grant._code_verifier
         interval = grant.interval
         while True:
             remaining = grant.expires_at - self._clock()
@@ -337,10 +358,7 @@ class OAuth2Client:
             try:
                 doc = await self._post(
                     self._endpoints.token_endpoint,
-                    {
-                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                        "device_code": grant.device_code,
-                    },
+                    data,
                     timeout=remaining,
                 )
                 if self._clock() >= grant.expires_at:
