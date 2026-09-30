@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.13 (2026-09-30)
+
+### Fixed
+
+- OpenAPI component names and references for constrained named aliases no longer
+  include process-specific Pydantic identities when constraints contain colons.
+  Independent processes now produce the same document while preserving schema
+  constraints, aliases, validation/serialization modes and discriminator mappings.
+- Preserve custom Pydantic schema-generator policies and distinguish colliding
+  types without rewriting schema values or changing HTTP runtime behavior.
+
+### Upgrading
+
+- No public API or dependency changes. Component names affected by the identity
+  leak intentionally change; regenerate clients from the corrected specification.
+  Release 26.09.12 remains available as historical evidence.
+
 ## v26.09.12 (2026-09-30)
 
 ### Added
