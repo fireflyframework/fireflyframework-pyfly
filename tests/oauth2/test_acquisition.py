@@ -71,7 +71,8 @@ class Clock:
         self.now += seconds
 
 
-async def test_device_slow_down_is_cumulative():
+@pytest.mark.parametrize("use_pkce", [False, True])
+async def test_device_slow_down_is_cumulative(use_pkce):
     client_type, _, endpoints_type, _, _ = api()
     clock = Clock()
     responses = iter(
@@ -106,14 +107,15 @@ async def test_device_slow_down_is_cumulative():
         clock=clock,
         sleep=clock.sleep,
     ) as client:
-        grant = await client.authorize_device()
+        grant = await client.authorize_device(use_pkce=use_pkce)
         assert "secret-device" not in repr(grant)
         token = await client.poll_device_token(grant)
     assert token.access_token == "ok"
     assert clock.waits == [5, 5, 10, 15]
 
 
-async def test_device_expiry_prevents_poll_and_cancellation_propagates():
+@pytest.mark.parametrize("use_pkce", [False, True])
+async def test_device_expiry_prevents_poll_and_cancellation_propagates(use_pkce):
     client_type, error_type, endpoints_type, _, _ = api()
     clock = Clock()
     calls = []
@@ -139,7 +141,7 @@ async def test_device_expiry_prevents_poll_and_cancellation_propagates():
         clock=clock,
         sleep=clock.sleep,
     ) as client:
-        grant = await client.authorize_device()
+        grant = await client.authorize_device(use_pkce=use_pkce)
         with pytest.raises(error_type, match="expired_token"):
             await client.poll_device_token(grant)
     assert calls == ["/device"]
@@ -189,7 +191,8 @@ async def test_untrusted_response_fails_redacted(status, body, headers):
     assert "secret" not in str(error.value)
 
 
-async def test_cancel_pending_device_sleep():
+@pytest.mark.parametrize("use_pkce", [False, True])
+async def test_cancel_pending_device_sleep(use_pkce):
     client_type, _, endpoints_type, _, _ = api()
     entered = asyncio.Event()
 
@@ -217,7 +220,7 @@ async def test_cancel_pending_device_sleep():
         transport=httpx.MockTransport(respond),
         sleep=sleep,
     ) as client:
-        grant = await client.authorize_device()
+        grant = await client.authorize_device(use_pkce=use_pkce)
         task = asyncio.create_task(client.poll_device_token(grant))
         await entered.wait()
         task.cancel()
@@ -226,7 +229,8 @@ async def test_cancel_pending_device_sleep():
 
 
 @pytest.mark.parametrize("outcome", ["access_denied", "expired_token", "invalid_grant"])
-async def test_device_terminal_errors_do_not_retry(outcome):
+@pytest.mark.parametrize("use_pkce", [False, True])
+async def test_device_terminal_errors_do_not_retry(outcome, use_pkce):
     client_type, error_type, endpoints_type, _, _ = api()
     clock = Clock()
     calls = []
@@ -247,13 +251,14 @@ async def test_device_terminal_errors_do_not_retry(outcome):
         clock=clock,
         sleep=clock.sleep,
     ) as client:
-        grant = await client.authorize_device()
+        grant = await client.authorize_device(use_pkce=use_pkce)
         with pytest.raises(error_type, match=outcome):
             await client.poll_device_token(grant)
     assert calls == ["/device", "/token"]
 
 
-async def test_device_timeout_backoff_and_late_response_expiry():
+@pytest.mark.parametrize("use_pkce", [False, True])
+async def test_device_timeout_backoff_and_late_response_expiry(use_pkce):
     client_type, error_type, endpoints_type, _, _ = api()
     clock = Clock()
     polls = 0
@@ -278,7 +283,7 @@ async def test_device_timeout_backoff_and_late_response_expiry():
         clock=clock,
         sleep=clock.sleep,
     ) as client:
-        grant = await client.authorize_device()
+        grant = await client.authorize_device(use_pkce=use_pkce)
         with pytest.raises(error_type, match="expired_token"):
             await client.poll_device_token(grant)
     assert clock.waits == [5, 10]

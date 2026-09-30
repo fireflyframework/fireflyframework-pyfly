@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.09.14 (2026-09-30)
+
+### Added
+
+- `OAuth2Client.authorize_device(..., use_pkce=True)` supports providers that
+  require S256 PKCE for device authorization. PyFly generates the proof, sends
+  its challenge and method, and retains the verifier privately on the returned
+  client-owned grant. `poll_device_token(grant)` sends the matching verifier on
+  every poll without exposing it in the grant representation.
+
+### Compatibility
+
+- Device PKCE is explicitly opt-in; the default device authorization and token
+  forms are unchanged. Existing ownership, deadline, cumulative slow-down,
+  timeout backoff, cancellation and resource cleanup behavior is preserved.
+- No password grant, plain challenge method or automatic downgrade is added.
+  Keep grants opaque and do not log or serialize their secret fields.
+
 ## v26.09.13 (2026-09-30)
 
 ### Fixed
