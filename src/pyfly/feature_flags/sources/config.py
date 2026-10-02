@@ -52,8 +52,9 @@ class ConfigFlagSource:
     refresh_interval: float | None = None
 
     def __init__(self, flags: Any = None, evaluators: Any = None) -> None:
-        """*flags* and *evaluators* are the two raw sections: a mapping (copied), ``None`` (empty) or any other value,
-        which ``load()`` rejects (``flags must be an object``)."""
+        """*flags* and *evaluators* are the two raw sections: a mapping (copied), ``None`` or an empty list (both
+        empty, as the contract reads ``[]``), or any other value, which ``load()`` rejects (``flags must be an
+        object``)."""
         self._flags = dict(flags) if isinstance(flags, Mapping) else flags
         self._evaluators = dict(evaluators) if isinstance(evaluators, Mapping) else evaluators
 
