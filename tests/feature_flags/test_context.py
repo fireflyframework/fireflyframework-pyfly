@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 import pytest
 from openfeature import api
+from openfeature.evaluation_context import EvaluationContext
 from openfeature.transaction_context import ContextVarsTransactionContextPropagator
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -30,7 +31,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from pyfly.container.container import Container
-from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
+from pyfly.container.ordering import HIGHEST_PRECEDENCE, get_order, order
 from pyfly.context.events import ContextRefreshedEvent
 from pyfly.feature_flags.context import (
     ApplicationContextContributor,
@@ -123,19 +124,37 @@ async def test_contributor_beans_are_found_in_the_container_in_order() -> None:
     container.register_instance(LateContributor, LateContributor())
     container.register_instance(PlanContributor, PlanContributor())
     resolver = EvaluationContextResolver([], container=container)
-    assert isinstance(PlanContributor(), EvaluationContextContributor)
     await resolver.on_context_refreshed(ContextRefreshedEvent())
     assert resolver.attributes()["plan"] == "pro+late"  # PlanContributor (order 0) before LateContributor (10)
 
 
-def test_a_broken_contributor_is_logged_by_name_and_does_not_stop_the_others(
+def test_a_failing_contributor_warns_once_per_class_and_does_not_stop_the_others(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     resolver = EvaluationContextResolver(contributors=[BrokenContributor(), PlanContributor()])
     with caplog.at_level(logging.DEBUG, logger="pyfly.feature_flags.context"):
         assert resolver.attributes()["plan"] == "pro"
-    failures = [r for r in caplog.records if r.getMessage() == "feature_flag_context_contributor_failed"]
-    assert [getattr(r, "contributor", None) for r in failures] == ["BrokenContributor"]
+        first = [r for r in caplog.records if r.getMessage() == "feature_flag_context_contributor_failed"]
+        assert [(r.levelno, getattr(r, "contributor", None)) for r in first] == [(logging.WARNING, "BrokenContributor")]
+        assert first[0].exc_info is not None  # the traceback is kept
+
+        caplog.clear()
+        assert resolver.attributes()["plan"] == "pro"
+    repeats = [r for r in caplog.records if r.getMessage() == "feature_flag_context_contributor_failed"]
+    assert [(r.levelno, getattr(r, "contributor", None)) for r in repeats] == [(logging.DEBUG, "BrokenContributor")]
+
+
+def test_each_failing_contributor_class_gets_its_own_warning(caplog: pytest.LogCaptureFixture) -> None:
+    class AnotherBrokenContributor:
+        def contribute(self, attributes: dict[str, Any]) -> None:
+            raise RuntimeError("another bug")
+
+    resolver = EvaluationContextResolver(contributors=[BrokenContributor(), AnotherBrokenContributor()])
+    with caplog.at_level(logging.WARNING, logger="pyfly.feature_flags.context"):
+        resolver.attributes()
+        resolver.attributes()
+    warned = [getattr(r, "contributor", None) for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned == ["BrokenContributor", "AnotherBrokenContributor"]
 
 
 def test_before_the_refresh_the_container_is_scanned_on_each_call() -> None:
@@ -165,6 +184,43 @@ def test_the_refresh_listener_declares_its_event_type_for_the_application_contex
     assert hints["event"] is ContextRefreshedEvent
 
 
+def test_a_class_with_a_contribute_method_satisfies_the_contributor_port() -> None:
+    assert isinstance(PlanContributor(), EvaluationContextContributor)
+    assert not isinstance(object(), EvaluationContextContributor)
+
+
+class AnonymousIdContributor:
+    """The documented way to give anonymous traffic a stable id for percentage rollouts."""
+
+    def contribute(self, attributes: dict[str, Any]) -> None:
+        attributes.setdefault("targetingKey", "anon-42")
+
+
+def test_a_contributor_can_supply_the_targeting_key_of_anonymous_traffic() -> None:
+    resolver = EvaluationContextResolver([SecurityContextContributor()], contributors=[AnonymousIdContributor()])
+    anonymous = resolver.resolve()
+    assert anonymous.targeting_key == "anon-42"
+    assert "targetingKey" not in anonymous.attributes
+    with SecurityContextHolder.using(ALICE):  # setdefault: the principal's own key is kept
+        assert resolver.resolve().targeting_key == "alice"
+
+
+def test_a_principal_with_an_empty_tenant_attribute_does_not_fall_back_to_the_header() -> None:
+    blank = SecurityContext(user_id="carol", attributes={"tenant": ""})
+    set_tenant_id("from-header")
+    try:
+        with SecurityContextHolder.using(blank):
+            assert "tenant" not in _resolver(trust_tenant_header=True).resolve().attributes
+        with SecurityContextHolder.using(SecurityContext(user_id="dave")):  # no attribute at all: the header counts
+            assert _resolver(trust_tenant_header=True).resolve().attributes["tenant"] == "from-header"
+    finally:
+        set_tenant_id(None)
+
+
+def test_the_filter_runs_after_every_security_filter() -> None:
+    assert get_order(FeatureFlagsContextFilter) == HIGHEST_PRECEDENCE + 400
+
+
 def test_process_attributes_hold_only_the_application_and_profiles() -> None:
     with SecurityContextHolder.using(ALICE):
         assert _resolver().process_attributes() == {"application": "shop", "profiles": ["prod", "eu"]}
@@ -190,6 +246,8 @@ class FakeAuthentication:
 
 async def test_the_filter_sets_the_transaction_context_for_third_party_clients_and_restores_it() -> None:
     api.set_transaction_context_propagator(ContextVarsTransactionContextPropagator())
+    sentinel = EvaluationContext(targeting_key="outside-the-request", attributes={"marker": "sentinel"})
+    api.set_transaction_context(sentinel)
 
     async def echo(request: Request) -> JSONResponse:
         context = api.get_transaction_context()
@@ -198,8 +256,10 @@ async def test_the_filter_sets_the_transaction_context_for_third_party_clients_a
     filters = [FakeAuthentication(), FeatureFlagsContextFilter(_resolver())]
     app = Starlette(routes=[Route("/", echo)], middleware=[Middleware(WebFilterChainMiddleware, filters=filters)])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        signed_in = (await client.get("/", headers={"x-user": "bob"})).json()
         anonymous = (await client.get("/")).json()
-    assert signed_in == {"targetingKey": "bob", "roles": ["beta"]}
+        assert api.get_transaction_context() is sentinel  # restored after the anonymous request
+        signed_in = (await client.get("/", headers={"x-user": "bob"})).json()
     assert anonymous == {"targetingKey": None, "roles": None}
-    assert api.get_transaction_context().targeting_key is None  # restored after the request
+    assert signed_in == {"targetingKey": "bob", "roles": ["beta"]}
+    # the last request was the signed-in one: only the restore puts back what was there before it
+    assert api.get_transaction_context() is sentinel

@@ -82,7 +82,7 @@ class TenantContextContributor:
     def contribute(self, attributes: dict[str, Any]) -> None:
         context = SecurityContextHolder.get_context()
         tenant = context.attributes.get(self._attribute) if context is not None and context.is_authenticated else None
-        if not tenant and self._trust_header:
+        if tenant is None and self._trust_header:  # a principal that carries the attribute (even blank) wins
             tenant = get_tenant_id()
         if tenant:
             attributes["tenant"] = str(tenant)
@@ -114,6 +114,7 @@ class EvaluationContextResolver:
         self._container = container
         self._explicit = list(contributors) if contributors is not None else None
         self._found: list[EvaluationContextContributor] | None = None
+        self._warned: set[type] = set()
 
     @app_event_listener
     async def on_context_refreshed(self, event: ContextRefreshedEvent) -> None:
@@ -143,18 +144,27 @@ class EvaluationContextResolver:
         return [*self._builtins, *user]
 
     def attributes(self) -> dict[str, Any]:
-        """The ambient attributes: the built-ins, then the application's contributors (a broken one is skipped)."""
+        """The ambient attributes: the built-ins, then the application's contributors (a failing one is logged)."""
         attributes: dict[str, Any] = {}
         for contributor in self._contributors():
             try:
                 contributor.contribute(attributes)
             except Exception:  # noqa: BLE001 — a contributor never breaks an evaluation
-                _logger.debug(
-                    "feature_flag_context_contributor_failed",
-                    extra={"contributor": type(contributor).__name__},
-                    exc_info=True,
-                )
+                self._log_failure(contributor)
         return attributes
+
+    def _log_failure(self, contributor: EvaluationContextContributor) -> None:
+        """A failing contributor drops its attributes from every evaluation: warn on its first failure, then
+        stay at DEBUG so a persistent bug does not flood the log."""
+        contributor_type = type(contributor)
+        first = contributor_type not in self._warned
+        self._warned.add(contributor_type)
+        _logger.log(
+            logging.WARNING if first else logging.DEBUG,
+            "feature_flag_context_contributor_failed",
+            extra={"contributor": contributor_type.__name__},
+            exc_info=True,
+        )
 
     def resolve(self) -> EvaluationContext:
         """The ambient context, with ``targetingKey`` moved into ``EvaluationContext.targeting_key``."""
