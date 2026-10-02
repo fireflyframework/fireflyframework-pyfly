@@ -406,6 +406,10 @@ class OpenFeatureBinding:
     is re-raised once everything is restored). A context may therefore stop and start again; a second ``start`` (or
     ``stop``) in a row does nothing.
 
+    Installing over a provider that is neither the no-op one nor the binding's own logs
+    ``feature_flags_provider_replaced`` (WARNING, naming the domain: ``None`` is the default one), and a framework
+    client that does not reach the installed provider afterwards logs ``feature_flags_client_domain_shadowed``.
+
     It starts in :data:`~pyfly.feature_flags.registry.FEATURE_FLAGS_PHASE`, after the registry (created first, so
     started first in the phase) and before the application's lifecycle beans, which therefore see the flags and the
     gating slot in their ``start()`` and ``stop()``.
@@ -442,8 +446,10 @@ class OpenFeatureBinding:
         if self._provider is None:
             _logger.warning("feature_flags_no_provider", extra={"domain": self._domain})
         else:
+            self._warn_if_replacing()
             self._provider_installed = True  # before the call: a failed initialization leaves the provider bound
             api.set_provider_and_wait(self._provider, self._domain)
+            self._warn_if_shadowed()
         found = _current_propagator()  # TransactionContextPropagator is not runtime-checkable: duck-type it
         has_api = hasattr(found, "get_transaction_context")
         self._found_propagator = cast("TransactionContextPropagator", found) if has_api else None
@@ -452,6 +458,28 @@ class OpenFeatureBinding:
         self._slot_installed = True
         install_feature_flags(self._facade, disabled_status=self._disabled_status)
         self._running = True
+
+    def _warn_if_replacing(self) -> None:
+        """Warn when the domain already holds a provider that is neither the no-op one nor this binding's own: the
+        OpenFeature API is process-global, so another context sharing the domain (two applications on the default
+        domain) or the application's own code would lose its provider to this one."""
+        current = OpenFeatureClient(domain=self._domain, version=None).provider
+        if not isinstance(current, NoOpProvider) and current is not self._provider:
+            _logger.warning(
+                "feature_flags_provider_replaced",
+                extra={"domain": self._domain, "provider": type(current).__qualname__},
+            )
+
+    def _warn_if_shadowed(self) -> None:
+        """Warn when the framework's client does not reach the provider just installed: with the default domain the
+        client is in the ``firefly`` domain, which falls back to the default provider only while no provider is
+        bound to ``firefly`` itself (an application domain named ``firefly``)."""
+        reached = self._facade.client.provider
+        if reached is not self._provider:
+            _logger.warning(
+                "feature_flags_client_domain_shadowed",
+                extra={"domain": self._facade.client.domain, "provider": type(reached).__qualname__},
+            )
 
     async def stop(self) -> None:
         was_running, self._running = self._running, False

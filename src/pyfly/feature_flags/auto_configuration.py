@@ -16,8 +16,8 @@
 Every name a ``@bean`` hint uses is imported at runtime, not under ``TYPE_CHECKING``: the context reads the hints
 with ``typing.get_type_hints``, which looks them up in this module's globals. Each bean another bean of the class
 consumes is declared and consumed with the same hint (``X | None`` on both sides when it may be absent), which is how
-the context orders the methods (a topological sort, ties in name order): properties, provider, resolver, client,
-registry, filter, facade, binding. The registry comes before the facade and the binding, which both take it, and the
+the context orders the methods (a topological sort, ties in name order): properties, provider, resolver, registry,
+filter, facade, binding, client. The registry comes before the facade and the binding, which both take it, and the
 two lifecycle beans start in creation order within their phase (``FEATURE_FLAGS_PHASE``: after the datasource,
 migrations and schema, before the application's lifecycle beans), so the registry has loaded every source before the
 binding installs the provider.
@@ -139,12 +139,12 @@ class FeatureFlagsAutoConfiguration:
     def feature_flags_context_filter(self, resolver: EvaluationContextResolver) -> FeatureFlagsContextFilter:
         return FeatureFlagsContextFilter(resolver)
 
-    @bean
-    def open_feature_client(
-        self, properties: FeatureFlagsProperties, publisher: ApplicationEventPublisher, container: Container
+    @staticmethod
+    def framework_client(
+        properties: FeatureFlagsProperties, publisher: ApplicationEventPublisher, container: Container
     ) -> OpenFeatureClient:
-        """The framework's client. The metrics hook is always attached (it counts nothing without a
-        ``MetricsRegistry``); the exposure hook publishes on every evaluation, so it is attached only with
+        """The framework's client, with the Firefly hooks. The metrics hook is always attached (it counts nothing
+        without a ``MetricsRegistry``); the exposure hook publishes on every evaluation, so it is attached only with
         ``events.evaluations``."""
         hooks: list[Hook] = [MetricsHook(lambda: _metrics_registry(container))]
         if properties.events.evaluations:
@@ -153,9 +153,23 @@ class FeatureFlagsAutoConfiguration:
 
     @bean
     def feature_flags(
-        self, client: OpenFeatureClient, resolver: EvaluationContextResolver, registry: FlagRegistry | None = None
+        self,
+        properties: FeatureFlagsProperties,
+        publisher: ApplicationEventPublisher,
+        container: Container,
+        resolver: EvaluationContextResolver,
+        registry: FlagRegistry | None = None,
     ) -> FeatureFlags:
-        return FeatureFlags(client, resolver, registry=registry)
+        """The facade, over the framework's own client (never an application's ``OpenFeatureClient`` bean, which may
+        be bound to another domain and carries no Firefly hooks)."""
+        return FeatureFlags(self.framework_client(properties, publisher, container), resolver, registry=registry)
+
+    @bean
+    @conditional_on_missing_bean(OpenFeatureClient)
+    def open_feature_client(self, facade: FeatureFlags) -> OpenFeatureClient:
+        """The framework's client as a bean, unless the application declares its own ``OpenFeatureClient`` (which
+        then is the one bean of that type, so injecting it is never ambiguous; the facade keeps the framework's)."""
+        return facade.client
 
     @bean
     def open_feature_binding(

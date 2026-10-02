@@ -476,3 +476,74 @@ def test_find_external_provider_refuses_several_provider_beans() -> None:
 def test_typed_default(definition: dict[str, Any], expected: object) -> None:
     value = typed_default(definition)
     assert value == expected and type(value) is type(expected)
+
+
+# -- installing over a provider that is not the binding's own --------------------------------------------------
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[tuple[str, Any, Any]]:
+    return [
+        (record.getMessage(), getattr(record, "domain", None), getattr(record, "provider", None))
+        for record in caplog.records
+        if record.name == "pyfly.feature_flags.client" and record.levelno == logging.WARNING
+    ]
+
+
+def _default_domain_binding() -> tuple[FeatureFlags, OpenFeatureBinding]:
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"a": bool_flag()}})
+    facade = FeatureFlags(OpenFeatureClient(domain=client_domain(""), version=None), EvaluationContextResolver())
+    return facade, OpenFeatureBinding(provider, facade, domain=None)
+
+
+async def test_two_contexts_on_the_default_domain_are_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    _, first = _default_domain_binding()
+    _, second = _default_domain_binding()
+    with caplog.at_level(logging.WARNING, logger="pyfly.feature_flags.client"):
+        await first.start()
+        await second.start()  # replaces the first context's provider for every default-domain client
+    assert _warnings(caplog) == [("feature_flags_provider_replaced", None, "FireflyFlagProvider")]
+    await second.stop()
+    await first.stop()
+
+
+async def test_installing_over_an_application_provider_in_a_named_domain_is_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api.set_provider_and_wait(InMemoryProvider({}), "payments")
+    facade = FeatureFlags(OpenFeatureClient(domain="payments", version=None), EvaluationContextResolver())
+    binding = OpenFeatureBinding(FireflyFlagProvider(), facade, domain="payments")
+    with caplog.at_level(logging.WARNING, logger="pyfly.feature_flags.client"):
+        await binding.start()
+    assert _warnings(caplog) == [("feature_flags_provider_replaced", "payments", "InMemoryProvider")]
+    await binding.stop()
+
+
+async def test_a_provider_bound_to_the_firefly_domain_shadowing_the_framework_client_is_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The framework's client is in the ``firefly`` domain and reaches the default provider only while nothing is
+    bound to that domain: an application provider bound to it would answer the facade instead of Firefly's."""
+    api.set_provider_and_wait(InMemoryProvider({"a": InMemoryFlag("off", {"on": True, "off": False})}), "firefly")
+    facade, binding = _default_domain_binding()
+    with caplog.at_level(logging.WARNING, logger="pyfly.feature_flags.client"):
+        await binding.start()
+    assert _warnings(caplog) == [("feature_flags_client_domain_shadowed", FIREFLY_CLIENT_DOMAIN, "InMemoryProvider")]
+    assert facade.is_enabled("a") is False  # what the warning is about: the application's provider answers
+    await binding.stop()
+
+
+async def test_installing_over_no_provider_or_over_its_own_is_not_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    facade, binding = _default_domain_binding()
+    with caplog.at_level(logging.WARNING, logger="pyfly.feature_flags.client"):
+        await binding.start()
+        await binding.stop()
+        await binding.start()  # a restart finds the no-op provider the stop put back
+        await binding.stop()
+        api.set_provider_and_wait(binding.provider, None)  # type: ignore[arg-type]  # its own provider, still there
+        await binding.start()
+    assert _warnings(caplog) == []
+    assert facade.is_enabled("a") is True
+    await binding.stop()

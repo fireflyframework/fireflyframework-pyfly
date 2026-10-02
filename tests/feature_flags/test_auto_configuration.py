@@ -435,3 +435,39 @@ async def test_the_context_stops_and_starts_again_with_the_feature_flags() -> No
         assert api.get_provider_metadata().name == "No-op Provider"
         await context.start()
     await context.stop()
+
+
+# -- an application's own OpenFeature client ---------------------------------------------------------------------
+
+
+@configuration
+class ApplicationClientConfiguration:
+    @bean
+    def payments_client(self) -> OpenFeatureClient:
+        return OpenFeatureClient(domain="payments-app", version=None)
+
+
+@component
+class UsesTheOpenFeatureClient:
+    def __init__(self, client: OpenFeatureClient) -> None:
+        self.client = client
+
+
+async def test_an_application_client_bean_backs_the_framework_client_bean_off() -> None:
+    """The application's own ``OpenFeatureClient`` is the one bean of that type (no ambiguous dependency); the facade
+    keeps the framework's client, with the Firefly hooks."""
+    context = await _started(_config(flags={"a": True}), ApplicationClientConfiguration, UsesTheOpenFeatureClient)
+    client = context.get_bean(OpenFeatureClient)
+    assert client.domain == "payments-app"
+    assert context.get_bean(UsesTheOpenFeatureClient).client is client
+    facade = context.get_bean(FeatureFlags)
+    assert facade.client is not client and facade.client.domain == "firefly"
+    assert [type(hook) for hook in facade.client.hooks] == [MetricsHook]
+    assert facade.is_enabled("a") is True
+    await context.stop()
+
+
+async def test_without_an_application_client_the_framework_client_is_the_bean() -> None:
+    context = await _started(_config(flags={"a": True}))
+    assert context.get_bean(OpenFeatureClient) is context.get_bean(FeatureFlags).client
+    await context.stop()
