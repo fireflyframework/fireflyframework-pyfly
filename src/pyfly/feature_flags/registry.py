@@ -20,11 +20,19 @@ one warning per expired flag, then polls every source that has a ``refresh_inter
 
 A composition that changes the effective set publishes :class:`~pyfly.feature_flags.events.FeatureFlagsChanged`. The
 registry computes its ``changed_keys`` itself, by comparing the two compositions: FlagdCore's own diff sees neither
-the fields it does not read nor the document ``metadata`` a flag inherits.
+the fields it does not read nor the document ``metadata`` a flag inherits. The same keys go to the provider, whose
+``PROVIDER_CONFIGURATION_CHANGED`` carries them, so OpenFeature handlers and listeners see one change signal.
 
-The provider may still refuse a composed document (FlagdCore is stricter than the contract in places). The
-composition in force then stays, and when the refused document is the one a refresh just brought, that source keeps
-its last good document and reports ``STALE`` with the provider's reason, until it delivers a new document.
+A validated document gives FlagdCore nothing to refuse, but the provider is still guarded: when it refuses a composed
+document, the composition in force stays (and ``feature_flag_provider_update_failed`` is logged at ERROR), and then
+
+- at startup, :meth:`FlagRegistry.start` raises :class:`FeatureFlagsError` naming the provider's error (spec 4.5:
+  an invalid boot definition fails startup; which layer is at fault is unknown, so no source is named);
+- after a refresh, the refreshed source keeps its last good document (and its revision and ``last_refresh``),
+  reports ``STALE`` with the provider's reason and logs ``feature_flag_source_failed`` at WARNING; the reason stands,
+  even across a later failed load, until the source delivers a new document;
+- after a test-override change, the previous overrides are restored and :class:`FeatureFlagsError` is raised to the
+  test.
 """
 
 from __future__ import annotations
@@ -45,7 +53,7 @@ if TYPE_CHECKING:
     from pyfly.context.events import ApplicationEventPublisher
     from pyfly.feature_flags.provider import FireflyFlagProvider
 
-__all__ = ["STARTUP", "TEST_OVERRIDES", "FlagRegistry", "SourceStatus"]
+__all__ = ["STARTUP", "TEST_OVERRIDES", "FeatureFlagsError", "FlagRegistry", "SourceStatus"]
 
 _logger = logging.getLogger(__name__)
 
@@ -86,13 +94,10 @@ def _refs(value: Any, names: set[str]) -> None:
 
 
 def _evaluators_used(definition: Mapping[str, Any], evaluators: Mapping[str, Any]) -> set[str]:
-    """The evaluators *definition* depends on: the ones it ``$ref``s and, transitively, the ones those ``$ref``.
-
-    flagd substitutes a ``{"$ref": name}`` wherever it stands in the flags, not only in ``targeting``, so the whole
-    definition is searched.
-    """
+    """The evaluators *definition* depends on: the ones its ``targeting`` ``$ref``s and, transitively, the ones those
+    ``$ref`` (the provider expands references in ``targeting`` only, spec 4.1)."""
     pending: set[str] = set()
-    _refs(definition, pending)
+    _refs(definition.get("targeting"), pending)
     used: set[str] = set()
     while pending:
         name = pending.pop()
@@ -134,6 +139,11 @@ def _changed_keys(before: Composition, after: Composition) -> list[str]:
     return sorted(changed)
 
 
+class FeatureFlagsError(RuntimeError):
+    """The provider refused a composition the registry had to put in force: the boot composition (startup fails) or
+    a test-override change (rolled back). The message names the provider's error, which is chained as the cause."""
+
+
 class _ProviderRefused(Exception):
     """The provider refused the composed document (already logged); the composition in force stays."""
 
@@ -161,7 +171,7 @@ class _SourceState:
         self.revision: str | None = None
         self.last_refresh: datetime | None = None
         self.error: str | None = None
-        self.refused = False  # the provider refused the source's latest document: "unchanged" keeps the error
+        self.refusal: str | None = None  # why the provider refused the source's latest document, until a new one
         self.started = 0
         self.applied = 0
 
@@ -228,8 +238,10 @@ class FlagRegistry:
             self._loaded(state, ticket, snapshot)
         try:
             changed = self._recompose()
-        except _ProviderRefused:  # which layer the provider objects to is unknown: no source is blamed
-            changed = []
+        except _ProviderRefused as refused:  # which layer the provider objects to is unknown: no source is named
+            raise FeatureFlagsError(
+                f"the feature flag provider refused the startup composition: {refused}"
+            ) from refused.__cause__
         for key in self.expired_keys():
             flag = self._composition.flags[key]
             _logger.warning(
@@ -287,8 +299,9 @@ class FlagRegistry:
         except _ProviderRefused as refused:
             if attributable:  # this document alone was refused: the source keeps its last good one
                 state.document, state.revision, state.last_refresh = last_good
-                state.error, state.refused = str(refused), True
+                state.error = state.refusal = str(refused)
                 self._layers_accepted = True
+                _logger.warning("feature_flag_source_failed", extra={"source": name, "error": state.error})
             return []
         if changed:
             await self._publish(FeatureFlagsChanged(tuple(changed), name))
@@ -310,15 +323,16 @@ class FlagRegistry:
         if ticket < state.applied:
             return False  # a newer load already applied
         state.applied = ticket
-        if snapshot is None and state.refused:
-            return False  # still the document the provider refused: the error stands
+        if snapshot is None and state.refusal is not None:
+            state.error = state.refusal  # still the document the provider refused, whatever failed in between
+            return False
         state.last_refresh = self._clock()
         state.error = None
         if snapshot is None:
             return False
         state.document = snapshot.document
         state.revision = snapshot.revision
-        state.refused = False
+        state.refusal = None
         return True
 
     def _failed(self, state: _SourceState, ticket: int, error: BaseException) -> None:
@@ -341,16 +355,17 @@ class FlagRegistry:
         when the provider refuses the document, which keeps evaluating the previous one.
         """
         composition = compose(self._layers(include_test_overrides=True))
+        changed = _changed_keys(self._composition, composition)
         try:
-            self._provider.update(composition.to_flagd())
+            self._provider.update(composition.to_flagd(), changed_keys=changed)
         except Exception as error:  # noqa: BLE001 — keep evaluating the previous set
             reason = f"{type(error).__name__}: {error}"
             self._layers_accepted = False
             _logger.error("feature_flag_provider_update_failed", extra={"error": reason}, exc_info=True)
             raise _ProviderRefused(reason) from error
-        previous, self._composition = self._composition, composition
+        self._composition = composition
         self._layers_accepted = True
-        return _changed_keys(previous, composition)
+        return changed
 
     async def _publish(self, event: object) -> None:
         if self._publisher is None:
@@ -420,21 +435,27 @@ class FlagRegistry:
         return dict(self._override_flags)
 
     def set_test_overrides(self, flags: Mapping[str, Any]) -> list[str]:
-        """Install *flags* (shorthand allowed) as the highest layer; returns the changed keys."""
-        self._overrides = parse_document({"flags": dict(flags)}, shorthand=True)
-        self._override_flags = dict(flags)
-        return self._overrides_changed()
+        """Install *flags* (shorthand allowed) as the highest layer; returns the changed keys.
+
+        Raises :class:`~pyfly.feature_flags.definitions.FlagDefinitionError` for an invalid definition, and
+        :class:`FeatureFlagsError` when the provider refuses the result; either way the previous overrides stay.
+        """
+        return self._replace_overrides(parse_document({"flags": dict(flags)}, shorthand=True), dict(flags))
 
     def clear_test_overrides(self) -> list[str]:
-        self._overrides = None
-        self._override_flags = {}
-        return self._overrides_changed()
+        """Remove the test overrides; returns the changed keys (:class:`FeatureFlagsError` as in ``set``)."""
+        return self._replace_overrides(None, {})
 
-    def _overrides_changed(self) -> list[str]:
+    def _replace_overrides(self, overrides: FlagDocument | None, flags: dict[str, Any]) -> list[str]:
+        previous = self._overrides, self._override_flags, self._layers_accepted
+        self._overrides, self._override_flags = overrides, flags
         try:
             changed = self._recompose()
-        except _ProviderRefused:
-            return []
+        except _ProviderRefused as refused:  # the layers are the ones in force again
+            self._overrides, self._override_flags, self._layers_accepted = previous
+            raise FeatureFlagsError(
+                f"the feature flag provider refused the test overrides: {refused}"
+            ) from refused.__cause__
         if changed:
             self._publish_soon(FeatureFlagsChanged(tuple(changed), TEST_OVERRIDES))
         return changed

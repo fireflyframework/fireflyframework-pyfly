@@ -19,19 +19,23 @@ import asyncio
 import copy
 import datetime as dt
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from openfeature.evaluation_context import EvaluationContext
+from openfeature.event import ProviderEvent, ProviderEventDetails
+from openfeature.exception import ParseError
+from openfeature.provider import FeatureProvider
 
 from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
 from pyfly.feature_flags.definitions import FlagDefinitionError, FlagDocument, parse_document
 from pyfly.feature_flags.events import FeatureFlagsChanged
 from pyfly.feature_flags.provider import FireflyFlagProvider
-from pyfly.feature_flags.registry import TEST_OVERRIDES, FlagRegistry
+from pyfly.feature_flags.registry import TEST_OVERRIDES, FeatureFlagsError, FlagRegistry
 from pyfly.feature_flags.sources import FlagSourceError, SourceSnapshot
 from tests.feature_flags.support import (
+    DocumentSource,
     ScriptedSource,
     StaticSource,
     bool_flag,
@@ -42,34 +46,27 @@ from tests.feature_flags.support import (
 _REGISTRY_LOGGER = "pyfly.feature_flags.registry"
 
 
-class DocumentSource:
-    """A source answering, load after load, the next scripted result: a whole flagd document (validated here), a
-    ready ``FlagDocument`` (taken as it is, as a source that skips ``parse_document`` would) or ``None`` (unchanged).
-    When the script runs out it answers ``None``."""
-
-    fail_fast = False
-    refresh_interval: float | None = None
-
-    def __init__(self, name: str, *results: Mapping[str, Any] | FlagDocument | None) -> None:
-        self.name = name
-        self._results = list(results)
-        self.loads = 0
-
-    async def load(self) -> SourceSnapshot | None:
-        self.loads += 1
-        result = self._results.pop(0) if self._results else None
-        if result is None:
-            return None
-        document = result if isinstance(result, FlagDocument) else parse_document(result)
-        return SourceSnapshot(document, str(self.loads))
-
-    async def close(self) -> None:
-        return None
-
-
 def _refused_document(key: str) -> FlagDocument:
     """A document FlagdCore refuses (``state`` is not ENABLED/DISABLED); ``parse_document`` would have rejected it."""
     return FlagDocument(flags={key: {"state": "ARCHIVED", "variants": {"on": True, "off": False}}})
+
+
+def _minutes() -> Callable[[], dt.datetime]:
+    """A clock that moves one minute per reading, from 2026-10-02T09:00Z."""
+    ticks = (dt.datetime(2026, 10, 2, 9, 0, tzinfo=dt.UTC) + dt.timedelta(minutes=n) for n in range(1000))
+    return lambda: next(ticks)
+
+
+def _configuration_changes(provider: FireflyFlagProvider) -> list[list[str] | None]:
+    """The keys of every PROVIDER_CONFIGURATION_CHANGED *provider* emits from now on."""
+    signals: list[list[str] | None] = []
+
+    def on_emit(_: FeatureProvider, event: ProviderEvent, details: ProviderEventDetails) -> None:
+        if event is ProviderEvent.PROVIDER_CONFIGURATION_CHANGED:
+            signals.append(details.flags_changed)
+
+    provider.attach(on_emit)
+    return signals
 
 
 async def test_the_highest_source_wins_and_the_provider_evaluates_it() -> None:
@@ -157,15 +154,17 @@ async def test_an_evaluator_change_publishes_the_keys_that_depend_on_it() -> Non
         return {
             "flags": {
                 "direct": bool_flag("off", targeting={"if": [{"$ref": "is-beta"}, "on", "off"]}),
-                "nested": bool_flag("off", targeting={"if": [{"$ref": "insider"}, "on", "off"]}),
+                "nested": bool_flag("off", targeting={"if": [{"$ref": "vip"}, "on", "off"]}),
                 "other": bool_flag("off", targeting={"if": [{"$ref": "is-staff"}, "on", "off"]}),
                 "static": bool_flag(),
+                # Only targeting is expanded: a variant that looks like a reference is a value.
+                "literal": {"state": "ENABLED", "variants": {"ref": {"$ref": "is-beta"}, "none": {}}},
             },
             "$evaluators": {
-                # "insider" sorts before the evaluators it $refs, so flagd resolves them inside it.
-                "insider": {"or": [{"$ref": "is-staff"}, {"$ref": "is-beta"}]},
                 "is-beta": {"in": [{"var": "role"}, beta_roles]},
                 "is-staff": {"==": [{"var": "role"}, "staff"]},
+                # "vip" sorts after the evaluators it $refs: the provider resolves them whatever the order.
+                "vip": {"or": [{"$ref": "is-staff"}, {"$ref": "is-beta"}]},
             },
         }
 
@@ -220,9 +219,10 @@ async def test_a_document_the_provider_refuses_leaves_the_previous_set_in_force(
     publisher, seen = recording_publisher()
     off, on = {"flags": {"a": bool_flag("off")}}, {"flags": {"a": bool_flag("on")}}
     http = DocumentSource("http", off, _refused_document("a"), None, on)
-    registry = FlagRegistry([http], FireflyFlagProvider(), publisher=publisher)
+    registry = FlagRegistry([http], FireflyFlagProvider(), publisher=publisher, clock=_minutes())
     await registry.start()
     composition, document = registry.composition(), registry.provider.document
+    [loaded] = registry.sources()
     with caplog.at_level(logging.ERROR, logger=_REGISTRY_LOGGER):
         assert await registry.refresh("http") == []
     assert [r.getMessage() for r in caplog.records] == ["feature_flag_provider_update_failed"]
@@ -230,6 +230,7 @@ async def test_a_document_the_provider_refuses_leaves_the_previous_set_in_force(
     assert registry.layers("a") == [("http", bool_flag("off"))]  # the source keeps its last good document
     [status] = registry.sources()
     assert status.status == "STALE" and status.revision == "1"
+    assert status.last_refresh == loaded.last_refresh == dt.datetime(2026, 10, 2, 9, 0, tzinfo=dt.UTC)
     assert status.error is not None and status.error.startswith("ParseError: ")
     assert await registry.refresh("http") == []  # "unchanged" is still the refused document
     assert registry.sources()[0].status == "STALE"
@@ -239,17 +240,102 @@ async def test_a_document_the_provider_refuses_leaves_the_previous_set_in_force(
     await registry.stop()
 
 
-async def test_a_refused_boot_composition_is_blamed_on_no_source(caplog: pytest.LogCaptureFixture) -> None:
-    """Which layer FlagdCore objects to is unknown at boot: no source is marked, and a later refusal (the refused
-    layer is still composed) is not blamed on the source that refreshed."""
-    file = DocumentSource("file", {"flags": {"a": bool_flag()}}, {"flags": {"a": bool_flag("off")}})
-    registry = FlagRegistry([DocumentSource("config", _refused_document("bad")), file], FireflyFlagProvider())
-    with caplog.at_level(logging.ERROR, logger=_REGISTRY_LOGGER):
+async def test_a_refused_boot_composition_fails_startup(caplog: pytest.LogCaptureFixture) -> None:
+    """Spec 4.5 fails startup on an invalid boot definition; which layer FlagdCore objects to is unknown, so the error
+    names the provider's reason rather than a source."""
+    publisher, seen = recording_publisher()
+    provider = FireflyFlagProvider()
+    file = DocumentSource("file", {"flags": {"a": bool_flag()}}, refresh_interval=0.01)
+    registry = FlagRegistry([DocumentSource("config", _refused_document("bad")), file], provider, publisher=publisher)
+    with (
+        caplog.at_level(logging.ERROR, logger=_REGISTRY_LOGGER),
+        pytest.raises(FeatureFlagsError, match=r"refused the startup composition: ParseError: ") as raised,
+    ):
         await registry.start()
-        assert await registry.refresh("file") == []
-    assert [r.getMessage() for r in caplog.records] == ["feature_flag_provider_update_failed"] * 2
-    assert registry.composition().flags == {} and registry.provider.document == {"flags": {}}
-    assert [(status.status, status.revision) for status in registry.sources()] == [("UP", "1"), ("UP", "2")]
+    assert isinstance(raised.value.__cause__, ParseError)
+    assert [r.getMessage() for r in caplog.records] == ["feature_flag_provider_update_failed"]
+    assert seen == [] and provider.document == {"flags": {}} and registry.composition().flags == {}
+    assert not registry.started
+    assert not [task for task in asyncio.all_tasks() if task.get_name().startswith("pyfly-feature-flags-")]
+
+
+async def test_a_refused_test_override_change_is_rolled_back_and_raised() -> None:
+    """A test override shadows a definition FlagdCore refuses; replacing or clearing it would expose that one."""
+    publisher, seen = recording_publisher()
+    provider = FireflyFlagProvider()
+    http = DocumentSource("http", {"flags": {"a": bool_flag("off")}}, _refused_document("a"))
+    registry = FlagRegistry([DocumentSource("store", _refused_document("bad")), http], provider, publisher=publisher)
+    assert registry.set_test_overrides({"bad": True}) == ["bad"]
+    await registry.start()
+    composition, document = registry.composition(), provider.document
+    for change in (lambda: registry.set_test_overrides({"other": True}), registry.clear_test_overrides):
+        with pytest.raises(FeatureFlagsError, match=r"refused the test overrides: ParseError: ") as raised:
+            change()
+        assert isinstance(raised.value.__cause__, ParseError)
+        assert registry.test_overrides == {"bad": True}
+        flag = registry.effective_flag("bad")
+        assert flag is not None and flag.origin == TEST_OVERRIDES
+        assert registry.composition() is composition and provider.document == document
+    assert await registry.refresh("http") == []  # blamed on the source that brought it: the layers were restored
+    assert {status.name: status.status for status in registry.sources()} == {"store": "UP", "http": "STALE"}
+    await registry.stop()  # drains the override event, published on the loop
+    assert set(seen) == {FeatureFlagsChanged(("bad",), TEST_OVERRIDES), FeatureFlagsChanged(("a",), "startup")}
+    assert len(seen) == 2  # a refused change publishes nothing
+
+
+async def test_a_refusal_outlives_a_failed_load_until_a_new_document_arrives() -> None:
+    """refused -> timeout -> unchanged: the source still serves the refused document, so the refusal is the reason."""
+    off, on = {"flags": {"a": bool_flag("off")}}, {"flags": {"a": bool_flag("on")}}
+    http = DocumentSource("http", off, _refused_document("a"), TimeoutError("slow"), None, on)
+    registry = FlagRegistry([http], FireflyFlagProvider())
+    await registry.start()
+    errors: list[tuple[str, str | None]] = []
+    for _ in range(4):
+        await registry.refresh("http")
+        [status] = registry.sources()
+        errors.append((status.status, status.error and status.error.split(":")[0]))
+    assert errors == [("STALE", "ParseError"), ("STALE", "TimeoutError"), ("STALE", "ParseError"), ("UP", None)]
+    assert registry.provider.definition("a") == bool_flag("on")
+    await registry.stop()
+
+
+async def test_a_refusal_blamed_on_a_source_is_logged_with_its_name(caplog: pytest.LogCaptureFixture) -> None:
+    http = DocumentSource("http", {"flags": {"a": bool_flag()}}, _refused_document("a"))
+    registry = FlagRegistry([StaticSource("config", {"b": True}), http], FireflyFlagProvider())
+    await registry.start()
+    with caplog.at_level(logging.WARNING, logger=_REGISTRY_LOGGER):
+        await registry.refresh("http")
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.ERROR, "feature_flag_provider_update_failed"),
+        (logging.WARNING, "feature_flag_source_failed"),
+    ]
+    blamed: Any = caplog.records[1]
+    assert blamed.source == "http"
+    assert blamed.error == registry.sources()[1].error and blamed.error.startswith("ParseError: ")
+    await registry.stop()
+
+
+async def test_the_provider_signals_the_keys_the_registry_publishes() -> None:
+    """One change signal: OpenFeature handlers see FeatureFlagsChanged's keys, not FlagdCore's own diff, which misses
+    the document metadata a flag inherits and the fields flagd does not read."""
+
+    def document(owner: str, notes: str) -> dict[str, Any]:
+        flags = {"inherits": bool_flag(), "noted": bool_flag(notes=notes), "own": bool_flag(metadata={"owner": "x"})}
+        return {"flags": flags, "metadata": {"owner": owner}}
+
+    provider = FireflyFlagProvider()
+    signals = _configuration_changes(provider)
+    publisher, seen = recording_publisher()
+    file = DocumentSource("file", document("platform", "v1"), document("checkout", "v2"), document("checkout", "v2"))
+    registry = FlagRegistry([file], provider, publisher=publisher)
+    await registry.start()
+    assert await registry.refresh("file") == ["inherits", "noted"]
+    assert await registry.refresh("file") == []
+    assert signals == [["inherits", "noted", "own"], ["inherits", "noted"]]
+    assert [event.changed_keys for event in seen if isinstance(event, FeatureFlagsChanged)] == [
+        ("inherits", "noted", "own"),
+        ("inherits", "noted"),
+    ]
     await registry.stop()
 
 
@@ -342,6 +428,45 @@ async def test_test_overrides_shadow_every_source_and_are_not_served() -> None:
     assert registry.clear_test_overrides() == ["a"]
     assert registry.provider.definition("a") == bool_flag("off")
     await registry.stop()
+
+
+async def test_test_override_changes_are_published_and_stop_drains_them() -> None:
+    publisher, seen = recording_publisher()
+    registry = FlagRegistry([StaticSource("config", {"a": False})], FireflyFlagProvider(), publisher=publisher)
+    await registry.start()
+    assert registry.set_test_overrides({"a": True}) == ["a"]
+    assert seen == [FeatureFlagsChanged(("a",), "startup")]  # scheduled on the loop, not published yet
+    await registry.stop()
+    assert seen == [FeatureFlagsChanged(("a",), "startup"), FeatureFlagsChanged(("a",), TEST_OVERRIDES)]
+
+
+async def test_a_removed_key_is_a_changed_key() -> None:
+    publisher, seen = recording_publisher()
+    file = ScriptedSource("file", {"a": True, "b": True}, {"a": True})
+    registry = FlagRegistry([file], FireflyFlagProvider(), publisher=publisher)
+    await registry.start()
+    assert await registry.refresh("file") == ["b"]
+    assert seen[-1] == FeatureFlagsChanged(("b",), "file")
+    assert registry.provider.definition("b") is None and registry.effective_flag("b") is None
+    await registry.stop()
+
+
+async def test_refresh_all_reloads_every_source_and_returns_every_changed_key() -> None:
+    config = ScriptedSource("config", {"a": False, "c": True}, {"a": True, "c": True})
+    file = ScriptedSource("file", {"b": False}, {"b": True})
+    registry = FlagRegistry([config, file], FireflyFlagProvider())
+    await registry.start()
+    assert await registry.refresh_all() == ["a", "b"]
+    assert (config.loads, file.loads) == (2, 2)
+    await registry.stop()
+
+
+async def test_sources_are_looked_up_by_name() -> None:
+    registry = FlagRegistry([StaticSource("config", {"a": True})], FireflyFlagProvider())
+    assert registry.has_source("config")
+    assert not registry.has_source("http") and not registry.has_source(TEST_OVERRIDES)
+    with pytest.raises(KeyError):
+        await registry.refresh("http")
 
 
 async def test_stop_closes_the_sources_and_a_restart_works() -> None:

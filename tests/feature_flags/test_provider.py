@@ -75,6 +75,20 @@ def test_update_emits_configuration_changed_with_the_changed_keys() -> None:
     assert seen == [(ProviderEvent.PROVIDER_CONFIGURATION_CHANGED, ["a"])]
 
 
+def test_update_signals_the_changed_keys_it_is_given_and_returns_its_own_diff() -> None:
+    """The registry's diff is the one change signal (FeatureFlagsChanged and OpenFeature handlers alike)."""
+    provider = FireflyFlagProvider()
+    seen: list[tuple[ProviderEvent, list[str] | None]] = []
+
+    def on_emit(_: FeatureProvider, event: ProviderEvent, details: ProviderEventDetails) -> None:
+        seen.append((event, details.flags_changed))
+
+    provider.attach(on_emit)
+    assert provider.update(_document(a=bool_flag(), b=bool_flag()), changed_keys=["b", "a", "doc-only"]) == ["a", "b"]
+    assert provider.update(_document(a=bool_flag("off"), b=bool_flag()), changed_keys=[]) == ["a"]
+    assert seen == [(ProviderEvent.PROVIDER_CONFIGURATION_CHANGED, ["a", "b", "doc-only"])]
+
+
 def test_an_unknown_field_next_to_state_does_not_reject_the_document() -> None:
     """Review focus 5: FlagdCore builds Flag(**definition), so one unknown key failed the WHOLE document."""
     provider = FireflyFlagProvider()
@@ -160,6 +174,20 @@ def test_the_document_keeps_the_evaluators_and_the_references_as_written() -> No
     provider.update(document)
     assert provider.document == document
     assert provider.definition("a") == _segment("eu")
+
+
+def test_a_reference_outside_targeting_is_a_plain_value() -> None:
+    """Only targeting is expanded (spec 4.1); FlagdCore substituted a matching object anywhere in the flags."""
+    provider = FireflyFlagProvider()
+    variants = {"ref": {"$ref": "eu"}, "none": {}}
+    provider.update(
+        {
+            "flags": {"obj": {"state": "ENABLED", "variants": variants, "defaultVariant": "ref"}},
+            "$evaluators": {"eu": {"in": [{"var": "region"}, ["es"]]}},
+        }
+    )
+    with bound_client(provider) as client:
+        assert client.get_object_value("obj", {}) == {"$ref": "eu"}
 
 
 def test_a_fan_out_of_references_is_a_parse_error_and_never_expanded() -> None:

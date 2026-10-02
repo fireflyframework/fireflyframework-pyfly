@@ -170,8 +170,13 @@ class FireflyFlagProvider(AbstractProvider):
             found = self._document["flags"].get(key)
             return copy.deepcopy(found) if found is not None else None
 
-    def update(self, document: Mapping[str, Any]) -> list[str]:
-        """Evaluate *document* from now on; returns the keys whose definition changed, sorted.
+    def update(self, document: Mapping[str, Any], *, changed_keys: Sequence[str] | None = None) -> list[str]:
+        """Evaluate *document* from now on; returns FlagdCore's own diff: the keys whose flagd definition changed
+        (the five fields, references expanded; document ``metadata`` is not compared), sorted.
+
+        ``PROVIDER_CONFIGURATION_CHANGED`` is emitted when keys changed: *changed_keys* (sorted) when given, which is
+        how the registry makes OpenFeature handlers see the keys ``FeatureFlagsChanged`` carries; FlagdCore's diff
+        otherwise. An empty *changed_keys* emits nothing. The return value is FlagdCore's diff either way.
 
         FlagdCore keeps its previous flags when it refuses a document (it raises before replacing them), so a
         failed update leaves the provider as it was.
@@ -182,8 +187,9 @@ class FireflyFlagProvider(AbstractProvider):
         with self._lock:
             changed = sorted(self._core.set_flags_and_get_changed_keys(expanded))
             self._document = projected
-        if changed:
-            self.emit_provider_configuration_changed(ProviderEventDetails(flags_changed=changed))
+        signalled = changed if changed_keys is None else sorted(changed_keys)
+        if signalled:
+            self.emit_provider_configuration_changed(ProviderEventDetails(flags_changed=signalled))
         return changed
 
     def shutdown(self) -> None:

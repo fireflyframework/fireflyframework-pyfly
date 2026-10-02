@@ -29,7 +29,7 @@ from openfeature.provider import FeatureProvider
 from openfeature.provider.no_op_provider import NoOpProvider
 
 from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
-from pyfly.feature_flags.definitions import parse_document
+from pyfly.feature_flags.definitions import FlagDocument, parse_document
 from pyfly.feature_flags.sources import SourceSnapshot
 
 CONFORMANCE = Path(__file__).parent / "conformance"
@@ -112,6 +112,38 @@ class ScriptedSource:
         if result is None:
             return None
         return SourceSnapshot(parse_document({"flags": dict(result)}, shorthand=True), str(self.loads))
+
+    async def close(self) -> None:
+        return None
+
+
+class DocumentSource:
+    """A source answering, load after load, the next scripted result: a whole flagd document (validated here), a
+    ready ``FlagDocument`` (taken as it is, as a source that skips ``parse_document`` would), ``None`` (unchanged) or
+    an exception to raise. When the script runs out it answers ``None``."""
+
+    fail_fast = False
+
+    def __init__(
+        self,
+        name: str,
+        *results: Mapping[str, Any] | FlagDocument | BaseException | None,
+        refresh_interval: float | None = None,
+    ) -> None:
+        self.name = name
+        self.refresh_interval = refresh_interval
+        self._results = list(results)
+        self.loads = 0
+
+    async def load(self) -> SourceSnapshot | None:
+        self.loads += 1
+        result = self._results.pop(0) if self._results else None
+        if isinstance(result, BaseException):
+            raise result
+        if result is None:
+            return None
+        document = result if isinstance(result, FlagDocument) else parse_document(result)
+        return SourceSnapshot(document, str(self.loads))
 
     async def close(self) -> None:
         return None
