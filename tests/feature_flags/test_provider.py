@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import ProviderEvent, ProviderEventDetails
-from openfeature.exception import ErrorCode
+from openfeature.exception import ErrorCode, TypeMismatchError
 from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
 from openfeature.provider import FeatureProvider
 
@@ -325,3 +325,99 @@ def test_a_reference_used_twice_is_counted_and_resolved_twice() -> None:
     assert _evaluate(provider, "both", False, EvaluationContext("u", {"tier": "gold"})).value is True
     assert _parse_error(provider, "twice", EvaluationContext("u", {"x": "v1"}))  # 2 x 5 005 + 6 > 10 000
     assert _evaluate(provider, "once", False, EvaluationContext("u", {"x": "v1"})).value is True
+
+
+# -- object values are copies, a boolean is no number --------------------------------------------------------------
+
+BANNER = {"state": "ENABLED", "variants": {"plain": {"title": "Hi", "tags": ["a", "b"]}}, "defaultVariant": "plain"}
+LIST_FLAG = {"state": "ENABLED", "variants": {"few": [{"id": 1}], "none": []}, "defaultVariant": "few"}
+
+
+def _mutate(value: Any) -> None:
+    """Change a key, the nested list and an item of a list value, whatever *value* is."""
+    if isinstance(value, dict):
+        value["title"] = "changed"
+        value["tags"].append("c")
+    else:
+        value[0]["id"] = 99
+        value.append({"id": 2})
+
+
+@pytest.mark.parametrize(
+    ("key", "definition", "original"),
+    [
+        ("banner", BANNER, {"title": "Hi", "tags": ["a", "b"]}),
+        ("rows", LIST_FLAG, [{"id": 1}]),
+    ],
+)
+async def test_every_object_evaluation_returns_a_copy_of_its_own(
+    key: str, definition: dict[str, Any], original: Any
+) -> None:
+    """A caller that mutates the value it got corrupts neither the next evaluation nor the stored definition."""
+    provider = FireflyFlagProvider()
+    provider.update(_document(**{key: definition}))
+    with bound_client(provider) as client:
+        _mutate(client.get_object_value(key, {}))
+        _mutate(await client.get_object_value_async(key, {}))
+        _mutate(provider.resolve_object_details(key, {}).value)
+        assert client.get_object_value(key, {}) == original
+        assert (await client.get_object_value_async(key, {})) == original
+    assert provider.definition(key) == definition
+
+
+def test_a_float_request_on_a_boolean_flag_is_a_type_mismatch() -> None:
+    provider = FireflyFlagProvider()
+    provider.update(
+        _document(on=bool_flag("on"), ratio={"state": "ENABLED", "variants": {"one": 1}, "defaultVariant": "one"})
+    )
+    with pytest.raises(TypeMismatchError):
+        provider.resolve_float_details("on", 0.5)
+    with bound_client(provider) as client:
+        details = client.get_float_details("on", 0.5)
+        ratio = client.get_float_details("ratio", 0.5)
+    assert (details.value, details.variant, details.reason, details.error_code) == (
+        0.5,
+        None,
+        Reason.ERROR,
+        ErrorCode.TYPE_MISMATCH,
+    )
+    assert (ratio.value, type(ratio.value), ratio.variant) == (1.0, float, "one")  # an integer variant still is a float
+
+
+async def test_an_async_float_request_on_a_boolean_flag_is_a_type_mismatch() -> None:
+    provider = FireflyFlagProvider()
+    provider.update(_document(on=bool_flag("on")))
+    with bound_client(provider) as client:
+        details = await client.get_float_details_async("on", 0.5)
+    assert (details.value, details.error_code) == (0.5, ErrorCode.TYPE_MISMATCH)
+
+
+@pytest.mark.parametrize("method", ["resolve_integer_details", "resolve_float_details"])
+def test_a_boolean_flag_answering_the_callers_default_is_no_mismatch(method: str) -> None:
+    """flagd checks the type of a variant value only: a disabled flag, or targeting that picks no variant and no
+    default variant, answers the caller's default whatever the flag's type."""
+    provider = FireflyFlagProvider()
+    provider.update(
+        _document(
+            disabled={**bool_flag("on"), "state": "DISABLED"},
+            undecided={
+                "state": "ENABLED",
+                "variants": {"on": True, "off": False},
+                "targeting": {"if": [False, "on", None]},
+            },
+        )
+    )
+    resolve = getattr(provider, method)
+    assert (resolve("disabled", 7).value, resolve("disabled", 7).reason) == (7, Reason.DISABLED)
+    assert (resolve("undecided", 7).value, resolve("undecided", 7).reason) == (7, Reason.DEFAULT)
+
+
+def test_an_integer_request_on_a_boolean_flag_is_a_type_mismatch() -> None:
+    """FlagdCore already refuses it (Python's ``True`` is an int); pinned so a FlagdCore upgrade cannot regress it."""
+    provider = FireflyFlagProvider()
+    provider.update(_document(on=bool_flag("on")))
+    with pytest.raises(TypeMismatchError):
+        provider.resolve_integer_details("on", 0)
+    with bound_client(provider) as client:
+        details = client.get_integer_details("on", 3)
+    assert (details.value, details.error_code) == (3, ErrorCode.TYPE_MISMATCH)

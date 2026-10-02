@@ -28,6 +28,7 @@ from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOpt
 from openfeature.hook import HookContext
 from prometheus_client import REGISTRY
 
+from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
 from pyfly.feature_flags.client import PREVIEW_HINT, FeatureFlags
 from pyfly.feature_flags.context import EvaluationContextResolver
 from pyfly.feature_flags.events import FeatureFlagEvaluated
@@ -475,3 +476,29 @@ async def test_a_publish_that_is_cancelled_is_logged(caplog: pytest.LogCaptureFi
         await hook.drain()
     assert publisher.delivered == []
     assert len(_debug_records(caplog, "feature_flag_exposure_cancelled")) == 1
+
+
+async def test_a_listener_that_mutates_the_exposed_value_never_changes_the_flag() -> None:
+    """The exposure event carries the evaluation's own copy: a listener that mutates it corrupts no later evaluation
+    (nor the definition the provider stores)."""
+    banner = {"state": "ENABLED", "variants": {"plain": {"title": "Hi", "tags": ["a"]}}, "defaultVariant": "plain"}
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"banner": banner}})
+    bus = ApplicationEventBus()
+    exposed: list[Any] = []
+
+    async def vandal(event: FeatureFlagEvaluated) -> None:
+        event.value["title"] = "changed"  # type: ignore[index]
+        event.value["tags"].append("b")  # type: ignore[index]
+        exposed.append(event.value)
+
+    bus.subscribe(FeatureFlagEvaluated, vandal)
+    hook = ExposureEventHook(ApplicationEventPublisher(bus))
+    with bound_client(provider, hooks=[hook]) as client:
+        facade = FeatureFlags(client, EvaluationContextResolver())
+        facade.get_object("banner", {})
+        await hook.drain()
+        assert exposed == [{"title": "changed", "tags": ["a", "b"]}]
+        assert facade.get_object("banner", {}) == {"title": "Hi", "tags": ["a"]}
+        assert client.get_object_value("banner", {}) == {"title": "Hi", "tags": ["a"]}
+    assert provider.definition("banner") == banner

@@ -38,6 +38,11 @@ since the epoch, divided by 1000, exactly as PHP computes it), whatever the host
 "Evaluation context"): every ``resolve_*_details`` converts the context it is handed, the merged OpenFeature context,
 before FlagdCore reads it, so facade calls, plain OpenFeature clients and the management preview decide alike. See
 :func:`_epoch_millis_context`.
+
+Two corrections to FlagdCore's resolution, in the provider so that the facade, plain OpenFeature clients and the
+exposure events all get them: an object value is a deep copy for every evaluation (FlagdCore hands out the object it
+stores, so a caller that mutated it would change the flag), and a float request on a boolean flag is a
+``TYPE_MISMATCH`` (FlagdCore's float check accepts ``True``, an ``int``, and answers ``1.0``).
 """
 
 from __future__ import annotations
@@ -53,7 +58,8 @@ from typing import Any
 from openfeature.contrib.tools.flagd.core import FlagdCore
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import ProviderEventDetails
-from openfeature.flag_evaluation import FlagResolutionDetails, FlagValueType
+from openfeature.exception import TypeMismatchError
+from openfeature.flag_evaluation import FlagResolutionDetails, FlagValueType, Reason
 from openfeature.provider import AbstractProvider, Metadata
 
 from pyfly.feature_flags._references import referenced_evaluator
@@ -304,7 +310,22 @@ class FireflyFlagProvider(AbstractProvider):
     def resolve_float_details(
         self, flag_key: str, default_value: float, evaluation_context: EvaluationContext | None = None
     ) -> FlagResolutionDetails[float]:
-        return self._core.resolve_float_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
+        """FlagdCore's float resolution, except that a boolean variant value is a ``TYPE_MISMATCH``.
+
+        FlagdCore accepts any ``int`` for a float request and converts it, and Python's ``True`` is an ``int``: it
+        would answer ``1.0``. The contract (and LaraFly) refuse it, as FlagdCore itself does for an integer request.
+        Only a variant value is checked, as FlagdCore checks: a disabled flag, or targeting that selects no variant
+        of a flag without a default variant, answers the caller's default. The resolution and the look-up of the
+        variant's value hold the document lock, so both see the same document.
+        """
+        context = _epoch_millis_context(evaluation_context)
+        with self._lock:
+            details = self._core.resolve_float_value(flag_key, default_value, context)
+            if details.variant is not None and details.reason != Reason.DISABLED:
+                variants = self._document["flags"].get(flag_key, {}).get("variants") or {}
+                if isinstance(variants.get(details.variant), bool):
+                    raise TypeMismatchError("Expected type float but got bool")
+        return details
 
     def resolve_object_details(
         self,
@@ -312,4 +333,11 @@ class FireflyFlagProvider(AbstractProvider):
         default_value: Sequence[FlagValueType] | Mapping[str, FlagValueType],
         evaluation_context: EvaluationContext | None = None,
     ) -> FlagResolutionDetails[Sequence[FlagValueType] | Mapping[str, FlagValueType]]:
-        return self._core.resolve_object_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
+        """FlagdCore's object resolution, with a deep copy of the value.
+
+        FlagdCore answers the very object it stores for the variant: a caller that mutated it (the facade's,
+        a plain OpenFeature client's, an exposure event listener's) would change the flag for every later
+        evaluation, while :meth:`definition` still showed the original. Each evaluation gets a copy of its own.
+        """
+        details = self._core.resolve_object_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
+        return dataclasses.replace(details, value=copy.deepcopy(details.value))
