@@ -17,17 +17,37 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import ProviderEvent, ProviderEventDetails
 from openfeature.exception import ErrorCode
-from openfeature.flag_evaluation import Reason
+from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
 from openfeature.provider import FeatureProvider
 
-from pyfly.feature_flags.provider import PROVIDER_NAME, FireflyFlagProvider
+from pyfly.feature_flags.provider import EXPANSION_LIMIT, PROVIDER_NAME, FireflyFlagProvider
 from tests.feature_flags.support import bool_flag, bound_client
 
 
 def _document(**flags: dict[str, Any]) -> dict[str, Any]:
     return {"flags": flags}
+
+
+def _segment(name: str) -> dict[str, Any]:
+    """A boolean flag that is ``on`` when the evaluator *name* holds."""
+    return bool_flag("off", targeting={"if": [{"$ref": name}, "on", "off"]})
+
+
+def _evaluate(
+    provider: FireflyFlagProvider, key: str, default: bool, context: EvaluationContext | None = None
+) -> FlagEvaluationDetails[bool]:
+    """Through a client: FlagdCore raises ParseError, the SDK turns it into error details."""
+    with bound_client(provider) as client:
+        return client.get_boolean_details(key, default, context)
+
+
+def _parse_error(provider: FireflyFlagProvider, key: str, context: EvaluationContext | None = None) -> bool:
+    details = _evaluate(provider, key, True, context)
+    return details.error_code == ErrorCode.PARSE_ERROR and details.value is True
 
 
 def test_the_provider_is_named_firefly() -> None:
@@ -90,3 +110,87 @@ def test_shutdown_keeps_the_document() -> None:
     assert provider.definition("a") == bool_flag()
     assert provider.definition("missing") is None
     assert provider.document == {"flags": {"a": bool_flag()}}
+
+
+def test_a_backslash_inside_an_evaluator_is_kept_byte_for_byte() -> None:
+    """FlagdCore substitutes $refs with re.sub, the rule's JSON as the template: "a\\d" failed the whole update and
+    "C:\\temp" became C:<TAB>emp. References are expanded on the parsed document instead."""
+    provider = FireflyFlagProvider()
+    provider.update(
+        {
+            "flags": {"path": _segment("temp-dir"), "digit": _segment("digit")},
+            "$evaluators": {
+                "temp-dir": {"==": [{"var": "path"}, "C:\\temp\\new"]},
+                "digit": {"==": [{"var": "pattern"}, "a\\d"]},
+            },
+        }
+    )
+    with bound_client(provider) as client:
+        assert client.get_boolean_value("path", False, EvaluationContext("u", {"path": "C:\\temp\\new"})) is True
+        corrupted = "C:\temp\new"  # what the textual substitution made of it: a tab and a newline
+        assert client.get_boolean_value("path", True, EvaluationContext("u", {"path": corrupted})) is False
+        assert client.get_boolean_value("digit", False, EvaluationContext("u", {"pattern": "a\\d"})) is True
+
+
+def test_references_resolve_transitively_whatever_the_names_sort_as() -> None:
+    """FlagdCore makes one pass over the flags in $evaluators order (sorted, as the registry composes them), so it
+    never resolved "zz-eu" once "a-staff-in-eu" had brought it in."""
+    provider = FireflyFlagProvider()
+    provider.update(
+        {
+            "flags": {"nested": _segment("a-staff-in-eu"), "cyclic": _segment("cycle-a"), "missing": _segment("nope")},
+            "$evaluators": {
+                "a-staff-in-eu": {"and": [{"in": ["staff", {"var": "roles"}]}, {"$ref": "zz-eu"}]},
+                "cycle-a": {"or": [{"$ref": "cycle-b"}, False]},
+                "cycle-b": {"or": [{"$ref": "cycle-a"}, False]},
+                "eu": {"in": [{"var": "region"}, ["es", "fr"]]},
+                "zz-eu": {"$ref": "eu"},
+            },
+        }
+    )
+    staff_in_fr = EvaluationContext("u", {"roles": ["staff"], "region": "fr"})
+    assert _evaluate(provider, "nested", False, staff_in_fr).value is True
+    assert _evaluate(provider, "nested", True, EvaluationContext("u", {"roles": ["staff"]})).value is False
+    assert _parse_error(provider, "cyclic") and _parse_error(provider, "missing")
+
+
+def test_the_document_keeps_the_evaluators_and_the_references_as_written() -> None:
+    document = {"flags": {"a": _segment("eu")}, "$evaluators": {"eu": {"in": [{"var": "region"}, ["es"]]}}}
+    provider = FireflyFlagProvider()
+    provider.update(document)
+    assert provider.document == document
+    assert provider.definition("a") == _segment("eu")
+
+
+def test_a_fan_out_of_references_is_a_parse_error_and_never_expanded() -> None:
+    """fan-20 doubles at every level: 2**20 references. Counting stops as soon as the budget is spent."""
+    evaluators: dict[str, Any] = {"fan-0": {"==": [{"var": "tier"}, "gold"]}}
+    evaluators |= {f"fan-{i}": {"or": [{"$ref": f"fan-{i - 1}"}, {"$ref": f"fan-{i - 1}"}]} for i in range(1, 21)}
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"huge": _segment("fan-20"), "small": _segment("fan-5")}, "$evaluators": evaluators})
+    gold = EvaluationContext("u", {"tier": "gold"})
+    assert _parse_error(provider, "huge", gold)
+    assert _evaluate(provider, "small", False, gold).value is True
+
+
+@pytest.mark.parametrize(("extra", "parse_error"), [(0, False), (1, True)], ids=["at-the-limit", "one-over"])
+def test_the_expansion_limit_counts_every_json_value(extra: int, parse_error: bool) -> None:
+    """{"if": [{"in": [{"var": "x"}, [...]]}, "on", "off"]} holds 9 values besides the list's items; a resolved
+    reference counts as what it expands to."""
+    items = [f"v{i}" for i in range(EXPANSION_LIMIT - 9 + extra)]
+    provider = FireflyFlagProvider()
+    provider.update(
+        {
+            "flags": {"inline": bool_flag("off", targeting={"$ref": "rule"}), "by-ref": _segment("in-list")},
+            "$evaluators": {
+                "rule": {"if": [{"in": [{"var": "x"}, items]}, "on", "off"]},
+                "in-list": {"in": [{"var": "x"}, items]},
+            },
+        }
+    )
+    context = EvaluationContext("u", {"x": "v0"})
+    assert EXPANSION_LIMIT == 10_000
+    for key in ("inline", "by-ref"):
+        assert _parse_error(provider, key, context) is parse_error
+        if not parse_error:
+            assert _evaluate(provider, key, False, context).value is True
