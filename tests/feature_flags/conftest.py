@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Isolation for the feature-flag tests: the OpenFeature API (providers, hooks, propagator) is process-global."""
+"""Isolation for the feature-flag tests: the OpenFeature API (providers, hooks, propagator) and the gating slot are
+process-global."""
 
 from __future__ import annotations
 
@@ -25,4 +26,9 @@ def _reset_openfeature() -> Iterator[None]:
     yield
     from openfeature import api
 
+    from pyfly.feature_flags.slot import installed_feature_flags, uninstall_feature_flags
+
+    installed = installed_feature_flags()
+    if installed is not None:
+        uninstall_feature_flags(installed.facade)
     api.shutdown()  # providers -> NoOp, hooks, API evaluation context and propagator cleared
