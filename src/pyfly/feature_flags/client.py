@@ -28,6 +28,7 @@ facade runs it under an empty transaction context and puts the previous one back
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -36,7 +37,7 @@ import openfeature.transaction_context as _transaction_context
 from openfeature import api
 from openfeature.client import OpenFeatureClient
 from openfeature.evaluation_context import EvaluationContext
-from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, FlagValueType
+from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, FlagType, FlagValueType
 from openfeature.provider import AbstractProvider, FeatureProvider
 from openfeature.provider.no_op_provider import NoOpProvider
 from openfeature.transaction_context import (
@@ -49,6 +50,7 @@ from openfeature.transaction_context import (
 
 from pyfly.feature_flags.definitions import flag_type
 from pyfly.feature_flags.provider import FireflyFlagProvider
+from pyfly.feature_flags.registry import FeatureFlagsError
 from pyfly.feature_flags.slot import install_feature_flags, uninstall_feature_flags
 
 if TYPE_CHECKING:
@@ -94,17 +96,38 @@ def typed_default(definition: Mapping[str, Any]) -> FlagValueType:
 
 
 def find_external_provider(container: Container) -> AbstractProvider | None:
-    """The application's own OpenFeature provider bean: any bean whose class extends ``AbstractProvider``."""
+    """The application's own OpenFeature provider bean: the bean whose class extends ``AbstractProvider``.
+
+    Firefly's provider is never one. One bean registered under several types counts once; two distinct provider
+    beans raise :class:`~pyfly.feature_flags.registry.FeatureFlagsError` (which one serves the flags is ambiguous).
+    """
+    found: dict[int, AbstractProvider] = {}
     for cls in container.registered_types():
         if isinstance(cls, type) and issubclass(cls, AbstractProvider) and not issubclass(cls, FireflyFlagProvider):
             provider = container.resolve(cls)
-            if isinstance(provider, AbstractProvider):
-                return provider
-    return None
+            if isinstance(provider, AbstractProvider) and not isinstance(provider, FireflyFlagProvider):
+                found.setdefault(id(provider), provider)
+    if len(found) > 1:
+        names = ", ".join(type(provider).__qualname__ for provider in found.values())
+        raise FeatureFlagsError(f"expected a single OpenFeature provider bean but found {len(found)}: {names}")
+    return next(iter(found.values()), None)
 
 
 def _options(preview: bool) -> FlagEvaluationOptions | None:
     return FlagEvaluationOptions(hook_hints={PREVIEW_HINT: True}) if preview else None
+
+
+def _type_of(default: FlagValueType) -> FlagType:
+    """The OpenFeature type of *default* (checked for ``bool`` before ``int``: a bool is an int)."""
+    if isinstance(default, bool):
+        return FlagType.BOOLEAN
+    if isinstance(default, str):
+        return FlagType.STRING
+    if isinstance(default, int):
+        return FlagType.INTEGER
+    if isinstance(default, float):
+        return FlagType.FLOAT
+    return FlagType.OBJECT
 
 
 @contextlib.contextmanager
@@ -123,7 +146,13 @@ def _without_transaction_context() -> Iterator[None]:
 
 
 class FeatureFlags:
-    """Typed flag evaluation with the ambient context (see the module documentation)."""
+    """Typed flag evaluation with the ambient context (see the module documentation).
+
+    Each typed getter evaluates with its own type, whatever the runtime type of the default: ``get_float(key, 1)``
+    is a float evaluation and ``get_int(key, True)`` an integer one. The default is converted to that type first
+    (``bool()``, ``str()``, ``int()``, ``float()``: ``int(True)`` is ``1``), so a getter always answers its own type.
+    :meth:`details` takes the type of its default instead.
+    """
 
     def __init__(
         self, client: OpenFeatureClient, resolver: EvaluationContextResolver, *, registry: FlagRegistry | None = None
@@ -164,17 +193,22 @@ class FeatureFlags:
     # -- synchronous -----------------------------------------------------------------------------------------
 
     def _evaluate(
-        self, key: str, default: FlagValueType, context: EvaluationContext, options: FlagEvaluationOptions | None
+        self,
+        kind: FlagType,
+        key: str,
+        default: FlagValueType,
+        *,
+        context: Mapping[str, Any] | None,
+        targeting_key: str | None,
+        ambient: bool = True,
+        preview: bool = False,
     ) -> FlagEvaluationDetails[Any]:
-        if isinstance(default, bool):
-            return self._client.get_boolean_details(key, default, context, options)
-        if isinstance(default, str):
-            return self._client.get_string_details(key, default, context, options)
-        if isinstance(default, int):
-            return self._client.get_integer_details(key, default, context, options)
-        if isinstance(default, float):
-            return self._client.get_float_details(key, default, context, options)
-        return self._client.get_object_details(key, default, context, options)
+        ctx = self.evaluation_context(context, targeting_key=targeting_key, ambient=ambient)
+        options = _options(preview)
+        if ambient:
+            return self._client.evaluate_flag_details(kind, key, default, ctx, options)
+        with _without_transaction_context():
+            return self._client.evaluate_flag_details(kind, key, default, ctx, options)
 
     def details(
         self,
@@ -191,12 +225,15 @@ class FeatureFlags:
         Not *ambient*: only *context*/*targeting_key* and the process attributes, under an empty transaction
         context. *preview* adds the :data:`PREVIEW_HINT` hook hint.
         """
-        ctx = self.evaluation_context(context, targeting_key=targeting_key, ambient=ambient)
-        options = _options(preview)
-        if ambient:
-            return self._evaluate(key, default, ctx, options)
-        with _without_transaction_context():
-            return self._evaluate(key, default, ctx, options)
+        return self._evaluate(
+            _type_of(default),
+            key,
+            default,
+            context=context,
+            targeting_key=targeting_key,
+            ambient=ambient,
+            preview=preview,
+        )
 
     def is_enabled(
         self,
@@ -206,22 +243,26 @@ class FeatureFlags:
         context: Mapping[str, Any] | None = None,
         targeting_key: str | None = None,
     ) -> bool:
-        return bool(self.details(key, default, context=context, targeting_key=targeting_key).value)
+        details = self._evaluate(FlagType.BOOLEAN, key, bool(default), context=context, targeting_key=targeting_key)
+        return bool(details.value)
 
     def get_string(
         self, key: str, default: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
     ) -> str:
-        return str(self.details(key, default, context=context, targeting_key=targeting_key).value)
+        details = self._evaluate(FlagType.STRING, key, str(default), context=context, targeting_key=targeting_key)
+        return str(details.value)
 
     def get_int(
         self, key: str, default: int, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
     ) -> int:
-        return int(self.details(key, default, context=context, targeting_key=targeting_key).value)
+        details = self._evaluate(FlagType.INTEGER, key, int(default), context=context, targeting_key=targeting_key)
+        return int(details.value)
 
     def get_float(
         self, key: str, default: float, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
     ) -> float:
-        return float(self.details(key, default, context=context, targeting_key=targeting_key).value)
+        details = self._evaluate(FlagType.FLOAT, key, float(default), context=context, targeting_key=targeting_key)
+        return float(details.value)
 
     def get_object(
         self,
@@ -231,7 +272,7 @@ class FeatureFlags:
         context: Mapping[str, Any] | None = None,
         targeting_key: str | None = None,
     ) -> Any:
-        return self.details(key, default, context=context, targeting_key=targeting_key).value
+        return self._evaluate(FlagType.OBJECT, key, default, context=context, targeting_key=targeting_key).value
 
     def _variant_default(self, key: str) -> FlagValueType:
         flag = self._registry.effective_flag(key) if self._registry is not None else None
@@ -251,17 +292,22 @@ class FeatureFlags:
     # -- asynchronous ----------------------------------------------------------------------------------------
 
     async def _evaluate_async(
-        self, key: str, default: FlagValueType, context: EvaluationContext, options: FlagEvaluationOptions | None
+        self,
+        kind: FlagType,
+        key: str,
+        default: FlagValueType,
+        *,
+        context: Mapping[str, Any] | None,
+        targeting_key: str | None,
+        ambient: bool = True,
+        preview: bool = False,
     ) -> FlagEvaluationDetails[Any]:
-        if isinstance(default, bool):
-            return await self._client.get_boolean_details_async(key, default, context, options)
-        if isinstance(default, str):
-            return await self._client.get_string_details_async(key, default, context, options)
-        if isinstance(default, int):
-            return await self._client.get_integer_details_async(key, default, context, options)
-        if isinstance(default, float):
-            return await self._client.get_float_details_async(key, default, context, options)
-        return await self._client.get_object_details_async(key, default, context, options)
+        ctx = self.evaluation_context(context, targeting_key=targeting_key, ambient=ambient)
+        options = _options(preview)
+        if ambient:
+            return await self._client.evaluate_flag_details_async(kind, key, default, ctx, options)
+        with _without_transaction_context():
+            return await self._client.evaluate_flag_details_async(kind, key, default, ctx, options)
 
     async def details_async(
         self,
@@ -274,12 +320,15 @@ class FeatureFlags:
         preview: bool = False,
     ) -> FlagEvaluationDetails[Any]:
         """:meth:`details`, through the providers' asynchronous resolution."""
-        ctx = self.evaluation_context(context, targeting_key=targeting_key, ambient=ambient)
-        options = _options(preview)
-        if ambient:
-            return await self._evaluate_async(key, default, ctx, options)
-        with _without_transaction_context():
-            return await self._evaluate_async(key, default, ctx, options)
+        return await self._evaluate_async(
+            _type_of(default),
+            key,
+            default,
+            context=context,
+            targeting_key=targeting_key,
+            ambient=ambient,
+            preview=preview,
+        )
 
     async def is_enabled_async(
         self,
@@ -289,22 +338,34 @@ class FeatureFlags:
         context: Mapping[str, Any] | None = None,
         targeting_key: str | None = None,
     ) -> bool:
-        return bool((await self.details_async(key, default, context=context, targeting_key=targeting_key)).value)
+        details = await self._evaluate_async(
+            FlagType.BOOLEAN, key, bool(default), context=context, targeting_key=targeting_key
+        )
+        return bool(details.value)
 
     async def get_string_async(
         self, key: str, default: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
     ) -> str:
-        return str((await self.details_async(key, default, context=context, targeting_key=targeting_key)).value)
+        details = await self._evaluate_async(
+            FlagType.STRING, key, str(default), context=context, targeting_key=targeting_key
+        )
+        return str(details.value)
 
     async def get_int_async(
         self, key: str, default: int, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
     ) -> int:
-        return int((await self.details_async(key, default, context=context, targeting_key=targeting_key)).value)
+        details = await self._evaluate_async(
+            FlagType.INTEGER, key, int(default), context=context, targeting_key=targeting_key
+        )
+        return int(details.value)
 
     async def get_float_async(
         self, key: str, default: float, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
     ) -> float:
-        return float((await self.details_async(key, default, context=context, targeting_key=targeting_key)).value)
+        details = await self._evaluate_async(
+            FlagType.FLOAT, key, float(default), context=context, targeting_key=targeting_key
+        )
+        return float(details.value)
 
     async def get_object_async(
         self,
@@ -314,7 +375,10 @@ class FeatureFlags:
         context: Mapping[str, Any] | None = None,
         targeting_key: str | None = None,
     ) -> Any:
-        return (await self.details_async(key, default, context=context, targeting_key=targeting_key)).value
+        details = await self._evaluate_async(
+            FlagType.OBJECT, key, default, context=context, targeting_key=targeting_key
+        )
+        return details.value
 
     async def variant_details_async(
         self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
@@ -335,9 +399,12 @@ def _current_propagator() -> object:
 class OpenFeatureBinding:
     """Installs the provider, the transaction-context propagator and the gating slot for the context's lifetime.
 
-    A context may stop and start again: every start installs anew and every stop removes only what that start
-    installed and is still installed, putting back the propagator it found. A second ``start`` (or ``stop``) in a
-    row does nothing.
+    ``start`` records each piece as it installs it (the provider before the SDK call, which binds the provider
+    before initializing it and re-raises a failed initialization), and ``stop`` undoes exactly what was recorded,
+    each piece only if it is still the installed one, putting back the propagator found at start. ``stop`` does so
+    after a ``start`` that failed half-way too, and when it is cancelled while draining the hooks (the cancellation
+    is re-raised once everything is restored). A context may therefore stop and start again; a second ``start`` (or
+    ``stop``) in a row does nothing.
     """
 
     def __init__(
@@ -352,9 +419,12 @@ class OpenFeatureBinding:
         self._facade = facade
         self._domain = domain or None
         self._disabled_status = disabled_status
-        self._propagator: ContextVarsTransactionContextPropagator | None = None
-        self._previous_propagator: TransactionContextPropagator | None = None
         self._running = False
+        # what start installed, so stop undoes exactly that
+        self._provider_installed = False
+        self._propagator: ContextVarsTransactionContextPropagator | None = None
+        self._found_propagator: TransactionContextPropagator | None = None
+        self._slot_installed = False
 
     @property
     def provider(self) -> FeatureProvider | None:
@@ -366,37 +436,58 @@ class OpenFeatureBinding:
         if self._provider is None:
             _logger.warning("feature_flags_no_provider", extra={"domain": self._domain})
         else:
+            self._provider_installed = True  # before the call: a failed initialization leaves the provider bound
             api.set_provider_and_wait(self._provider, self._domain)
-        previous = _current_propagator()  # TransactionContextPropagator is not runtime-checkable: duck-type it
-        has_api = hasattr(previous, "get_transaction_context")
-        self._previous_propagator = cast("TransactionContextPropagator", previous) if has_api else None
+        found = _current_propagator()  # TransactionContextPropagator is not runtime-checkable: duck-type it
+        has_api = hasattr(found, "get_transaction_context")
+        self._found_propagator = cast("TransactionContextPropagator", found) if has_api else None
         self._propagator = ContextVarsTransactionContextPropagator()
         set_transaction_context_propagator(self._propagator)
+        self._slot_installed = True
         install_feature_flags(self._facade, disabled_status=self._disabled_status)
         self._running = True
 
     async def stop(self) -> None:
-        if not self._running:
-            return
-        self._running = False
-        uninstall_feature_flags(self._facade)
+        was_running, self._running = self._running, False
+        self._uninstall_slot()
+        try:
+            if was_running:
+                await self._drain_hooks()
+        finally:
+            self._restore_propagator()
+            self._uninstall_provider()
+
+    async def _drain_hooks(self) -> None:
+        """Await every hook's coroutine ``drain()`` (the exposure hook's); a failing one is logged."""
         for hook in self._facade.client.hooks:
             drain = getattr(hook, "drain", None)
-            if callable(drain):
-                try:
-                    await drain()
-                except Exception:  # noqa: BLE001 — stopping goes on: the provider and the propagator are restored
-                    _logger.warning(
-                        "feature_flags_hook_drain_failed", extra={"hook": type(hook).__name__}, exc_info=True
-                    )
-        if self._provider is not None:
-            installed = OpenFeatureClient(domain=self._domain, version=None).provider
-            if installed is self._provider:
-                api.set_provider_and_wait(NoOpProvider(), self._domain)
-        if self._propagator is not None and _current_propagator() is self._propagator:
-            if self._previous_propagator is not None:
-                set_transaction_context_propagator(self._previous_propagator)
+            if not inspect.iscoroutinefunction(drain):
+                continue
+            try:
+                await drain()
+            except Exception:  # noqa: BLE001 — stopping goes on: the provider and the propagator are restored
+                _logger.warning("feature_flags_hook_drain_failed", extra={"hook": type(hook).__name__}, exc_info=True)
+
+    def _uninstall_slot(self) -> None:
+        if self._slot_installed:
+            self._slot_installed = False
+            uninstall_feature_flags(self._facade)
+
+    def _restore_propagator(self) -> None:
+        if self._propagator is None:
+            return
+        if _current_propagator() is self._propagator:
+            if self._found_propagator is not None:
+                set_transaction_context_propagator(self._found_propagator)
             else:
                 _transaction_context.clear_transaction_context_propagator()
         self._propagator = None
-        self._previous_propagator = None
+        self._found_propagator = None
+
+    def _uninstall_provider(self) -> None:
+        if not self._provider_installed:
+            return
+        self._provider_installed = False
+        installed = OpenFeatureClient(domain=self._domain, version=None).provider
+        if self._provider is not None and installed is self._provider:
+            api.set_provider_and_wait(NoOpProvider(), self._domain)
