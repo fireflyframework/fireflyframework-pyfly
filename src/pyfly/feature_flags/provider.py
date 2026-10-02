@@ -33,10 +33,11 @@ that spends at most the budget and never recurses deeper than the depth limit (a
 followed in a loop), so neither a fan-out nor a long chain of references can exhaust time, memory or the stack; only
 a flag within both limits is expanded.
 
-Date-times in the evaluation context are evaluated as Unix epoch milliseconds (a ``float``), whatever the host's time
-zone (the contract's "Evaluation context"): every ``resolve_*_details`` converts the context it is handed, the merged
-OpenFeature context, before FlagdCore reads it, so facade calls, plain OpenFeature clients and the management preview
-decide alike. See :func:`_epoch_millis_context`.
+Date-times in the evaluation context are evaluated as Unix epoch milliseconds (a ``float``: the whole microseconds
+since the epoch, divided by 1000, exactly as PHP computes it), whatever the host's time zone (the contract's
+"Evaluation context"): every ``resolve_*_details`` converts the context it is handed, the merged OpenFeature context,
+before FlagdCore reads it, so facade calls, plain OpenFeature clients and the management preview decide alike. See
+:func:`_epoch_millis_context`.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ import dataclasses
 import json
 import threading
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from openfeature.contrib.tools.flagd.core import FlagdCore
@@ -181,14 +182,20 @@ def _for_flagd_core(projected: Mapping[str, Any]) -> dict[str, Any]:
     return document
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MICROSECOND = timedelta(microseconds=1)
+
+
 def _epoch_millis(value: date) -> float:
-    """*value* as Unix epoch milliseconds: a naive ``datetime`` is read as UTC (never the host's zone) and a ``date``
-    is midnight UTC."""
+    """*value* as Unix epoch milliseconds: the whole number of microseconds since the epoch (an ``int``, floored, so
+    negative before 1970), divided by 1000 as a float. PHP computes the same integer and the same division, so both
+    frameworks produce bit-identical doubles (``timestamp() * 1000.0`` can differ in the last bit). A naive
+    ``datetime`` is read as UTC (never the host's zone) and a ``date`` is midnight UTC."""
     if not isinstance(value, datetime):
         value = datetime(value.year, value.month, value.day, tzinfo=UTC)
     elif value.utcoffset() is None:
         value = value.replace(tzinfo=UTC)
-    return value.timestamp() * 1000.0
+    return ((value - _EPOCH) // _MICROSECOND) / 1000
 
 
 def _epoch_millis_context(context: EvaluationContext | None) -> EvaluationContext | None:

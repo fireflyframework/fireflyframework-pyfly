@@ -94,10 +94,56 @@ def test_an_aware_datetime_in_another_offset_is_the_same_instant(evaluate: Evalu
     assert evaluate(provider, {"t": datetime(2025, 1, 1, 0, 0, tzinfo=plus_one)}).value is False
 
 
+PLUS_5_30 = timezone(timedelta(hours=5, minutes=30))
+
+EXACT = [
+    # (value, whole microseconds since the epoch worked out by hand, the float "microseconds / 1000" gives)
+    (datetime(2026, 1, 15, 12, 34, 56, 789123, tzinfo=UTC), 1768480496789123, 1768480496789.123),
+    (datetime(2026, 1, 15, 12, 34, 56, 789123), 1768480496789123, 1768480496789.123),  # naive: UTC
+    (datetime(2026, 1, 15, 12, 34, 56, 789123, tzinfo=PLUS_5_30), 1768460696789123, 1768460696789.123),
+    (datetime(2066, 2, 17, 18, 9, 13, 204703, tzinfo=UTC), 3033655753204703, 3033655753204.703),
+    (datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=UTC), -1, -0.001),  # before the epoch: negative
+    (datetime(1960, 5, 17, 6, 7, 8, 123457, tzinfo=UTC), -303760371876543, -303760371876.543),
+    (datetime(1960, 5, 17, 6, 7, 8, 123457), -303760371876543, -303760371876.543),
+    (date(1960, 5, 17), -303782400000000, -303782400000.0),
+    (date(2026, 1, 1), 1767225600000000, 1767225600000.0),
+    (datetime.min, -62135596800000000, -62135596800000.0),
+    (datetime.max, 253402300799999999, 253402300800000.0),  # the microsecond rounds into the double
+]
+
+EXACT_IDS = [
+    "aware-utc",
+    "naive",
+    "aware-plus-5-30",
+    "year-2066",
+    "one-microsecond-before-the-epoch",
+    "1960-aware",
+    "1960-naive",
+    "date-1960",
+    "date-2026",
+    "datetime-min",
+    "datetime-max",
+]
+
+
+@pytest.mark.parametrize(("value", "microseconds", "milliseconds"), EXACT, ids=EXACT_IDS)
+def test_the_number_is_whole_microseconds_over_a_thousand(value: Any, microseconds: int, milliseconds: float) -> None:
+    """Python and PHP compute the same double: an integer of microseconds, divided by 1000 as a float."""
+    converted = _epoch_millis_context(EvaluationContext(attributes={"t": value}))
+    assert converted is not None
+    number = converted.attributes["t"]
+    assert type(number) is float
+    assert number == milliseconds == microseconds / 1000
+
+
+@pytest.mark.parametrize(("value", "microseconds", "milliseconds"), EXACT[:9], ids=EXACT_IDS[:9])
 @EVALUATIONS
-def test_the_value_is_a_float_of_milliseconds_with_the_fraction(evaluate: Evaluate) -> None:
-    instant = datetime(2026, 1, 15, 12, 30, 45, 250_000, tzinfo=UTC)
-    assert evaluate(_provider("==", "t", instant.timestamp() * 1000.0), {"t": instant}).value is True
+def test_the_exact_float_is_what_the_rule_compares(
+    evaluate: Evaluate, value: Any, microseconds: int, milliseconds: float
+) -> None:
+    assert evaluate(_provider("==", "t", milliseconds), {"t": value}).value is True
+    assert evaluate(_provider("==", "t", microseconds / 1000), {"t": value}).value is True
+    assert evaluate(_provider("==", "t", milliseconds + 0.001), {"t": value}).value is False
 
 
 @pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles", "Asia/Tokyo"])
@@ -188,7 +234,7 @@ def test_containers_keep_their_type_and_an_unchanged_context_is_not_copied() -> 
         attributes={"pair": (joined, "x"), "tags": ["a", joined], "mapping": MappingProxyType({"j": joined}), "n": 1},
     )
     converted = _epoch_millis_context(context)
-    expected = joined.timestamp() * 1000.0
+    expected = 1768435200000.0  # 2026-01-15T00:00:00Z
     assert converted is not context and converted.targeting_key == "u-1"
     assert converted.attributes == {
         "pair": (expected, "x"),
