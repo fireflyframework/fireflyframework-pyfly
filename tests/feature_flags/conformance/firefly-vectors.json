@@ -685,6 +685,68 @@
       }
     },
     {
+      "name": "a null variant value is not a flag value",
+      "kind": "validate",
+      "input": {
+        "flags": {
+          "nv": {
+            "state": "ENABLED",
+            "variants": {
+              "a": null
+            }
+          }
+        }
+      },
+      "expect": {
+        "valid": false,
+        "key": "nv",
+        "error": "variants must share one type"
+      }
+    },
+    {
+      "name": "a null variant value cannot share a type with others",
+      "kind": "validate",
+      "input": {
+        "flags": {
+          "nv2": {
+            "state": "ENABLED",
+            "variants": {
+              "a": "x",
+              "b": null
+            },
+            "defaultVariant": "a"
+          }
+        }
+      },
+      "expect": {
+        "valid": false,
+        "key": "nv2",
+        "error": "variants must share one type"
+      }
+    },
+    {
+      "name": "an empty list stands for an empty object in targeting, metadata and the document sections",
+      "kind": "validate",
+      "input": {
+        "flags": {
+          "el": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": [],
+            "metadata": []
+          }
+        },
+        "$evaluators": []
+      },
+      "expect": {
+        "valid": true
+      }
+    },
+    {
       "name": "the highest layer defining a key supplies its whole definition",
       "kind": "compose",
       "layers": [
