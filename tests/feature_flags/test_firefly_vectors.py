@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 from openfeature.evaluation_context import EvaluationContext
 
+from pyfly.feature_flags.composition import Layer, compose
+from pyfly.feature_flags.definitions import FlagDefinitionError, expired_keys, normalize_flags, parse_document
 from pyfly.feature_flags.provider import FireflyFlagProvider
 from tests.feature_flags.support import CONFORMANCE, bound_client
 
@@ -76,3 +78,44 @@ def test_bucket(case: dict[str, Any]) -> None:
         for key in case["keys"]
     ]
     assert actual == case["expect"]
+
+
+@pytest.mark.parametrize("case", _cases("normalize"), ids=lambda case: case["name"])
+def test_normalize(case: dict[str, Any]) -> None:
+    assert normalize_flags(case["input"]) == case["expect"]
+
+
+@pytest.mark.parametrize("case", _cases("validate"), ids=lambda case: case["name"])
+def test_validate(case: dict[str, Any]) -> None:
+    expect = case["expect"]
+    if expect["valid"]:
+        parse_document(case["input"])
+        return
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document(case["input"])
+    assert raised.value.key == expect["key"]
+    assert expect["error"] in str(raised.value)
+
+
+@pytest.mark.parametrize("case", _cases("compose"), ids=lambda case: case["name"])
+def test_compose(case: dict[str, Any]) -> None:
+    layers = [
+        Layer(
+            layer["source"],
+            parse_document({"flags": layer["flags"], "$evaluators": layer.get("$evaluators", {})}, shorthand=True),
+        )
+        for layer in case["layers"]
+    ]
+    composition = compose(layers)
+    actual = {
+        key: {"origin": flag.origin, "overrides": list(flag.overrides), "definition": flag.definition}
+        for key, flag in composition.flags.items()
+    }
+    assert actual == case["expect"]["flags"]
+    if "evaluators" in case["expect"]:
+        assert composition.evaluators == case["expect"]["evaluators"]
+
+
+@pytest.mark.parametrize("case", _cases("expiry"), ids=lambda case: case["name"])
+def test_expiry(case: dict[str, Any]) -> None:
+    assert expired_keys(parse_document({"flags": case["flags"]}).flags, TODAY) == case["expect"]["expired"]

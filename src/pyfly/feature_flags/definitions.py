@@ -1,0 +1,247 @@
+# Copyright 2026 Firefly Software Foundation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Firefly flag definitions: the shorthand, the contract's validation rules and expiry (spec 4.1, 4.2).
+
+Everything here is plain Python over flagd documents, with no OpenFeature import, so sources, gating and test
+support use it without the ``feature-flags`` extra. Validation reports the contract's messages (the shared vectors
+assert them as substrings, and LaraFly emits the same phrases); a message may add a hint after the contract phrase.
+"""
+
+from __future__ import annotations
+
+import copy
+import datetime as dt
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+__all__ = [
+    "FLAG_KEY_PATTERN",
+    "FLAG_KINDS",
+    "FlagDefinitionError",
+    "FlagDocument",
+    "expired_keys",
+    "flag_type",
+    "is_expired",
+    "is_valid_key",
+    "normalize_flags",
+    "parse_document",
+    "utc_today",
+    "validate_flag",
+]
+
+FLAG_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+"""A flag key (spec 4.1), matched with ``fullmatch`` (``match`` would accept a trailing newline)."""
+
+FLAG_KINDS: tuple[str, ...] = ("release", "experiment", "ops", "permission")
+"""The values of the reserved ``metadata.kind``."""
+
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_YAML_HINT = " (YAML 1.1 reads an unquoted on/off/yes/no as a boolean: quote variant names in pyfly.yaml)"
+
+
+class FlagDefinitionError(ValueError):
+    """A definition, or a document, breaks a rule of the contract. ``key`` names the flag (or the document part)."""
+
+    def __init__(self, key: str, reason: str) -> None:
+        super().__init__(f"invalid feature flag {key!r}: {reason}")
+        self.key = key
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class FlagDocument:
+    """A validated flagd document: every definition plain flagd (the shorthand already expanded)."""
+
+    flags: dict[str, dict[str, Any]] = field(default_factory=dict)
+    evaluators: dict[str, dict[str, Any]] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_flagd(self) -> dict[str, Any]:
+        """The document as flagd JSON (a deep copy; empty ``$evaluators``/``metadata`` left out)."""
+        document: dict[str, Any] = {"flags": copy.deepcopy(self.flags)}
+        if self.evaluators:
+            document["$evaluators"] = copy.deepcopy(self.evaluators)
+        if self.metadata:
+            document["metadata"] = copy.deepcopy(self.metadata)
+        return document
+
+
+def utc_today() -> dt.date:
+    """Today in UTC: the day expiry is computed against (spec 4.1)."""
+    return dt.datetime.now(dt.UTC).date()
+
+
+def is_valid_key(key: object) -> bool:
+    """Whether *key* is a flag key (spec 4.1)."""
+    return isinstance(key, str) and FLAG_KEY_PATTERN.fullmatch(key) is not None
+
+
+def _text_key(key: Any) -> Any:
+    """YAML reads ``123:`` as an int: a flag key is its text. Booleans stay booleans (and fail the key rule)."""
+    return str(key) if isinstance(key, int) and not isinstance(key, bool) else key
+
+
+def normalize_flags(flags: Mapping[Any, Any]) -> dict[Any, Any]:
+    """Expand the shorthand (spec 4.2): ``true``/``false``/``"name"`` become flagd definitions.
+
+    Every other value is deep-copied unchanged, for validation to judge.
+    """
+    normalized: dict[Any, Any] = {}
+    for raw_key, value in flags.items():
+        key = _text_key(raw_key)
+        if isinstance(value, bool):
+            normalized[key] = {
+                "state": "ENABLED",
+                "variants": {"on": True, "off": False},
+                "defaultVariant": "on" if value else "off",
+            }
+        elif isinstance(value, str):
+            normalized[key] = {"state": "ENABLED", "variants": {value: value}, "defaultVariant": value}
+        else:
+            normalized[key] = copy.deepcopy(value)
+    return normalized
+
+
+def _jsonable(value: Any) -> Any:
+    """Give YAML's ``date``/``datetime`` values back their ISO text, and int keys their text, at any depth."""
+    if isinstance(value, dt.date):  # datetime is a date subclass: both become isoformat() text
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {_text_key(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _value_class(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, dict | list):
+        return "object"
+    return "null" if value is None else type(value).__name__
+
+
+def flag_type(definition: Mapping[str, Any]) -> str:
+    """``boolean``, ``string``, ``number`` or ``object``: the type of a valid definition's variant values."""
+    variants = definition.get("variants") or {}
+    kinds = {_value_class(value) for value in variants.values()}
+    kind = kinds.pop() if len(kinds) == 1 else "object"
+    return kind if kind in ("boolean", "string", "number") else "object"
+
+
+def _is_date(value: Any) -> bool:
+    if not isinstance(value, str) or _DATE.fullmatch(value) is None:
+        return False
+    try:
+        dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _scalars(values: Mapping[str, Any]) -> bool:
+    return all(isinstance(value, str | int | float) for value in values.values())  # bool is an int
+
+
+def validate_flag(key: Any, definition: Any) -> None:
+    """Raise :class:`FlagDefinitionError` with the contract message of the first rule *definition* breaks.
+
+    The order is the contract's: key, object, state, variants, variant types, defaultVariant, targeting, metadata
+    scalars, then the reserved metadata keys. Fields beside ``state``, ``variants``, ``defaultVariant``,
+    ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields" rule), never an error.
+    """
+    if not is_valid_key(key):
+        raise FlagDefinitionError(str(key), "invalid flag key")
+    if not isinstance(definition, Mapping):
+        raise FlagDefinitionError(key, "flag definition must be an object")
+    if definition.get("state") not in ("ENABLED", "DISABLED"):
+        raise FlagDefinitionError(key, "state must be ENABLED or DISABLED")
+    variants = definition.get("variants")
+    if not isinstance(variants, Mapping) or not variants:
+        raise FlagDefinitionError(key, "variants must be a non-empty object")
+    if not all(isinstance(name, str) for name in variants):
+        raise FlagDefinitionError(key, f"variants must be a non-empty object with text names{_YAML_HINT}")
+    if len({_value_class(value) for value in variants.values()}) != 1:
+        raise FlagDefinitionError(key, "variants must share one type")
+    default_variant = definition.get("defaultVariant")
+    if isinstance(default_variant, bool):
+        raise FlagDefinitionError(key, f"defaultVariant is not a variant{_YAML_HINT}")
+    if default_variant is not None and (not isinstance(default_variant, str) or default_variant not in variants):
+        raise FlagDefinitionError(key, "defaultVariant is not a variant")
+    targeting = definition.get("targeting")
+    if targeting is not None and not isinstance(targeting, Mapping):
+        raise FlagDefinitionError(key, "targeting must be an object")
+    metadata = definition.get("metadata")
+    if metadata is None:
+        return
+    if not isinstance(metadata, Mapping) or not _scalars(metadata):
+        raise FlagDefinitionError(key, "metadata values must be scalars")
+    if "kind" in metadata and metadata["kind"] not in FLAG_KINDS:
+        raise FlagDefinitionError(key, "kind must be one of release, experiment, ops, permission")
+    if "expires" in metadata and not _is_date(metadata["expires"]):
+        raise FlagDefinitionError(key, "expires must be a YYYY-MM-DD date")
+    if "owner" in metadata and not isinstance(metadata["owner"], str):
+        raise FlagDefinitionError(key, "owner must be a string")
+    if "description" in metadata and not isinstance(metadata["description"], str):
+        raise FlagDefinitionError(key, "description must be a string")
+
+
+def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
+    """Validate a flagd document (``flags``, ``$evaluators``, ``metadata``) as a whole.
+
+    With *shorthand* (configuration and test overrides only) the ``flags`` may use the spec 4.2 shorthand. YAML
+    dates become their ISO text first. The first broken rule rejects the whole document. A ``$ref`` naming no
+    evaluator is accepted: evaluating that flag yields ``PARSE_ERROR``.
+    """
+    if not isinstance(raw, Mapping):
+        raise FlagDefinitionError("<document>", "flag definition must be an object")
+    raw = _jsonable(raw)
+    flags_in = raw.get("flags") or {}
+    if not isinstance(flags_in, Mapping):
+        raise FlagDefinitionError("flags", "flag definition must be an object")
+    candidates = normalize_flags(flags_in) if shorthand else {_text_key(k): v for k, v in flags_in.items()}
+    flags: dict[str, dict[str, Any]] = {}
+    for key, definition in candidates.items():
+        validate_flag(key, definition)
+        flags[key] = copy.deepcopy(dict(definition))
+    evaluators_in = raw.get("$evaluators") or {}
+    if not isinstance(evaluators_in, Mapping):
+        raise FlagDefinitionError("$evaluators", "targeting must be an object")
+    evaluators: dict[str, dict[str, Any]] = {}
+    for name, rule in evaluators_in.items():
+        if not isinstance(rule, Mapping):
+            raise FlagDefinitionError(f"$evaluators.{name}", "targeting must be an object")
+        evaluators[str(name)] = copy.deepcopy(dict(rule))
+    metadata = raw.get("metadata") or {}
+    if not isinstance(metadata, Mapping) or not _scalars(metadata):
+        raise FlagDefinitionError("metadata", "metadata values must be scalars")
+    return FlagDocument(flags=flags, evaluators=evaluators, metadata=dict(metadata))
+
+
+def is_expired(definition: Mapping[str, Any], today: dt.date) -> bool:
+    """Whether ``metadata.expires`` is before *today*. An expired flag still evaluates normally."""
+    metadata = definition.get("metadata")
+    expires = metadata.get("expires") if isinstance(metadata, Mapping) else None
+    return isinstance(expires, str) and _is_date(expires) and dt.date.fromisoformat(expires) < today
+
+
+def expired_keys(flags: Mapping[str, Mapping[str, Any]], today: dt.date) -> list[str]:
+    """The keys of the expired flags of *flags*, sorted."""
+    return sorted(key for key, definition in flags.items() if is_expired(definition, today))
