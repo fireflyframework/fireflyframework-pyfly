@@ -27,6 +27,7 @@ from openfeature.evaluation_context import EvaluationContext
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagValueType, Reason
 from openfeature.hook import Hook, HookContext, HookHints
 from openfeature.provider import AbstractProvider
+from openfeature.provider._registry import provider_registry
 from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from openfeature.transaction_context import ContextVarsTransactionContextPropagator, NoOpTransactionContextPropagator
 
@@ -547,3 +548,123 @@ async def test_installing_over_no_provider_or_over_its_own_is_not_warned_about(
     assert _warnings(caplog) == []
     assert facade.is_enabled("a") is True
     await binding.stop()
+    assert api.get_provider_metadata().name == "No-op Provider"  # its own provider, found installed, is not put back
+
+
+async def test_a_named_domain_next_to_an_application_default_provider_is_not_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The setup ``openfeature.domain`` exists for: the application's provider is the default one and Firefly serves
+    a domain of its own. Nothing is bound to that domain before the binding starts, so nothing is replaced."""
+    application = InMemoryProvider({"app": InMemoryFlag("on", {"on": True, "off": False})})
+    api.set_provider_and_wait(application)
+    facade = FeatureFlags(OpenFeatureClient(domain="flags", version=None), EvaluationContextResolver())
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"a": bool_flag()}})
+    binding = OpenFeatureBinding(provider, facade, domain="flags")
+    with caplog.at_level(logging.WARNING, logger="pyfly.feature_flags.client"):
+        await binding.start()
+    assert _warnings(caplog) == []
+    assert facade.is_enabled("a") is True
+    assert OpenFeatureClient(domain=None, version=None).provider is application
+    await binding.stop()
+
+
+# -- stop puts back what start found in the domain -----------------------------------------------------------------
+
+
+def _firefly_binding(domain: str | None, key: str = "a") -> tuple[FeatureFlags, OpenFeatureBinding]:
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {key: bool_flag()}})
+    facade = FeatureFlags(
+        OpenFeatureClient(domain=client_domain(domain or ""), version=None), EvaluationContextResolver()
+    )
+    return facade, OpenFeatureBinding(provider, facade, domain=domain)
+
+
+def _bound_to(domain: str) -> object:
+    """What is bound to *domain* itself (``None``: nothing, it falls back to the default provider)."""
+    return provider_registry._providers.get(domain)  # noqa: SLF001 — the SDK has no public "is bound" query
+
+
+async def test_stop_restores_the_application_provider_the_binding_replaced_in_its_domain() -> None:
+    application = InMemoryProvider({"app": InMemoryFlag("on", {"on": True, "off": False})})
+    api.set_provider_and_wait(application, "x")
+    _, binding = _firefly_binding("x")
+    await binding.start()
+    assert _bound_to("x") is binding.provider
+    await binding.stop()
+    assert _bound_to("x") is application
+    assert OpenFeatureClient(domain="x", version=None).get_boolean_value("app", False) is True
+
+
+async def test_stop_unbinds_a_domain_that_held_nothing_so_it_falls_back_to_the_default_provider_again() -> None:
+    _, binding = _firefly_binding("x")
+    await binding.start()
+    await binding.stop()
+    assert _bound_to("x") is None
+    default = InMemoryProvider({"app": InMemoryFlag("on", {"on": True, "off": False})})
+    api.set_provider_and_wait(default)  # a default provider set afterwards serves the domain again
+    assert OpenFeatureClient(domain="x", version=None).provider is default
+
+
+async def test_stop_restores_the_application_default_provider_the_binding_replaced() -> None:
+    application = InMemoryProvider({"app": InMemoryFlag("on", {"on": True, "off": False})})
+    api.set_provider_and_wait(application)
+    _, binding = _firefly_binding(None)
+    await binding.start()
+    assert OpenFeatureClient(domain=None, version=None).provider is binding.provider
+    await binding.stop()
+    assert OpenFeatureClient(domain=None, version=None).provider is application
+
+
+@pytest.mark.parametrize("order", ["last-in-first-out", "first-in-first-out"])
+async def test_overlapping_bindings_leave_the_domain_as_they_found_it_whatever_order_they_stop_in(order: str) -> None:
+    """A binding that stops after another one replaced its provider cannot uninstall it; the other one, stopping later,
+    must then restore what the first one found, never the first one's (stopped) provider."""
+    application = InMemoryProvider({"app": InMemoryFlag("on", {"on": True, "off": False})})
+    api.set_provider_and_wait(application, "x")
+    _, first = _firefly_binding("x")
+    _, second = _firefly_binding("x")
+    await first.start()
+    await second.start()
+    if order == "last-in-first-out":
+        await second.stop()
+        assert _bound_to("x") is first.provider  # the first context still runs: its provider is back
+        await first.stop()
+    else:
+        await first.stop()
+        assert _bound_to("x") is second.provider  # the second context still runs: untouched
+        await second.stop()
+    assert _bound_to("x") is application
+
+
+class OnceOnlyProvider(InMemoryProvider):
+    """An application provider that cannot be initialized a second time (the SDK shut it down when it was replaced)."""
+
+    def __init__(self) -> None:
+        super().__init__({"app": InMemoryFlag("on", {"on": True, "off": False})})
+        self.initialized = 0
+
+    def initialize(self, evaluation_context: EvaluationContext) -> None:
+        self.initialized += 1
+        if self.initialized > 1:
+            raise RuntimeError("already shut down")
+
+
+async def test_a_provider_that_cannot_be_put_back_is_logged_and_the_stop_completes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    application = OnceOnlyProvider()
+    api.set_provider_and_wait(application, "x")
+    _, binding = _firefly_binding("x")
+    with caplog.at_level(logging.WARNING, logger="pyfly.feature_flags.client"):
+        await binding.start()
+        await binding.stop()
+    assert _warnings(caplog) == [
+        ("feature_flags_provider_replaced", "x", "OnceOnlyProvider"),  # at start
+        ("feature_flags_provider_restore_failed", "x", "OnceOnlyProvider"),
+    ]
+    assert application.initialized == 2
+    assert installed_feature_flags() is None
+    assert isinstance(_propagator(), NoOpTransactionContextPropagator)

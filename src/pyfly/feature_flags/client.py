@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import logging
+import threading
 from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -39,6 +40,7 @@ from openfeature.client import OpenFeatureClient
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, FlagType, FlagValueType
 from openfeature.provider import AbstractProvider, FeatureProvider
+from openfeature.provider._registry import provider_registry
 from openfeature.provider.no_op_provider import NoOpProvider
 from openfeature.transaction_context import (
     ContextVarsTransactionContextPropagator,
@@ -396,6 +398,70 @@ def _current_propagator() -> object:
     return getattr(_transaction_context, "_evaluation_transaction_context_propagator", None)
 
 
+# The SDK can replace the provider of a domain (``set_provider``) but neither tells an unbound domain from one bound to
+# the default provider nor unbinds one. The two helpers below therefore read and edit its registry's ``_providers``
+# map, under its lock; should that change, each falls back to the closest public behavior it documents.
+
+
+def _bound_provider(domain: str | None) -> FeatureProvider | None:
+    """The provider bound to *domain* itself: the default provider for ``None``; for a named domain, ``None`` when
+    nothing is bound to it (it falls back to the default provider). Without the registry's map, a named domain that
+    answers the default provider counts as unbound."""
+    if domain is None:
+        return provider_registry.get_default_provider()
+    providers = getattr(provider_registry, "_providers", None)
+    if isinstance(providers, dict):
+        return cast("FeatureProvider | None", providers.get(domain))
+    current = provider_registry.get_provider(domain)
+    return None if current is provider_registry.get_default_provider() else current
+
+
+def _unbind(domain: str, provider: FeatureProvider) -> None:
+    """Remove *domain*'s binding to *provider*, so the domain falls back to the default provider again, and let the
+    SDK shut *provider* down once nothing uses it (what ``set_provider`` does to the provider it replaces). A domain
+    bound to another provider by now is left alone. Without the registry's map and lock, the closest public behavior:
+    the domain is bound to a no-op provider (it then no longer falls back to the default one)."""
+    providers = getattr(provider_registry, "_providers", None)
+    lock = getattr(provider_registry, "_lock", None)
+    if not isinstance(providers, dict) or lock is None:
+        api.set_provider_and_wait(NoOpProvider(), domain)
+        return
+    with lock:
+        if providers.get(domain) is not provider:
+            return
+        del providers[domain]
+    shutdown_if_unused = getattr(provider_registry, "_shutdown_if_unused", None)
+    if callable(shutdown_if_unused):
+        shutdown_if_unused(provider)
+
+
+# A provider whose binding stopped while another binding had replaced it in its domain (so it could not put back what
+# it had found), by identity, with what it had found there. Bindings may stop in any order: the binding that later
+# puts that provider back puts back what it stands for instead, never a stopped context's provider.
+_superseded: dict[int, tuple[FeatureProvider, FeatureProvider | None]] = {}
+_superseded_lock = threading.Lock()
+
+
+def _supersede(provider: FeatureProvider, found: FeatureProvider | None) -> None:
+    with _superseded_lock:
+        _superseded[id(provider)] = (provider, found)
+
+
+def _to_put_back(found: FeatureProvider | None, own: FeatureProvider) -> FeatureProvider | None:
+    """What to put back for *found*: *found* itself, or, while it is a superseded provider, what its binding had
+    found (each entry is used once). A binding never puts its own provider back: that counts as nothing found."""
+    seen: set[int] = set()
+    with _superseded_lock:
+        while found is not None and id(found) not in seen:
+            seen.add(id(found))
+            entry = _superseded.get(id(found))
+            if entry is None or entry[0] is not found:
+                break
+            del _superseded[id(found)]
+            found = entry[1]
+    return None if found is own else found
+
+
 class OpenFeatureBinding:
     """Installs the provider, the transaction-context propagator and the gating slot for the context's lifetime.
 
@@ -406,9 +472,17 @@ class OpenFeatureBinding:
     is re-raised once everything is restored). A context may therefore stop and start again; a second ``start`` (or
     ``stop``) in a row does nothing.
 
-    Installing over a provider that is neither the no-op one nor the binding's own logs
-    ``feature_flags_provider_replaced`` (WARNING, naming the domain: ``None`` is the default one), and a framework
-    client that does not reach the installed provider afterwards logs ``feature_flags_client_domain_shadowed``.
+    ``start`` records what the domain held (for a named domain, possibly nothing: it fell back to the default
+    provider), and ``stop`` puts exactly that back, if the binding's provider is still the one installed: the
+    provider it replaced (the SDK shut that provider down when it was replaced and initializes it again), or, for a
+    named domain that held none, no binding at all, so the domain falls back to the default provider again. When
+    bindings that share a domain stop in another order than they started, the last one to stop puts back what the
+    first one found, never a stopped context's provider.
+
+    Installing over a provider bound to the domain that is neither the no-op one nor the binding's own logs
+    ``feature_flags_provider_replaced`` (WARNING, naming the domain: ``None`` is the default one); a named domain
+    that only falls back to the default provider replaces nothing. A framework client that does not reach the
+    installed provider afterwards logs ``feature_flags_client_domain_shadowed``.
 
     It starts in :data:`~pyfly.feature_flags.registry.FEATURE_FLAGS_PHASE`, after the registry (created first, so
     started first in the phase) and before the application's lifecycle beans, which therefore see the flags and the
@@ -432,6 +506,7 @@ class OpenFeatureBinding:
         self._running = False
         # what start installed, so stop undoes exactly that
         self._provider_installed = False
+        self._found_provider: FeatureProvider | None = None  # what the domain held before (None: nothing bound)
         self._propagator: ContextVarsTransactionContextPropagator | None = None
         self._found_propagator: TransactionContextPropagator | None = None
         self._slot_installed = False
@@ -446,7 +521,9 @@ class OpenFeatureBinding:
         if self._provider is None:
             _logger.warning("feature_flags_no_provider", extra={"domain": self._domain})
         else:
-            self._warn_if_replacing()
+            bound = _bound_provider(self._domain)
+            self._warn_if_replacing(bound)
+            self._found_provider = None if bound is self._provider else bound  # its own provider is never put back
             self._provider_installed = True  # before the call: a failed initialization leaves the provider bound
             api.set_provider_and_wait(self._provider, self._domain)
             self._warn_if_shadowed()
@@ -459,15 +536,15 @@ class OpenFeatureBinding:
         install_feature_flags(self._facade, disabled_status=self._disabled_status)
         self._running = True
 
-    def _warn_if_replacing(self) -> None:
-        """Warn when the domain already holds a provider that is neither the no-op one nor this binding's own: the
+    def _warn_if_replacing(self, found: FeatureProvider | None) -> None:
+        """Warn when *found*, the provider bound to the domain, is neither the no-op one nor this binding's own: the
         OpenFeature API is process-global, so another context sharing the domain (two applications on the default
-        domain) or the application's own code would lose its provider to this one."""
-        current = OpenFeatureClient(domain=self._domain, version=None).provider
-        if not isinstance(current, NoOpProvider) and current is not self._provider:
+        domain) or the application's own code loses its provider to this one until the binding stops. A named
+        domain bound to nothing (it falls back to the application's default provider) replaces nothing."""
+        if found is not None and not isinstance(found, NoOpProvider) and found is not self._provider:
             _logger.warning(
                 "feature_flags_provider_replaced",
-                extra={"domain": self._domain, "provider": type(current).__qualname__},
+                extra={"domain": self._domain, "provider": type(found).__qualname__},
             )
 
     def _warn_if_shadowed(self) -> None:
@@ -522,6 +599,25 @@ class OpenFeatureBinding:
         if not self._provider_installed:
             return
         self._provider_installed = False
-        installed = OpenFeatureClient(domain=self._domain, version=None).provider
-        if self._provider is not None and installed is self._provider:
-            api.set_provider_and_wait(NoOpProvider(), self._domain)
+        provider, found, self._found_provider = self._provider, self._found_provider, None
+        if provider is None:
+            return
+        if _bound_provider(self._domain) is not provider:
+            _supersede(provider, found)  # another binding replaced it: it puts back what this one found
+            return
+        self._put_back(provider, _to_put_back(found, provider))
+
+    def _put_back(self, provider: FeatureProvider, found: FeatureProvider | None) -> None:
+        """Put *found* back in the domain: the provider ``start`` replaced, or no binding (a named domain) or the
+        no-op provider (the default domain) when there was none. A failure is logged; stopping goes on."""
+        try:
+            if found is None and self._domain is not None:
+                _unbind(self._domain, provider)
+            else:
+                api.set_provider_and_wait(found if found is not None else NoOpProvider(), self._domain)
+        except Exception:  # noqa: BLE001 — stopping goes on: the propagator and the slot are restored regardless
+            _logger.warning(
+                "feature_flags_provider_restore_failed",
+                extra={"domain": self._domain, "provider": type(found).__qualname__ if found is not None else None},
+                exc_info=True,
+            )
