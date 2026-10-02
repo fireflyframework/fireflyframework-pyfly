@@ -16,8 +16,10 @@
 Every name a ``@bean`` hint uses is imported at runtime, not under ``TYPE_CHECKING``: the context reads the hints
 with ``typing.get_type_hints``, which looks them up in this module's globals. Each bean another bean of the class
 consumes is declared and consumed with the same hint (``X | None`` on both sides when it may be absent), which is how
-the context orders the methods: provider, registry, resolver, client, facade, binding. The two lifecycle beans start
-in that creation order, so the registry has loaded every source before the binding installs the provider.
+the context orders the methods (a topological sort, ties in name order): properties, provider, resolver, client,
+registry, filter, facade, binding. The registry comes before the facade and the binding, which both take it, and the
+two lifecycle beans start in creation order, so the registry has loaded every source before the binding installs the
+provider.
 
 Nothing here catches a startup failure: an invalid setting (``ValueError`` naming the key), several OpenFeature
 provider beans (:class:`~pyfly.feature_flags.registry.FeatureFlagsError` from the binding's bean method), a source

@@ -80,6 +80,7 @@ async def test_one_switch_wires_the_subsystem() -> None:
     assert facade.get_int("size", 0) == 1
     registry = context.get_bean(FlagRegistry)
     assert registry.effective_flag("theme") is not None and registry.started
+    assert facade.registry is registry  # injected, not left None by a hint the context could not match
     assert api.get_provider_metadata().name == "firefly"
     assert api.get_client().get_boolean_value("new-checkout", False) is True  # third-party code sees it
     installed = installed_feature_flags()
@@ -115,6 +116,22 @@ async def test_a_configured_domain_installs_the_provider_for_that_domain_only() 
     await context.stop()
 
 
+async def test_placeholder_syntax_in_flag_definitions_is_flag_text() -> None:
+    """``${...}`` inside ``flags``/``evaluators`` is not a configuration placeholder: the flags boot and evaluate to
+    the literal text (there is no escape syntax, so resolving it would refuse a valid definition)."""
+    flags = {
+        "greeting": {"state": "ENABLED", "variants": {"hello": "Hello ${name}"}, "defaultVariant": "hello"},
+        "dollar-note": {**bool_flag("off"), "targeting": {"if": [{"$ref": "mentions-placeholder"}, "on", "off"]}},
+    }
+    evaluators = {"mentions-placeholder": {"in": ["${", {"var": "note"}]}}
+    context = await _started(_config(flags=flags, evaluators=evaluators))
+    facade = context.get_bean(FeatureFlags)
+    assert facade.get_string("greeting", "") == "Hello ${name}"
+    assert facade.is_enabled("dollar-note", context={"note": "see ${x}"}) is True
+    assert facade.is_enabled("dollar-note", context={"note": "plain"}) is False
+    await context.stop()
+
+
 async def test_an_invalid_config_definition_fails_startup_with_the_key_and_the_reason() -> None:
     with pytest.raises(BeanCreationException, match=r"bad key.*invalid flag key"):
         await _started(_config(flags={"bad key": True}))
@@ -136,13 +153,20 @@ class ExternalProviderConfiguration:
 
 
 async def test_an_application_provider_replaces_firefly_s() -> None:
-    context = await _started(_config(flags={"ext": False}), ExternalProviderConfiguration)
+    labels = {"flag": "ext", "variant": "on", "reason": "STATIC"}
+    before = REGISTRY.get_sample_value(EVALUATIONS_METRIC, labels) or 0.0
+    context = await _started(_config(flags={"ext": False}, events={"evaluations": True}), ExternalProviderConfiguration)
     with pytest.raises(NoSuchBeanError):
         context.get_bean(FlagRegistry)
     facade = context.get_bean(FeatureFlags)
     assert facade.registry is None
     assert facade.is_enabled("ext") is True  # the external provider answers, not the config layer
     assert api.get_provider_metadata().name == "In-Memory Provider"
+    # spec 5: the gates and the Firefly hooks work the same over the application's provider
+    installed = installed_feature_flags()
+    assert installed is not None and installed.facade is facade
+    assert [type(hook) for hook in facade.client.hooks] == [MetricsHook, ExposureEventHook]
+    assert REGISTRY.get_sample_value(EVALUATIONS_METRIC, labels) == before + 1
     await context.stop()
 
 
@@ -180,8 +204,9 @@ async def test_a_refresh_interval_that_is_not_positive_fails_startup_with_the_fu
 
 @pytest.mark.parametrize(("context_section", "tenant"), [({}, None), ({"trust-tenant-header": "true"}, "acme")])
 async def test_the_tenant_header_is_trusted_only_when_configured(
-    context_section: dict[str, Any], tenant: str | None
+    context_section: dict[str, Any], tenant: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("PYFLY_PROFILES_ACTIVE", raising=False)  # it would win over pyfly.profiles.active
     context = await _started(
         Config(
             {

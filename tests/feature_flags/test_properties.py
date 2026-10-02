@@ -129,6 +129,42 @@ def test_an_unconvertible_value_names_the_prefix() -> None:
         _bind({"web": {"disabled-status": "not-a-status"}})
 
 
+def test_placeholders_in_the_flag_maps_are_left_alone() -> None:
+    """The ``flags``/``evaluators`` maps are flag text, read verbatim by the config source: binding never resolves
+    them, so ``${name}`` in a variant is not a missing configuration key."""
+    section = {"flags": {"greeting": "Hello ${name}"}, "evaluators": {"note": {"in": ["${", {"var": "text"}]}}}
+    config = Config({"pyfly": {"feature-flags": section}})
+    assert FeatureFlagsProperties.from_config(config) == FeatureFlagsProperties()
+    assert config.get_section("pyfly.feature-flags.flags") == {"greeting": "Hello ${name}"}  # the config is untouched
+
+
+def test_placeholders_and_environment_overrides_still_apply_to_the_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLAGS_FILE", "/etc/shop/flags.yaml")
+    monkeypatch.setenv("PYFLY_FEATURE_FLAGS_WEB_DISABLED_STATUS", "503")
+    config = Config(
+        {
+            "shop": {"domain": "payments"},
+            "pyfly": {
+                "feature-flags": {
+                    "flags": {"greeting": "Hello ${name}"},
+                    "openfeature": {"domain": "${shop.domain}"},
+                    "sources": {"file": {"enabled": True, "path": "${FLAGS_FILE}"}},
+                    "web": {"disabled-status": 404},  # the leaf pyfly-defaults.yaml provides, which the env overrides
+                }
+            },
+        }
+    )
+    props = FeatureFlagsProperties.from_config(config)
+    assert props.sources.file.path == "/etc/shop/flags.yaml"  # an environment variable
+    assert props.openfeature.domain == "payments"  # another configuration key
+    assert props.web.disabled_status == 503  # PYFLY_* override
+
+
+def test_an_unresolvable_placeholder_in_a_setting_still_fails() -> None:
+    with pytest.raises(ValueError, match=r"^pyfly\.feature-flags: Cannot resolve placeholder '\$\{NO_SUCH_VAR\}'"):
+        _bind({"sources": {"file": {"enabled": True, "path": "${NO_SUCH_VAR}"}}})
+
+
 def test_tokens_are_masked_in_configuration_views() -> None:
     config = Config({})
     assert config.mask_value("pyfly.feature-flags.server.token", "s3cret") == "******"

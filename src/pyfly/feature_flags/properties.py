@@ -12,17 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """``pyfly.feature-flags.*`` (spec 8). The ``flags``/``evaluators`` maps are not bound here: the config source reads
-them with ``Config.get_section`` so flag keys keep their spelling."""
+them with ``Config.get_section`` so flag keys keep their spelling, and binding never sees them, because it resolves
+``${...}`` placeholders, which a flag's text (``"Hello ${name}"``) is not."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Any
 
-from pyfly.core.config import config_properties
-
-if TYPE_CHECKING:
-    from pyfly.core.config import Config
+from pyfly.core.config import Config, config_properties
 
 __all__ = [
     "PREFIX",
@@ -40,9 +38,28 @@ __all__ = [
 ]
 
 PREFIX = "pyfly.feature-flags"
+_FLAG_MAPS = ("flags", "evaluators")  # read verbatim by the config source, never bound
 _DISABLED_STATUSES = (404, 403, 503)
 _STORE_DRIVERS = ("database", "memory")
 _FILE_SUFFIXES = (".json", ".yaml", ".yml")
+
+
+def _settings_only(config: Config) -> Config:
+    """*config* without the ``flags``/``evaluators`` maps of ``pyfly.feature-flags``, to bind the settings from.
+
+    ``Config.bind`` resolves the placeholders of the whole section it binds, and a flag definition may hold ``${``
+    as plain text (there is no escape syntax): resolving it would refuse a valid definition, without naming the flag.
+    Everything else stays, so the settings still resolve their own placeholders (against the environment and every
+    other key) and take their ``PYFLY_FEATURE_FLAGS_*`` overrides. *config* itself is not changed.
+    """
+    data = config.to_dict()
+    pyfly = data.get("pyfly")
+    section = pyfly.get("feature-flags") if isinstance(pyfly, dict) else None
+    if not isinstance(pyfly, dict) or not isinstance(section, dict):
+        return config
+    settings: dict[str, Any] = {key: value for key, value in section.items() if key not in _FLAG_MAPS}
+    data["pyfly"] = {**pyfly, "feature-flags": settings}
+    return Config(data)
 
 
 @dataclass
@@ -130,9 +147,10 @@ class FeatureFlagsProperties:
 
     @classmethod
     def from_config(cls, config: Config) -> FeatureFlagsProperties:
-        """Bind ``pyfly.feature-flags`` and validate it (a ``ValueError`` names the broken key)."""
+        """Bind ``pyfly.feature-flags`` (without the flag maps) and validate it (a ``ValueError`` names the broken
+        key)."""
         try:
-            properties = config.bind(cls)
+            properties = _settings_only(config).bind(cls)
         except (TypeError, ValueError) as error:  # a value binding cannot convert (disabled-status: abc)
             raise ValueError(f"{PREFIX}: {error}") from error
         properties.validate()
