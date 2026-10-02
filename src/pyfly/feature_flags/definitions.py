@@ -20,22 +20,26 @@ assert them as substrings, and LaraFly emits the same phrases); a message may ad
 An empty list (``[]``) where the contract expects an object (a flag's ``targeting`` or ``metadata``, the document's
 ``flags``, ``$evaluators`` or ``metadata``) stands for the empty object and is normalized to ``{}``: PHP cannot tell
 the two apart in native configuration arrays, so both frameworks accept it. A non-empty list is still an error.
+
+A definition nests at most :data:`MAX_DEFINITION_DEPTH` levels (``definition nests too deeply``). Every walk over a
+definition keeps a stack of its own, so a document nested thousands of levels deep, or one that contains itself, is
+refused without a ``RecursionError``.
 """
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import datetime as dt
 import math
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
     "FLAG_KEY_PATTERN",
     "FLAG_KINDS",
+    "MAX_DEFINITION_DEPTH",
     "FlagDefinitionError",
     "FlagDocument",
     "expired_keys",
@@ -53,6 +57,12 @@ FLAG_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 FLAG_KINDS: tuple[str, ...] = ("release", "experiment", "ops", "permission")
 """The values of the reserved ``metadata.kind``."""
+
+MAX_DEFINITION_DEPTH = 256
+"""The deepest a definition may nest (R-depth-validate): a flag definition, an evaluator rule or the document
+``metadata`` is level 1 and every object or array inside adds one. Validation and parsing walk with a stack of their
+own; the copies made downstream (composition, the provider, ``to_flagd``) are ``copy.deepcopy``, two frames a level, so
+256 levels need about 520 of Python's default 1000: a definition that validates never exhausts the stack there."""
 
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -120,37 +130,51 @@ def normalize_flags(flags: Mapping[Any, Any]) -> dict[Any, Any]:
 
     Every other value is deep-copied unchanged, for validation to judge.
     """
-    return {_text_key(raw_key): _normalized(value) for raw_key, value in flags.items()}
+    normalized: dict[Any, Any] = {}
+    for raw_key, value in flags.items():
+        expanded = _expanded(value)
+        normalized[_text_key(raw_key)] = copy.deepcopy(value) if expanded is value else expanded
+    return normalized
 
 
-def _normalized(value: Any) -> Any:
-    """One flag's value with the shorthand expanded, or a deep copy of it."""
+def _expanded(value: Any) -> Any:
+    """One flag's value with the shorthand expanded: a new definition, or *value* itself when it is none."""
     if isinstance(value, bool):
         return {"state": "ENABLED", "variants": {"on": True, "off": False}, "defaultVariant": "on" if value else "off"}
     if isinstance(value, str):
         return {"state": "ENABLED", "variants": {value: value}, "defaultVariant": value}
-    return copy.deepcopy(value)
-
-
-@contextlib.contextmanager
-def _not_too_deep(key: str, hint: str = "") -> Iterator[None]:
-    """Turn a ``RecursionError`` (copying a definition nested deeper than Python's stack allows) into the error of
-    the definition at *key*: a source keeps its last good document, a store write answers ``invalid-definition``."""
-    try:
-        yield
-    except RecursionError:
-        raise FlagDefinitionError(key, f"definition nests too deeply{hint}") from None
+    return value
 
 
 def _jsonable(value: Any) -> Any:
-    """Give YAML's ``date``/``datetime`` values back their ISO text, and int keys their text, at any depth."""
-    if isinstance(value, dt.date):  # datetime is a date subclass: both become isoformat() text
-        return value.isoformat()
-    if isinstance(value, Mapping):
-        return {_text_key(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(item) for item in value]
-    return value
+    """A copy of *value* (level 1) that gives YAML's ``date``/``datetime`` values their ISO text and int keys their
+    text, at any depth, in the source's order.
+
+    Walks with a stack of its own and rebuilds every container (a tuple becomes a list); scalars are shared. A *value*
+    nesting deeper than :data:`MAX_DEFINITION_DEPTH`, or containing itself (YAML anchors can build that), comes back
+    as it is, at the first container too deep: the depth rule refuses it, so converting it would be wasted work and,
+    for a cycle, never end.
+    """
+    root: list[Any] = [None]
+    pending: list[tuple[Any, Any, Any, int]] = [(value, root, 0, 1)]
+    while pending:
+        item, parent, slot, level = pending.pop()
+        if not isinstance(item, Mapping | list | tuple):
+            # datetime is a date subclass: both become isoformat() text
+            parent[slot] = item.isoformat() if isinstance(item, dt.date) else item
+            continue
+        if level > MAX_DEFINITION_DEPTH:
+            return value
+        if isinstance(item, Mapping):
+            members = [(_text_key(key), member) for key, member in item.items()]
+            copied: Any = dict.fromkeys(key for key, _ in members)  # claims every slot, in the source's order
+            # reversed: the last of two keys that read the same (1 and "1") is the one that stays
+            pending.extend((member, copied, key, level + 1) for key, member in reversed(members))
+        else:
+            copied = [None] * len(item)
+            pending.extend((member, copied, index, level + 1) for index, member in enumerate(item))
+        parent[slot] = copied
+    return root[0]
 
 
 def _value_class(value: Any) -> str:
@@ -192,22 +216,30 @@ def _scalars(values: Mapping[str, Any]) -> bool:
     return all(isinstance(value, str | int | float) for value in values.values())  # bool is an int
 
 
-def _non_finite(value: Any) -> bool:
-    """Whether a NaN or an infinity stands anywhere in *value*: YAML reads ``.nan``/``.inf``, JSON has neither.
+def _walk_reason(value: Any) -> str | None:
+    """Why *value* (a flag definition, an evaluator rule or the document ``metadata``: level 1) breaks the two rules
+    that reach its every corner, or ``None``.
 
-    Walks with a stack of its own, so a deeply nested definition cannot exhaust Python's.
+    ``definition nests too deeply`` when an object or an array sits deeper than :data:`MAX_DEFINITION_DEPTH` (reported
+    first, whatever else the walk met); otherwise ``numbers must be finite`` when a NaN or an infinity stands anywhere
+    (YAML reads ``.nan``/``.inf``, JSON has neither). Walks with a stack of its own and ends at the first container too
+    deep, so the work is bounded whatever the depth, and a structure that contains itself is refused, never looped on.
     """
-    pending = [value]
+    non_finite = False
+    pending = [(value, 1)]
     while pending:
-        item = pending.pop()
-        if isinstance(item, float):
-            if not math.isfinite(item):
-                return True
-        elif isinstance(item, Mapping):
-            pending.extend(item.values())
+        item, level = pending.pop()
+        if isinstance(item, Mapping):
+            members: Iterable[Any] = item.values()
         elif isinstance(item, list | tuple):
-            pending.extend(item)
-    return False
+            members = item
+        else:
+            non_finite = non_finite or (isinstance(item, float) and not math.isfinite(item))
+            continue
+        if level > MAX_DEFINITION_DEPTH:
+            return "definition nests too deeply"
+        pending.extend((member, level + 1) for member in members)
+    return "numbers must be finite" if non_finite else None
 
 
 def _metadata_key_reason(metadata: Mapping[Any, Any]) -> str | None:
@@ -221,14 +253,18 @@ def validate_flag(key: Any, definition: Any) -> None:
     """Raise :class:`FlagDefinitionError` with the contract message of the first rule *definition* breaks.
 
     The order is the contract's: key, object, state, variants, variant types, defaultVariant, targeting, metadata
-    scalars, then the reserved metadata keys, then finite numbers. An empty list stands for an empty object in
+    scalars, then the reserved metadata keys, then depth (``definition nests too deeply``: the definition is level 1 and
+    every object or array inside adds one, at most :data:`MAX_DEFINITION_DEPTH`), then finite numbers. Depth is checked
+    iteratively and before the numbers, so a definition too deep to walk is refused without inspecting them, and
+    nothing here recurses whatever the definition's depth. An empty list stands for an empty object in
     ``targeting`` and ``metadata`` (a non-empty one is refused); :func:`parse_document` stores it as ``{}``. A ``null``
     variant value is no flag value (``variants must share one type``), alone or beside others. The names of the
     metadata entries must be non-empty text (``metadata keys must be strings``, where an unquoted YAML ``on:`` is a
     boolean key and gets the YAML hint; ``metadata keys must not be empty``). Fields beside ``state``, ``variants``,
     ``defaultVariant``, ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields" rule), never an
-    error, but a NaN or an infinity anywhere in the definition, those fields included, is (``numbers must be finite``):
-    JSON cannot carry it, so the definition could be neither stored, served nor read by the other framework.
+    error, but a nesting too deep or a NaN or an infinity anywhere in the definition, those fields included, is
+    (``numbers must be finite``: JSON cannot carry it, so the definition could be neither stored, served nor read by
+    the other framework).
     """
     if not is_valid_key(key):
         raise FlagDefinitionError(str(key), "invalid flag key")
@@ -255,8 +291,8 @@ def validate_flag(key: Any, definition: Any) -> None:
     metadata = definition.get("metadata")
     if metadata is not None:
         _validate_flag_metadata(key, metadata)
-    if _non_finite(definition):
-        raise FlagDefinitionError(key, "numbers must be finite")
+    if (reason := _walk_reason(definition)) is not None:
+        raise FlagDefinitionError(key, reason)
 
 
 def _validate_flag_metadata(key: str, metadata: Any) -> None:
@@ -276,13 +312,12 @@ def _validate_flag_metadata(key: str, metadata: Any) -> None:
         raise FlagDefinitionError(key, "description must be a string")
 
 
-def _canonical(definition: Mapping[str, Any]) -> dict[str, Any]:
-    """A deep copy of a valid *definition* with an empty-list ``targeting`` or ``metadata`` stored as ``{}``."""
-    canonical = copy.deepcopy(dict(definition))
+def _canonical(definition: dict[str, Any]) -> dict[str, Any]:
+    """*definition*, a valid copy of its own, with an empty-list ``targeting`` or ``metadata`` stored as ``{}``."""
     for name in ("targeting", "metadata"):
-        if _is_empty_list(canonical.get(name)):
-            canonical[name] = {}
-    return canonical
+        if _is_empty_list(definition.get(name)):
+            definition[name] = {}
+    return definition
 
 
 def _section(raw: Mapping[Any, Any], name: str, reason: str) -> Mapping[Any, Any]:
@@ -316,41 +351,45 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     must not be empty either. A NaN or an infinity in an evaluator is refused with the key ``$evaluators`` (the
     reason names the evaluator), in the document ``metadata`` with the key ``metadata``.
 
-    A definition nested deeper than Python's stack lets it be copied is refused with ``definition nests too deeply``
-    (the flag key; ``$evaluators``, the reason naming the evaluator; ``<document>`` when even reading the document
-    runs out of stack), never a ``RecursionError``.
+    A definition nesting deeper than :data:`MAX_DEFINITION_DEPTH` levels is refused with ``definition nests too deeply``
+    (the flag's key; ``$evaluators``, the reason naming the evaluator, as for a rule that is not an object or a number
+    that is not finite), before any number is inspected. The document ``metadata`` takes the same walk after its own
+    rules, so a nested value there is reported as no scalar. Nothing here recurses: a document nested thousands of
+    levels deep, or one that contains itself, is refused as cheaply as a shallow one, never with a ``RecursionError``,
+    and everything that is stored is a copy of its own.
     """
     if not isinstance(raw, Mapping):
         raise FlagDefinitionError("<document>", "document must be an object")
-    with _not_too_deep("<document>"):
-        raw = _jsonable(raw)
     flags_in = _section(raw, "flags", "flags must be an object")
     flags: dict[str, dict[str, Any]] = {}
     for raw_key, value in flags_in.items():
         key = _text_key(raw_key)
-        with _not_too_deep(str(key)):
-            definition = _normalized(value) if shorthand else value
-            validate_flag(key, definition)
-            flags[key] = _canonical(definition)
-    evaluators_in = _section(raw, "$evaluators", "$evaluators must be an object")
+        definition = _jsonable(value)
+        if shorthand:
+            definition = _expanded(definition)
+        validate_flag(key, definition)
+        flags[key] = _canonical(definition)
+    evaluators_in = {
+        _text_key(name): rule for name, rule in _section(raw, "$evaluators", "$evaluators must be an object").items()
+    }
     if (reason := _non_text_names(evaluators_in, "evaluator names")) is not None:
         raise FlagDefinitionError("$evaluators", reason)
     evaluators: dict[str, dict[str, Any]] = {}
     for name, rule in evaluators_in.items():
         if not isinstance(rule, Mapping):
-            raise FlagDefinitionError(f"$evaluators.{name}", "targeting must be an object")
-        if _non_finite(rule):
-            raise FlagDefinitionError("$evaluators", f"numbers must be finite (evaluator {name!r})")
-        with _not_too_deep("$evaluators", f" (evaluator {name!r})"):
-            evaluators[name] = copy.deepcopy(dict(rule))
-    metadata = _section(raw, "metadata", "metadata must be an object")
+            raise FlagDefinitionError("$evaluators", f"targeting must be an object (evaluator {name!r})")
+        evaluator = _jsonable(rule)
+        if (reason := _walk_reason(evaluator)) is not None:
+            raise FlagDefinitionError("$evaluators", f"{reason} (evaluator {name!r})")
+        evaluators[name] = evaluator
+    metadata = _jsonable(_section(raw, "metadata", "metadata must be an object"))
     if not _scalars(metadata):
         raise FlagDefinitionError("metadata", "metadata values must be scalars")
     if (reason := _metadata_key_reason(metadata)) is not None:
         raise FlagDefinitionError("metadata", reason)
-    if _non_finite(metadata):
-        raise FlagDefinitionError("metadata", "numbers must be finite")
-    return FlagDocument(flags=flags, evaluators=evaluators, metadata=dict(metadata))
+    if (reason := _walk_reason(metadata)) is not None:
+        raise FlagDefinitionError("metadata", reason)
+    return FlagDocument(flags=flags, evaluators=evaluators, metadata=metadata)
 
 
 def is_expired(definition: Mapping[str, Any], today: dt.date) -> bool:

@@ -15,7 +15,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import json
+import sys
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -24,6 +28,7 @@ from openfeature.evaluation_context import EvaluationContext
 
 from pyfly.feature_flags.composition import Layer, compose
 from pyfly.feature_flags.definitions import (
+    MAX_DEFINITION_DEPTH,
     FlagDefinitionError,
     FlagDocument,
     expired_keys,
@@ -124,7 +129,11 @@ def test_unquoted_yaml_on_off_names_get_a_hint() -> None:
         ([1, 2], "<document>", "document must be an object"),
         ({"flags": [1]}, "flags", "flags must be an object"),
         ({"flags": {"x": 42}}, "x", "flag definition must be an object"),
-        ({"flags": {}, "$evaluators": {"beta": ["x"]}}, "$evaluators.beta", "targeting must be an object"),
+        (
+            {"flags": {}, "$evaluators": {"beta": ["x"]}},
+            "$evaluators",
+            "targeting must be an object (evaluator 'beta')",
+        ),
         ({"flags": {}, "metadata": {"tags": ["a"]}}, "metadata", "metadata values must be scalars"),
     ],
 )
@@ -297,33 +306,210 @@ def test_finite_floats_and_large_integers_are_numbers_like_any_other() -> None:
     assert parse_document({"flags": {"f": flag}}).flags["f"] == flag
 
 
-def _nested(levels: int) -> dict[str, Any]:
-    """A targeting object *levels* deep: {"!": [[[...["x"]...]]]}."""
-    node: Any = "x"
+def _nested(levels: int, bottom: Any = "x") -> dict[str, Any]:
+    """A targeting object *levels* containers deep: {"!": [[[...[bottom]...]]]}."""
+    node: Any = bottom
     for _ in range(levels - 1):
         node = [node]
     return {"!": node}
 
 
-def test_a_definition_nested_too_deeply_is_refused_not_a_crash() -> None:
-    """Copying a 600-level targeting runs out of Python's stack: that is the flag's error, never a RecursionError
-    (a store write must answer invalid-definition, a source must keep its last good document)."""
-    with pytest.raises(FlagDefinitionError) as raised:
-        parse_document({"flags": {"deep": bool_flag(targeting=_nested(600)), "fine": bool_flag()}})
-    assert (raised.value.key, raised.value.reason) == ("deep", "definition nests too deeply")
-    with pytest.raises(FlagDefinitionError) as raised:
-        parse_document({"flags": {"deep": bool_flag(targeting=_nested(600))}}, shorthand=True)
-    assert raised.value.key == "deep"
-    with pytest.raises(FlagDefinitionError) as raised:
-        parse_document({"flags": {}, "$evaluators": {"deep": _nested(600)}})
-    assert raised.value.key == "$evaluators"
-    assert raised.value.reason == "definition nests too deeply (evaluator 'deep')"
+def _nested_objects(levels: int, bottom: Any = "x") -> dict[str, Any]:
+    """An object *levels* containers deep, objects all the way: {"a": {"a": {...{"a": bottom}...}}}."""
+    node: Any = bottom
+    for _ in range(levels):
+        node = {"a": node}
+    return node
 
 
-def test_validate_flag_walks_a_deep_definition_without_recursing() -> None:
-    validate_flag("deep", bool_flag(targeting=_nested(5000)))
+def _deep_flag(position: str, levels: int, bottom: Any = "x") -> dict[str, Any]:
+    """A flag nesting exactly *levels* levels (the flag object is level 1), the chain sitting in *position*."""
+    if position == "targeting":
+        return bool_flag(targeting=_nested(levels - 1, bottom))
+    if position == "unknown-field":
+        return bool_flag(note=_nested(levels - 1, bottom))
+    assert position == "variants"  # flag (1) > variants (2) > an object-typed variant value
+    return {"state": "ENABLED", "variants": {"a": _nested(levels - 2, bottom), "b": {}}, "defaultVariant": "a"}
+
+
+POSITIONS = ["targeting", "variants", "unknown-field"]
+TOO_DEEP = "definition nests too deeply"
+
+
+@pytest.mark.parametrize("shorthand", [False, True], ids=["document", "shorthand"])
+@pytest.mark.parametrize("position", POSITIONS)
+def test_a_flag_may_nest_256_levels_and_not_257(position: str, shorthand: bool) -> None:
+    """The flag object is level 1 and each object or array inside adds one, in every field a flag can carry."""
+    assert MAX_DEFINITION_DEPTH == 256
+    definition = _deep_flag(position, MAX_DEFINITION_DEPTH)
+    assert parse_document({"flags": {"deep": definition}}, shorthand=shorthand).flags["deep"] == definition
+    validate_flag("deep", definition)
+    too_deep = _deep_flag(position, MAX_DEFINITION_DEPTH + 1)
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"fine": bool_flag(), "deep": too_deep}}, shorthand=shorthand)
+    assert (raised.value.key, raised.value.reason) == ("deep", TOO_DEEP)
+    with pytest.raises(FlagDefinitionError) as raised:
+        validate_flag("deep", too_deep)
+    assert (raised.value.key, raised.value.reason) == ("deep", TOO_DEEP)
+
+
+def test_an_evaluator_rule_may_nest_256_levels_and_not_257() -> None:
+    """The rule's own object is level 1, so an evaluator may nest one level deeper than a flag's targeting."""
+    rule = _nested(MAX_DEFINITION_DEPTH)
+    assert parse_document({"flags": {}, "$evaluators": {"deep": rule}}).evaluators == {"deep": rule}
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {}, "$evaluators": {"fine": {"var": "a"}, "deep": _nested(MAX_DEFINITION_DEPTH + 1)}})
+    assert (raised.value.key, raised.value.reason) == ("$evaluators", f"{TOO_DEEP} (evaluator 'deep')")
+
+
+@pytest.mark.parametrize("shape", [_nested, _nested_objects], ids=["arrays", "objects"])
+def test_a_definition_nested_thousands_of_levels_is_refused_not_a_crash(shape: Any) -> None:
+    """Nothing recurses: a 5000-level definition is the flag's error, never a RecursionError (a store write answers
+    invalid-definition, a source keeps its last good document)."""
+    deep = shape(5000)
+    for shorthand in (False, True):
+        with pytest.raises(FlagDefinitionError) as raised:
+            parse_document({"flags": {"deep": bool_flag(targeting=deep), "fine": bool_flag()}}, shorthand=shorthand)
+        assert (raised.value.key, raised.value.reason) == ("deep", TOO_DEEP)
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {}, "$evaluators": {"deep": deep}})
+    assert (raised.value.key, raised.value.reason) == ("$evaluators", f"{TOO_DEEP} (evaluator 'deep')")
+    with pytest.raises(FlagDefinitionError) as raised:
+        validate_flag("deep", bool_flag(note=deep))
+    assert (raised.value.key, raised.value.reason) == ("deep", TOO_DEEP)
+
+
+def test_a_document_nested_thousands_of_levels_in_a_section_is_refused_in_its_place() -> None:
+    """A deep value in a metadata is no scalar (that rule comes first), and no section is read recursively."""
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {}, "metadata": {"deep": _nested(5000)}})
+    assert (raised.value.key, raised.value.reason) == ("metadata", "metadata values must be scalars")
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"deep": bool_flag(metadata={"deep": _nested(5000)})}})
+    assert (raised.value.key, raised.value.reason) == ("deep", "metadata values must be scalars")
+
+
+@pytest.mark.parametrize("position", POSITIONS)
+@pytest.mark.parametrize("not_finite", [float("inf"), float("nan")], ids=["inf", "nan"])
+def test_depth_is_reported_before_a_number_that_is_not_finite(position: str, not_finite: float) -> None:
+    """A value too deep to walk is refused before its numbers are inspected (the contract's reporting order)."""
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"deep": _deep_flag(position, 5000, bottom=not_finite)}})
+    assert raised.value.reason == TOO_DEEP
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"deep": _deep_flag(position, MAX_DEFINITION_DEPTH + 1, bottom=not_finite)}})
+    assert raised.value.reason == TOO_DEEP
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"deep": bool_flag(note=not_finite, targeting=_nested(5000))}})
+    assert raised.value.reason == TOO_DEEP  # the number comes first in the definition, the depth still wins
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {}, "$evaluators": {"deep": _nested(5000, bottom=not_finite)}})
+    assert (raised.value.key, raised.value.reason) == ("$evaluators", f"{TOO_DEEP} (evaluator 'deep')")
+    # within the limit the number is what is wrong
     with pytest.raises(FlagDefinitionError, match="numbers must be finite"):
-        validate_flag("deep", bool_flag(targeting={"<": [{"var": "x"}, _nested(5000), float("inf")]}))
+        parse_document({"flags": {"deep": _deep_flag(position, MAX_DEFINITION_DEPTH, bottom=not_finite)}})
+    with pytest.raises(FlagDefinitionError, match="numbers must be finite"):
+        parse_document({"flags": {}, "$evaluators": {"deep": _nested(MAX_DEFINITION_DEPTH, bottom=not_finite)}})
+
+
+@pytest.mark.parametrize(
+    ("broken", "reason"),
+    [
+        pytest.param({"state": "ON"}, "state must be ENABLED or DISABLED", id="state"),
+        pytest.param({"variants": {"on": True, "off": 1}}, "variants must share one type", id="variant-types"),
+        pytest.param({"targeting": []}, TOO_DEEP, id="empty-targeting-list"),
+        pytest.param(
+            {"metadata": {"kind": "other"}}, "kind must be one of release, experiment, ops, permission", id="kind"
+        ),
+    ],
+)
+def test_depth_comes_after_every_rule_but_the_numbers(broken: dict[str, Any], reason: str) -> None:
+    """The first broken rule in the contract's order is the one reported: depth is last, ahead of the numbers only."""
+    definition = bool_flag(note=_nested(5000), **broken)
+    with pytest.raises(FlagDefinitionError) as raised:
+        validate_flag("deep", definition)
+    assert raised.value.reason == reason
+
+
+def test_a_definition_that_contains_itself_is_refused_as_too_deep() -> None:
+    """YAML anchors can build a cycle; the walks end at the first container past the limit, however they branch."""
+    document = yaml.safe_load(
+        "flags:\n  loop:\n    state: ENABLED\n    variants: {a: 1}\n    note: &loop [*loop, *loop]\n"
+    )
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document(document)
+    assert (raised.value.key, raised.value.reason) == ("loop", TOO_DEEP)
+    rule = yaml.safe_load("&loop {or: [*loop, *loop]}")
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {}, "$evaluators": {"loop": rule}})
+    assert (raised.value.key, raised.value.reason) == ("$evaluators", f"{TOO_DEEP} (evaluator 'loop')")
+
+
+def test_the_reading_of_a_definition_keeps_its_order_and_gives_dates_and_int_keys_their_text() -> None:
+    raw = {
+        "flags": {
+            "f": bool_flag(
+                targeting={"in": [{"var": "day"}, (dt.date(2026, 1, 2), dt.datetime(2026, 1, 2, 3, 4, 5))]},
+                note={"z": 1, 2: {"y": [3, {4: "four"}]}, "a": 5},
+            ),
+            "b": bool_flag(),
+            "a": bool_flag(),
+        },
+        "$evaluators": {"later": {"==": [1, 1]}, "earlier": {"==": [2, 2]}, 7: {"==": [3, 3]}},
+        "metadata": {"since": dt.date(2026, 3, 4), "name": "x"},
+    }
+    document = parse_document(raw)
+    assert list(document.flags) == ["f", "b", "a"]
+    assert document.flags["f"]["targeting"] == {"in": [{"var": "day"}, ["2026-01-02", "2026-01-02T03:04:05"]]}
+    assert document.flags["f"]["note"] == {"z": 1, "2": {"y": [3, {"4": "four"}]}, "a": 5}
+    assert list(document.flags["f"]["note"]) == ["z", "2", "a"]
+    assert list(document.evaluators) == ["later", "earlier", "7"]
+    assert document.metadata == {"since": "2026-03-04", "name": "x"}
+    # a copy of its own: the document never shares a container with the input
+    assert document.flags["f"]["note"]["2"]["y"] is not raw["flags"]["f"]["note"][2]["y"]
+    assert document.flags["f"]["variants"] is not raw["flags"]["f"]["variants"]
+    assert document.evaluators["later"] is not raw["$evaluators"]["later"]
+
+
+def test_of_two_keys_that_read_the_same_the_last_one_stays() -> None:
+    document = parse_document({"flags": {"f": bool_flag(note={1: "int", "1": "text"})}})
+    assert document.flags["f"]["note"] == {"1": "text"}
+
+
+def _frames() -> int:
+    frame, depth = sys._getframe(), 0
+    while frame is not None:
+        depth, frame = depth + 1, frame.f_back
+    return depth
+
+
+@contextlib.contextmanager
+def _headroom(frames: int) -> Iterator[None]:
+    """Run with only *frames* more Python frames than the caller's stack to spare."""
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(_frames() + frames)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+def test_a_definition_at_the_depth_limit_never_exhausts_the_stack_downstream() -> None:
+    """Parsing and validation never recurse. The copies made after them (composition, the provider, ``to_flagd``) do,
+    two frames a level: 256 levels need about 520 frames, so the limit leaves room in Python's default of 1000."""
+    raw = {
+        "flags": {f"deep-{position}": _deep_flag(position, MAX_DEFINITION_DEPTH) for position in POSITIONS},
+        "$evaluators": {"deep": _nested(MAX_DEFINITION_DEPTH)},
+    }
+    with _headroom(700):
+        document = parse_document(raw)
+        flagd = compose([Layer("config", document), Layer("store", document)]).to_flagd()
+        assert document.to_flagd() == flagd
+        provider = FireflyFlagProvider()
+        provider.update(flagd)
+        assert provider.document["flags"]["deep-variants"] == flagd["flags"]["deep-variants"]
+        assert provider.definition("deep-targeting") is not None
+        assert json.loads(json.dumps(flagd)) == flagd
 
 
 # An empty list stands for an empty object (CONTRACT.md, "Rules every definition must satisfy"): PHP cannot tell `[]`
