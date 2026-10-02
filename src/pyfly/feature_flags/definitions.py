@@ -20,11 +20,12 @@ assert them as substrings, and LaraFly emits the same phrases); a message may ad
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import datetime as dt
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -115,20 +116,26 @@ def normalize_flags(flags: Mapping[Any, Any]) -> dict[Any, Any]:
 
     Every other value is deep-copied unchanged, for validation to judge.
     """
-    normalized: dict[Any, Any] = {}
-    for raw_key, value in flags.items():
-        key = _text_key(raw_key)
-        if isinstance(value, bool):
-            normalized[key] = {
-                "state": "ENABLED",
-                "variants": {"on": True, "off": False},
-                "defaultVariant": "on" if value else "off",
-            }
-        elif isinstance(value, str):
-            normalized[key] = {"state": "ENABLED", "variants": {value: value}, "defaultVariant": value}
-        else:
-            normalized[key] = copy.deepcopy(value)
-    return normalized
+    return {_text_key(raw_key): _normalized(value) for raw_key, value in flags.items()}
+
+
+def _normalized(value: Any) -> Any:
+    """One flag's value with the shorthand expanded, or a deep copy of it."""
+    if isinstance(value, bool):
+        return {"state": "ENABLED", "variants": {"on": True, "off": False}, "defaultVariant": "on" if value else "off"}
+    if isinstance(value, str):
+        return {"state": "ENABLED", "variants": {value: value}, "defaultVariant": value}
+    return copy.deepcopy(value)
+
+
+@contextlib.contextmanager
+def _not_too_deep(key: str, hint: str = "") -> Iterator[None]:
+    """Turn a ``RecursionError`` (copying a definition nested deeper than Python's stack allows) into the error of
+    the definition at *key*: a source keeps its last good document, a store write answers ``invalid-definition``."""
+    try:
+        yield
+    except RecursionError:
+        raise FlagDefinitionError(key, f"definition nests too deeply{hint}") from None
 
 
 def _jsonable(value: Any) -> Any:
@@ -177,13 +184,20 @@ def _scalars(values: Mapping[str, Any]) -> bool:
 
 
 def _non_finite(value: Any) -> bool:
-    """Whether a NaN or an infinity stands anywhere in *value*: YAML reads ``.nan``/``.inf``, JSON has neither."""
-    if isinstance(value, float):
-        return not math.isfinite(value)
-    if isinstance(value, Mapping):
-        return any(_non_finite(item) for item in value.values())
-    if isinstance(value, list | tuple):
-        return any(_non_finite(item) for item in value)
+    """Whether a NaN or an infinity stands anywhere in *value*: YAML reads ``.nan``/``.inf``, JSON has neither.
+
+    Walks with a stack of its own, so a deeply nested definition cannot exhaust Python's.
+    """
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                return True
+        elif isinstance(item, Mapping):
+            pending.extend(item.values())
+        elif isinstance(item, list | tuple):
+            pending.extend(item)
     return False
 
 
@@ -275,16 +289,23 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed. A document ``metadata`` key
     must not be empty either. A NaN or an infinity in an evaluator is refused with the key ``$evaluators`` (the
     reason names the evaluator), in the document ``metadata`` with the key ``metadata``.
+
+    A definition nested deeper than Python's stack lets it be copied is refused with ``definition nests too deeply``
+    (the flag key; ``$evaluators``, the reason naming the evaluator; ``<document>`` when even reading the document
+    runs out of stack), never a ``RecursionError``.
     """
     if not isinstance(raw, Mapping):
         raise FlagDefinitionError("<document>", "flag definition must be an object")
-    raw = _jsonable(raw)
+    with _not_too_deep("<document>"):
+        raw = _jsonable(raw)
     flags_in = _section(raw, "flags", "flags must be an object")
-    candidates = normalize_flags(flags_in) if shorthand else {_text_key(k): v for k, v in flags_in.items()}
     flags: dict[str, dict[str, Any]] = {}
-    for key, definition in candidates.items():
-        validate_flag(key, definition)
-        flags[key] = copy.deepcopy(dict(definition))
+    for raw_key, value in flags_in.items():
+        key = _text_key(raw_key)
+        with _not_too_deep(str(key)):
+            definition = _normalized(value) if shorthand else value
+            validate_flag(key, definition)
+            flags[key] = copy.deepcopy(dict(definition))
     evaluators_in = _section(raw, "$evaluators", "$evaluators must be an object")
     if (reason := _non_text_names(evaluators_in, "evaluator names")) is not None:
         raise FlagDefinitionError("$evaluators", reason)
@@ -294,7 +315,8 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
             raise FlagDefinitionError(f"$evaluators.{name}", "targeting must be an object")
         if _non_finite(rule):
             raise FlagDefinitionError("$evaluators", f"numbers must be finite (evaluator {name!r})")
-        evaluators[name] = copy.deepcopy(dict(rule))
+        with _not_too_deep("$evaluators", f" (evaluator {name!r})"):
+            evaluators[name] = copy.deepcopy(dict(rule))
     metadata = _section(raw, "metadata", "metadata must be an object")
     if not _scalars(metadata):
         raise FlagDefinitionError("metadata", "metadata values must be scalars")

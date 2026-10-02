@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
+from pyfly.feature_flags._references import referenced_evaluator
 from pyfly.feature_flags.composition import ComposedFlag, Composition, Layer, compose
 from pyfly.feature_flags.definitions import FlagDocument, expired_keys, parse_document, utc_today
 from pyfly.feature_flags.events import FeatureFlagsChanged
@@ -81,11 +82,11 @@ def _same(left: Any, right: Any) -> bool:
 
 
 def _refs(value: Any, names: set[str]) -> None:
-    """Add to *names* every evaluator *value* names in a ``{"$ref": name}`` object, at any depth."""
-    if isinstance(value, Mapping):
-        ref = value.get("$ref")
-        if isinstance(ref, str):
-            names.add(ref)
+    """Add to *names* every evaluator *value* references, at any depth: the provider's rule, a ``{"$ref": name}``
+    object with exactly one key (an object that also holds other keys is not a reference)."""
+    if (name := referenced_evaluator(value)) is not None:
+        names.add(name)
+    elif isinstance(value, Mapping):
         for item in value.values():
             _refs(item, names)
     elif isinstance(value, list | tuple):

@@ -160,6 +160,8 @@ async def test_an_evaluator_change_publishes_the_keys_that_depend_on_it() -> Non
                 "static": bool_flag(),
                 # Only targeting is expanded: a variant that looks like a reference is a value.
                 "literal": {"state": "ENABLED", "variants": {"ref": {"$ref": "is-beta"}, "none": {}}},
+                # A reference is an object with exactly one key: this one is not, so it depends on nothing.
+                "lookalike": bool_flag("off", targeting={"if": [{"$ref": "is-beta", "other": 1}, "on", "off"]}),
             },
             "$evaluators": {
                 "is-beta": {"in": [{"var": "role"}, beta_roles]},

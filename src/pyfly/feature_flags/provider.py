@@ -27,9 +27,11 @@ object (one key, a text value) is replaced by the named evaluator, itself expand
 A missing name or a cycle leaves the reference in place, and so does a flag whose targeting would expand to more than
 :data:`EXPANSION_LIMIT` JSON values or nest deeper than :data:`DEPTH_LIMIT` levels (its whole targeting becomes an
 unresolvable reference): FlagdCore knows no ``$ref`` operation, so evaluating that flag is a ``PARSE_ERROR`` while
-the rest of the document loads. Both limits are decided in one bounded pass that never recurses deeper than the depth
-limit (a reference to a reference is followed in a loop), so neither a fan-out nor a long chain of references can
-exhaust memory or the stack; only a flag within both limits is expanded.
+the rest of the document loads. Every reference resolved along the way costs one unit of the value budget too
+(R-ref-budget), so references to references are bounded like everything else. Both limits are decided in one pass
+that spends at most the budget and never recurses deeper than the depth limit (a reference to a reference is
+followed in a loop), so neither a fan-out nor a long chain of references can exhaust time, memory or the stack; only
+a flag within both limits is expanded.
 """
 
 from __future__ import annotations
@@ -46,13 +48,16 @@ from openfeature.event import ProviderEventDetails
 from openfeature.flag_evaluation import FlagResolutionDetails, FlagValueType
 from openfeature.provider import AbstractProvider, Metadata
 
+from pyfly.feature_flags._references import referenced_evaluator
+
 __all__ = ["DEPTH_LIMIT", "EXPANSION_LIMIT", "PROVIDER_NAME", "FireflyFlagProvider"]
 
 PROVIDER_NAME = "firefly"
 """The provider's name in OpenFeature metadata, the actuator and the health details."""
 
 EXPANSION_LIMIT = 10_000
-"""The most JSON values a flag's targeting may expand to; every object, array and scalar counts one (spec 4.1)."""
+"""The most JSON values a flag's targeting may expand to; every object, array and scalar counts one, and so does
+every reference resolved along the way (spec 4.1)."""
 
 DEPTH_LIMIT = 128
 """The most nesting levels a flag's expanded targeting may have (spec 4.1): the targeting object is level 1, each
@@ -83,23 +88,19 @@ def _project(document: Mapping[str, Any]) -> dict[str, Any]:
     return projected
 
 
-def _reference(node: Any) -> str | None:
-    """The evaluator *node* references when it is a ``{"$ref": name}`` object (exactly one key, a text value)."""
-    if isinstance(node, Mapping) and len(node) == 1:
-        name = node.get("$ref")
-        if isinstance(name, str):
-            return name
-    return None
-
-
-def _follow(node: Any, evaluators: Mapping[str, Any], resolving: set[str]) -> tuple[Any, list[str]]:
-    """Follow *node* while it is a resolvable reference, in a loop: the node it stands for, and the evaluator names
-    entered on the way, now in *resolving* (the caller removes them once that node is done).
+def _follow(node: Any, evaluators: Mapping[str, Any], resolving: set[str], most: int) -> tuple[Any, list[str]]:
+    """Follow *node* while it is a resolvable reference, at most *most* of them, in a loop: the node reached, and the
+    evaluator names entered on the way, now in *resolving* (the caller removes them once that node is done).
 
     A reference is resolvable when its evaluator exists and is not already being resolved on this path (a cycle).
     """
     entered: list[str] = []
-    while (name := _reference(node)) is not None and name in evaluators and name not in resolving:
+    while (
+        len(entered) < most
+        and (name := referenced_evaluator(node)) is not None
+        and name in evaluators
+        and name not in resolving
+    ):
         resolving.add(name)
         entered.append(name)
         node = evaluators[name]
@@ -110,19 +111,19 @@ def _over_the_limits(targeting: Any, evaluators: Mapping[str, Any]) -> bool:
     """Whether *targeting*, its references expanded, holds more than :data:`EXPANSION_LIMIT` JSON values or nests
     deeper than :data:`DEPTH_LIMIT` levels.
 
-    Counts without building the expansion and stops as soon as a limit is passed, so a fan-out of references
-    (``2**20`` of them in the vectors) costs about :data:`EXPANSION_LIMIT` steps. It recurses once per level, and
-    stops at a container past the depth limit, so a long chain of references never exhausts the stack. An unresolved
-    reference counts as the object it is.
+    Counts without building the expansion and stops as soon as a limit is passed. Every step spends a unit of the
+    budget (a value, or a reference resolved: an unresolved one counts as the object it is), so a flag costs at most
+    :data:`EXPANSION_LIMIT` steps however its references fan out (``2**20`` of them in the vectors) or chain. It
+    recurses once per level and stops at a container past the depth limit, so it never exhausts the stack either.
     """
     budget = EXPANSION_LIMIT
     resolving: set[str] = set()
 
     def over(node: Any, level: int) -> bool:
         nonlocal budget
-        node, entered = _follow(node, evaluators, resolving)
+        node, entered = _follow(node, evaluators, resolving, budget + 1)
         try:
-            budget -= 1
+            budget -= len(entered) + 1  # each reference resolved, then the value it stands for
             if budget < 0:
                 return True
             if isinstance(node, Mapping):
@@ -143,8 +144,8 @@ def _over_the_limits(targeting: Any, evaluators: Mapping[str, Any]) -> bool:
 def _expand(node: Any, evaluators: Mapping[str, Any], resolving: set[str]) -> Any:
     """*node* with every resolvable reference replaced by its expanded evaluator: a new tree, strings untouched, and a
     missing name or a cycle left as its ``{"$ref": name}`` object. Only called within both limits, so it recurses at
-    most :data:`DEPTH_LIMIT` levels."""
-    node, entered = _follow(node, evaluators, resolving)
+    most :data:`DEPTH_LIMIT` levels and resolves fewer than :data:`EXPANSION_LIMIT` references."""
+    node, entered = _follow(node, evaluators, resolving, EXPANSION_LIMIT)
     try:
         if isinstance(node, Mapping):
             return {key: _expand(value, evaluators, resolving) for key, value in node.items()}

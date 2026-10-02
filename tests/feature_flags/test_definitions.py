@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any
 
 import pytest
 import yaml
@@ -292,3 +293,32 @@ def test_a_non_finite_number_in_an_evaluator_names_the_evaluator() -> None:
 def test_finite_floats_and_large_integers_are_numbers_like_any_other() -> None:
     flag = {"state": "ENABLED", "variants": {"a": 0.5, "b": 10**30}, "targeting": {"<": [{"var": "x"}, 1e308]}}
     assert parse_document({"flags": {"f": flag}}).flags["f"] == flag
+
+
+def _nested(levels: int) -> dict[str, Any]:
+    """A targeting object *levels* deep: {"!": [[[...["x"]...]]]}."""
+    node: Any = "x"
+    for _ in range(levels - 1):
+        node = [node]
+    return {"!": node}
+
+
+def test_a_definition_nested_too_deeply_is_refused_not_a_crash() -> None:
+    """Copying a 600-level targeting runs out of Python's stack: that is the flag's error, never a RecursionError
+    (a store write must answer invalid-definition, a source must keep its last good document)."""
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"deep": bool_flag(targeting=_nested(600)), "fine": bool_flag()}})
+    assert (raised.value.key, raised.value.reason) == ("deep", "definition nests too deeply")
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"deep": bool_flag(targeting=_nested(600))}}, shorthand=True)
+    assert raised.value.key == "deep"
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {}, "$evaluators": {"deep": _nested(600)}})
+    assert raised.value.key == "$evaluators"
+    assert raised.value.reason == "definition nests too deeply (evaluator 'deep')"
+
+
+def test_validate_flag_walks_a_deep_definition_without_recursing() -> None:
+    validate_flag("deep", bool_flag(targeting=_nested(5000)))
+    with pytest.raises(FlagDefinitionError, match="numbers must be finite"):
+        validate_flag("deep", bool_flag(targeting={"<": [{"var": "x"}, _nested(5000), float("inf")]}))

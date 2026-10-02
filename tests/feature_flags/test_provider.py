@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -210,9 +211,9 @@ def test_a_fan_out_of_references_is_a_parse_error_and_never_expanded() -> None:
 
 @pytest.mark.parametrize(("extra", "parse_error"), [(0, False), (1, True)], ids=["at-the-limit", "one-over"])
 def test_the_expansion_limit_counts_every_json_value(extra: int, parse_error: bool) -> None:
-    """{"if": [{"in": [{"var": "x"}, [...]]}, "on", "off"]} holds 9 values besides the list's items; a resolved
-    reference counts as what it expands to."""
-    items = [f"v{i}" for i in range(EXPANSION_LIMIT - 9 + extra)]
+    """{"if": [{"in": [{"var": "x"}, [...]]}, "on", "off"]} holds 9 values besides the list's items. Each flag
+    reaches them through one resolved reference, which counts one (R-ref-budget) and is replaced by what it names."""
+    items = [f"v{i}" for i in range(EXPANSION_LIMIT - 10 + extra)]
     provider = FireflyFlagProvider()
     provider.update(
         {
@@ -229,6 +230,37 @@ def test_the_expansion_limit_counts_every_json_value(extra: int, parse_error: bo
         assert _parse_error(provider, key, context) is parse_error
         if not parse_error:
             assert _evaluate(provider, key, False, context).value is True
+
+
+@pytest.mark.parametrize(("extra", "parse_error"), [(0, False), (1, True)], ids=["at-the-limit", "one-over"])
+def test_every_resolved_reference_costs_one_unit_of_the_budget(extra: int, parse_error: bool) -> None:
+    """alias-3 -> alias-2 -> alias-1 -> rule: four resolved references, plus the rule's 9 values and its items."""
+    items = [f"v{i}" for i in range(EXPANSION_LIMIT - 13 + extra)]
+    evaluators: dict[str, Any] = {"rule": {"if": [{"in": [{"var": "x"}, items]}, "on", "off"]}}
+    evaluators |= {"alias-1": {"$ref": "rule"}, "alias-2": {"$ref": "alias-1"}, "alias-3": {"$ref": "alias-2"}}
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"aliased": bool_flag("off", targeting={"$ref": "alias-3"})}, "$evaluators": evaluators})
+    context = EvaluationContext("u", {"x": "v0"})
+    assert _parse_error(provider, "aliased", context) is parse_error
+    if not parse_error:
+        assert _evaluate(provider, "aliased", False, context).value is True
+
+
+def test_a_long_chain_under_a_fan_out_is_refused_within_the_budget() -> None:
+    """The review's probe: 2 000 evaluators that each only name the next, a 14-level fan-out over the end of that
+    chain (16 384 references to it), and 20 flags on top. When references to references cost nothing, every one of
+    those references walked the whole chain for free: update() blocked the loop for 14 s."""
+    evaluators: dict[str, Any] = {"chain-0": {"==": [{"var": "tier"}, "gold"]}}
+    evaluators |= {f"chain-{i}": {"$ref": f"chain-{i - 1}"} for i in range(1, 2000)}
+    evaluators |= {"fan-0": {"$ref": "chain-1999"}}
+    evaluators |= {f"fan-{i}": {"or": [{"$ref": f"fan-{i - 1}"}, {"$ref": f"fan-{i - 1}"}]} for i in range(1, 15)}
+    flags = {f"flag-{n}": _segment("fan-14") for n in range(20)}
+    provider = FireflyFlagProvider()
+    started = time.perf_counter()
+    provider.update({"flags": flags, "$evaluators": evaluators})
+    assert time.perf_counter() - started < 2.0  # bounded by the budget; it took 14 s before every reference counted
+    gold = EvaluationContext("u", {"tier": "gold"})
+    assert all(_parse_error(provider, key, gold) for key in flags)
 
 
 @pytest.mark.parametrize(
