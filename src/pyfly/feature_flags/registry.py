@@ -34,6 +34,16 @@ document, the composition in force stays (and ``feature_flag_provider_update_fai
 - after a test-override change, the previous overrides are restored and :class:`FeatureFlagsError` is raised to the
   test.
 
+A source's failures are logged when they change, not on every poll: ``feature_flag_source_failed`` at WARNING when the
+source starts failing or its error text changes, at DEBUG while the same error repeats, and
+``feature_flag_source_recovered`` at INFO when a load succeeds again.
+
+Test overrides may be set from any thread (a test driving the application through Starlette's ``TestClient`` sets them
+from a thread without a loop): one lock serializes every change of the layers and its recomposition, and the
+``FeatureFlagsChanged`` of an override change is published on the loop the registry started on, handed over from
+another thread, or, when that loop is gone and the calling thread runs none, through a short-lived loop. It is never
+dropped.
+
 The registry starts in :data:`FEATURE_FLAGS_PHASE`. The context starts its lifecycle beans before it wires the
 ``@app_event_listener`` methods, so a registry built with ``hold_events=True`` (the auto-configuration's) keeps the
 events it publishes (the boot composition's, and any refresh before the context is refreshed) and releases them, in
@@ -44,11 +54,13 @@ order and once, when ``ContextRefreshedEvent`` reaches :meth:`FlagRegistry.on_co
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pyfly.context.events import ContextRefreshedEvent, app_event_listener
 from pyfly.feature_flags._references import referenced_evaluator
@@ -233,7 +245,12 @@ class FlagRegistry:
         self._composition = Composition()
         self._layers_accepted = True  # the layers are the ones the composition in force was built from
         self._tasks: list[asyncio.Task[None]] = []
-        self._pending: set[asyncio.Task[None]] = set()
+        # every change of the layers and its recomposition, from the loop or from a test's thread
+        self._lock = threading.RLock()
+        self._loop: asyncio.AbstractEventLoop | None = None  # the loop the registry started on
+        # override publishes until they settle: a task of a running loop, or a future of the registry's loop
+        self._pending: set[asyncio.Task[None] | concurrent.futures.Future[None]] = set()
+        self._pending_lock = threading.Lock()  # the done callbacks and the override changes run on several threads
         self._started = False
         self._hold_events = hold_events
         self._holding = hold_events  # until the context is refreshed
@@ -252,6 +269,7 @@ class FlagRegistry:
     async def start(self) -> None:
         if self._started:
             return
+        self._loop = asyncio.get_running_loop()
         for state in self._states:
             ticket = self._ticket(state)
             try:
@@ -261,13 +279,17 @@ class FlagRegistry:
                     raise FlagSourceError(state.source.name, error) from error
                 self._failed(state, ticket, error)
                 continue
-            self._loaded(state, ticket, snapshot)
-        try:
-            changed = self._recompose()
-        except _ProviderRefused as refused:  # which layer the provider objects to is unknown: no source is named
-            raise FeatureFlagsError(
-                f"the feature flag provider refused the startup composition: {refused}"
-            ) from refused.__cause__
+            with self._lock:
+                before = state.error
+                self._loaded(state, ticket, snapshot)
+                self._report(state, before)
+        with self._lock:
+            try:
+                changed = self._recompose()
+            except _ProviderRefused as refused:  # which layer the provider objects to is unknown: no source is named
+                raise FeatureFlagsError(
+                    f"the feature flag provider refused the startup composition: {refused}"
+                ) from refused.__cause__
         for key in self.expired_keys():
             flag = self._composition.flags[key]
             _logger.warning(
@@ -288,8 +310,7 @@ class FlagRegistry:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        if self._pending:
-            await asyncio.gather(*list(self._pending), return_exceptions=True)
+        await self._drain_pending()
         for state in self._states:
             try:
                 await state.source.close()
@@ -332,22 +353,34 @@ class FlagRegistry:
         except Exception as error:  # noqa: BLE001 — the last good document stays; status says why
             self._failed(state, ticket, error)
             return []
-        last_good = (state.document, state.revision, state.last_refresh)
-        attributable = self._layers_accepted  # every other layer is in the composition in force
-        if not self._loaded(state, ticket, snapshot):
-            return []
-        try:
-            changed = self._recompose()
-        except _ProviderRefused as refused:
-            if attributable:  # this document alone was refused: the source keeps its last good one
-                state.document, state.revision, state.last_refresh = last_good
-                state.error = state.refusal = str(refused)
-                self._layers_accepted = True
-                _logger.warning("feature_flag_source_failed", extra={"source": name, "error": state.error})
-            return []
+        with self._lock:
+            changed = self._apply(state, ticket, snapshot)
         if changed:
             await self._publish(FeatureFlagsChanged(tuple(changed), name))
         return changed
+
+    def _apply(self, state: _SourceState, ticket: int, snapshot: SourceSnapshot | None) -> list[str]:
+        """Record a successful refresh of *state* and compose the new document it brought; the changed keys.
+
+        The caller holds the lock. The source's status change is logged once the outcome is known (a new document
+        the provider refuses is a failure, not a recovery)."""
+        before = state.error
+        last_good = (state.document, state.revision, state.last_refresh)
+        attributable = self._layers_accepted  # every other layer is in the composition in force
+        try:
+            if not self._loaded(state, ticket, snapshot):
+                return []
+            try:
+                return self._recompose()
+            except _ProviderRefused as refused:
+                if attributable:  # this document alone was refused: the source keeps its last good one
+                    state.document, state.revision, state.last_refresh = last_good
+                    state.error = state.refusal = str(refused)
+                    self._layers_accepted = True
+                return []
+        finally:
+            if state.applied == ticket:  # a load that finished after a newer one changed nothing
+                self._report(state, before)
 
     async def refresh_all(self) -> list[str]:
         changed: set[str] = set()
@@ -378,11 +411,25 @@ class FlagRegistry:
         return True
 
     def _failed(self, state: _SourceState, ticket: int, error: BaseException) -> None:
-        if ticket < state.applied:
+        with self._lock:
+            if ticket < state.applied:
+                return
+            state.applied = ticket
+            before = state.error
+            state.error = f"{type(error).__name__}: {error}"
+            self._report(state, before)
+
+    @staticmethod
+    def _report(state: _SourceState, before: str | None) -> None:
+        """Log the change of *state*'s error from *before*: WARNING when the source starts failing or fails
+        differently, DEBUG when the same error repeats, INFO when it recovers; nothing while it stays healthy."""
+        after, name = state.error, state.source.name
+        if after is None:
+            if before is not None:
+                _logger.info("feature_flag_source_recovered", extra={"source": name})
             return
-        state.applied = ticket
-        state.error = f"{type(error).__name__}: {error}"
-        _logger.warning("feature_flag_source_failed", extra={"source": state.source.name, "error": state.error})
+        level = logging.DEBUG if after == before else logging.WARNING
+        _logger.log(level, "feature_flag_source_failed", extra={"source": name, "error": after})
 
     def _layers(self, *, include_test_overrides: bool) -> list[Layer]:
         layers = [Layer(state.source.name, state.document) for state in self._states if state.document is not None]
@@ -391,7 +438,8 @@ class FlagRegistry:
         return layers
 
     def _recompose(self) -> list[str]:
-        """Compose the layers and push the result into the provider; returns the changed keys.
+        """Compose the layers and push the result into the provider; returns the changed keys. The caller holds the
+        lock.
 
         Composing and pushing are synchronous, so no reader sees a half-applied set. Raises :class:`_ProviderRefused`
         when the provider refuses the document, which keeps evaluating the previous one.
@@ -427,15 +475,50 @@ class FlagRegistry:
             _logger.warning("feature_flag_event_listener_failed", extra={"event": type(event).__name__}, exc_info=True)
 
     def _publish_soon(self, event: object) -> None:
-        """Publish from synchronous code: on the running loop when there is one."""
+        """Publish from synchronous code, on any thread: on the loop the registry started on while it runs (a task
+        when that is the calling thread's loop, handed over from any other thread), otherwise on the calling thread's
+        running loop, otherwise through a short-lived loop, synchronously. Never dropped."""
+        loop = self._loop
         try:
-            loop = asyncio.get_running_loop()
+            running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
-            _logger.debug("feature_flag_event_not_published", extra={"event": type(event).__name__})
+            running = None
+        if loop is not None and loop is not running and loop.is_running():
+            publish = self._publish(event)
+            try:
+                self._track(asyncio.run_coroutine_threadsafe(publish, loop))
+                return
+            except RuntimeError:
+                publish.close()  # the registry's loop closed under us: nobody is left to run it
+        if running is not None:
+            self._track(running.create_task(self._publish(event)))
             return
-        task = loop.create_task(self._publish(event))
-        self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+        asyncio.run(self._publish(event))
+
+    def _track(self, handle: asyncio.Task[None] | concurrent.futures.Future[None]) -> None:
+        with self._pending_lock:
+            self._pending.add(handle)
+        handle.add_done_callback(self._settled)
+
+    def _settled(self, handle: asyncio.Future[Any] | concurrent.futures.Future[Any]) -> None:
+        with self._pending_lock:
+            self._pending.discard(cast("Any", handle))
+
+    async def _drain_pending(self) -> None:
+        """Await every override publish scheduled so far that this loop can see finish: the tasks of this loop and
+        the publishes handed over to the registry's loop. A task of another loop belongs to that loop."""
+        current = asyncio.get_running_loop()
+        while True:
+            with self._pending_lock:
+                handles = [handle for handle in self._pending if not handle.done()]
+            waits = [
+                asyncio.wrap_future(handle) if isinstance(handle, concurrent.futures.Future) else handle
+                for handle in handles
+                if isinstance(handle, concurrent.futures.Future) or handle.get_loop() is current
+            ]
+            if not waits:
+                return
+            await asyncio.gather(*waits, return_exceptions=True)
 
     # -- reading ---------------------------------------------------------------------------------------------
 
@@ -443,37 +526,53 @@ class FlagRegistry:
         return name in self._by_name
 
     def sources(self) -> list[SourceStatus]:
-        return [
-            SourceStatus(
-                name=state.source.name,
-                enabled=True,
-                status=state.status,
-                flags=len(state.document.flags) if state.document is not None else 0,
-                last_refresh=state.last_refresh,
-                error=state.error,
-                revision=state.revision,
-            )
-            for state in self._states
-        ]
+        with self._lock:
+            return [
+                SourceStatus(
+                    name=state.source.name,
+                    enabled=True,
+                    status=state.status,
+                    flags=len(state.document.flags) if state.document is not None else 0,
+                    last_refresh=state.last_refresh,
+                    error=state.error,
+                    revision=state.revision,
+                )
+                for state in self._states
+            ]
 
     def composition(self) -> Composition:
+        """The composition in force, the registry's own object: **read-only**.
+
+        The registry never mutates a composition (every change composes a new one), so it is safe to read from any
+        thread, but neither may a caller: changing it, or a definition inside it, would desynchronize it from the
+        document the provider evaluates. Copy it (``copy.deepcopy``) before building a changed definition.
+        """
         return self._composition
 
     def effective_flag(self, key: str) -> ComposedFlag | None:
+        """The composed flag *key* in force, or ``None``: the registry's own object, **read-only** (see
+        :meth:`composition`); copy its ``definition`` before changing it."""
         return self._composition.flags.get(key)
 
     def layers(self, key: str) -> list[tuple[str, dict[str, Any]]]:
-        return [
-            (layer.source, dict(layer.document.flags[key]))
-            for layer in self._layers(include_test_overrides=True)
-            if key in layer.document.flags
-        ]
+        """Each layer's definition of *key*, lowest precedence first, as ``(source, definition)``.
+
+        Each definition is a shallow copy whose nested values (``variants``, ``targeting``, ``metadata``) are the
+        layer's own: **read-only**, copy (``copy.deepcopy``) before changing.
+        """
+        with self._lock:
+            return [
+                (layer.source, dict(layer.document.flags[key]))
+                for layer in self._layers(include_test_overrides=True)
+                if key in layer.document.flags
+            ]
 
     def document(self, *, include_test_overrides: bool = True) -> dict[str, Any]:
-        """The effective set as a flagd document; the sync server leaves test overrides out."""
-        if include_test_overrides or self._overrides is None:
-            return self._composition.to_flagd()
-        return compose(self._layers(include_test_overrides=False)).to_flagd()
+        """The effective set as a flagd document (a copy of its own); the sync server leaves test overrides out."""
+        with self._lock:
+            if include_test_overrides or self._overrides is None:
+                return self._composition.to_flagd()
+            return compose(self._layers(include_test_overrides=False)).to_flagd()
 
     def expired_keys(self) -> list[str]:
         flags = {key: flag.definition for key, flag in self._composition.flags.items()}
@@ -483,13 +582,15 @@ class FlagRegistry:
 
     @property
     def test_overrides(self) -> dict[str, Any]:
-        return dict(self._override_flags)
+        with self._lock:
+            return dict(self._override_flags)
 
     def set_test_overrides(self, flags: Mapping[str, Any]) -> list[str]:
         """Install *flags* (shorthand allowed) as the highest layer; returns the changed keys.
 
         Raises :class:`~pyfly.feature_flags.definitions.FlagDefinitionError` for an invalid definition, and
-        :class:`FeatureFlagsError` when the provider refuses the result; either way the previous overrides stay.
+        :class:`FeatureFlagsError` when the provider refuses the result; either way the previous overrides stay. Safe
+        from any thread (see the module documentation).
         """
         return self._replace_overrides(parse_document({"flags": dict(flags)}, shorthand=True), dict(flags))
 
@@ -498,15 +599,16 @@ class FlagRegistry:
         return self._replace_overrides(None, {})
 
     def _replace_overrides(self, overrides: FlagDocument | None, flags: dict[str, Any]) -> list[str]:
-        previous = self._overrides, self._override_flags, self._layers_accepted
-        self._overrides, self._override_flags = overrides, flags
-        try:
-            changed = self._recompose()
-        except _ProviderRefused as refused:  # the layers are the ones in force again
-            self._overrides, self._override_flags, self._layers_accepted = previous
-            raise FeatureFlagsError(
-                f"the feature flag provider refused the test overrides: {refused}"
-            ) from refused.__cause__
+        with self._lock:
+            previous = self._overrides, self._override_flags, self._layers_accepted
+            self._overrides, self._override_flags = overrides, flags
+            try:
+                changed = self._recompose()
+            except _ProviderRefused as refused:  # the layers are the ones in force again
+                self._overrides, self._override_flags, self._layers_accepted = previous
+                raise FeatureFlagsError(
+                    f"the feature flag provider refused the test overrides: {refused}"
+                ) from refused.__cause__
         if changed:
             self._publish_soon(FeatureFlagsChanged(tuple(changed), TEST_OVERRIDES))
         return changed

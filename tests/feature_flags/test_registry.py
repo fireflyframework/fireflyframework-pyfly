@@ -19,6 +19,7 @@ import asyncio
 import copy
 import datetime as dt
 import logging
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -573,3 +574,149 @@ def test_the_registry_starts_in_the_feature_flags_phase() -> None:
     """After the datasource, the migrations and the schema (the store needs them), before the application's beans."""
     assert lifecycle_phase(FlagRegistry([], FireflyFlagProvider())) == FEATURE_FLAGS_PHASE
     assert MIGRATION_PHASE < SCHEMA_PHASE < FEATURE_FLAGS_PHASE < DEFAULT_PHASE
+
+
+# -- source failures are logged on change, not on every poll ------------------------------------------------------
+
+
+def _source_records(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str, str | None]]:
+    return [
+        (record.levelno, record.getMessage(), getattr(record, "error", None))
+        for record in caplog.records
+        if record.name == _REGISTRY_LOGGER and record.getMessage().startswith("feature_flag_source_")
+    ]
+
+
+async def test_a_failing_source_warns_on_each_new_error_and_informs_once_when_it_recovers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    slow, down = TimeoutError("slow"), ConnectionError("down")
+    http = ScriptedSource("http", {"a": True}, slow, TimeoutError("slow"), TimeoutError("slow"), down, {"a": False})
+    registry = FlagRegistry([http], FireflyFlagProvider())
+    await registry.start()
+    with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
+        for _ in range(7):  # the last two loads answer "unchanged": nothing to say
+            await registry.refresh("http")
+    assert _source_records(caplog) == [
+        (logging.WARNING, "feature_flag_source_failed", "TimeoutError: slow"),
+        (logging.DEBUG, "feature_flag_source_failed", "TimeoutError: slow"),
+        (logging.DEBUG, "feature_flag_source_failed", "TimeoutError: slow"),
+        (logging.WARNING, "feature_flag_source_failed", "ConnectionError: down"),
+        (logging.INFO, "feature_flag_source_recovered", None),
+    ]
+    assert all(
+        getattr(record, "source", None) == "http" for record in caplog.records if record.name == _REGISTRY_LOGGER
+    )
+    await registry.stop()
+
+
+async def test_a_source_that_failed_at_startup_reports_its_recovery(caplog: pytest.LogCaptureFixture) -> None:
+    http = ScriptedSource("http", TimeoutError("slow"), {"a": True})
+    registry = FlagRegistry([http], FireflyFlagProvider())
+    with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
+        await registry.start()
+        await registry.refresh("http")
+    assert _source_records(caplog) == [
+        (logging.WARNING, "feature_flag_source_failed", "TimeoutError: slow"),
+        (logging.INFO, "feature_flag_source_recovered", None),
+    ]
+    await registry.stop()
+
+
+async def test_a_refused_document_is_reported_once_while_the_source_keeps_serving_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    http = DocumentSource("http", {"flags": {"a": bool_flag()}}, _refused_document("a"), None, None)
+    registry = FlagRegistry([http], FireflyFlagProvider())
+    await registry.start()
+    with caplog.at_level(logging.DEBUG, logger=_REGISTRY_LOGGER):
+        for _ in range(3):
+            await registry.refresh("http")
+    records = _source_records(caplog)
+    assert [(level, message) for level, message, _ in records] == [
+        (logging.WARNING, "feature_flag_source_failed"),
+        (logging.DEBUG, "feature_flag_source_failed"),
+        (logging.DEBUG, "feature_flag_source_failed"),
+    ]
+    assert len({error for _, _, error in records}) == 1 and str(records[0][2]).startswith("ParseError: ")
+    await registry.stop()
+
+
+# -- test overrides from any thread ------------------------------------------------------------------------------
+
+
+class LoopRecordingPublisher:
+    """Records every event and the loop it was published on."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+        self.loops: list[asyncio.AbstractEventLoop] = []
+
+    async def publish(self, event: object) -> None:
+        self.events.append(event)
+        self.loops.append(asyncio.get_running_loop())
+
+
+async def test_test_overrides_set_from_a_worker_thread_publish_on_the_registry_loop() -> None:
+    """A test driving the application through Starlette's TestClient sets overrides from a thread without a loop: the
+    change is handed to the loop the registry started on, never dropped."""
+    publisher = LoopRecordingPublisher()
+    registry = FlagRegistry(
+        [StaticSource("config", {"a": False})],
+        FireflyFlagProvider(),
+        publisher=publisher,  # type: ignore[arg-type]
+    )
+    await registry.start()
+    assert await asyncio.to_thread(registry.set_test_overrides, {"a": True}) == ["a"]
+    await wait_until(lambda: len(publisher.events) == 2)
+    assert publisher.events[-1] == FeatureFlagsChanged(("a",), TEST_OVERRIDES)
+    assert publisher.loops[-1] is asyncio.get_running_loop()
+    assert await asyncio.to_thread(registry.clear_test_overrides) == ["a"]
+    await registry.stop()  # drains the handed-over publish
+    assert publisher.events[-1] == FeatureFlagsChanged(("a",), TEST_OVERRIDES) and len(publisher.events) == 3
+
+
+def test_without_any_running_loop_test_overrides_publish_through_a_short_lived_one() -> None:
+    publisher, seen = recording_publisher()
+    registry = FlagRegistry([StaticSource("config", {"a": False})], FireflyFlagProvider(), publisher=publisher)
+    asyncio.run(registry.start())  # the loop the registry started on is closed afterwards
+    assert registry.set_test_overrides({"a": True}) == ["a"]
+    assert seen == [FeatureFlagsChanged(("a",), "startup"), FeatureFlagsChanged(("a",), TEST_OVERRIDES)]
+    asyncio.run(registry.stop())
+
+
+class RacingProvider(FireflyFlagProvider):
+    """While ``racing``, ``update`` waits (at most 0.3 s) for a second thread to be inside it too, and records whether
+    one was: a bounded rendezvous that ends the moment the second thread arrives (see ``RacingRecorder``)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.racing = False
+        self.overlapped = False
+        self._rendezvous = threading.Barrier(2)
+
+    def update(self, document: Any, *, changed_keys: Any = None) -> list[str]:
+        if self.racing:
+            try:
+                self._rendezvous.wait(timeout=0.3)
+                self.overlapped = True
+            except threading.BrokenBarrierError:
+                pass
+        return super().update(document, changed_keys=changed_keys)
+
+
+async def test_test_overrides_from_two_threads_never_recompose_at_the_same_time() -> None:
+    provider = RacingProvider()
+    registry = FlagRegistry([StaticSource("config", {"a": False, "b": False})], provider)
+    await registry.start()
+    provider.racing = True
+    await asyncio.gather(
+        asyncio.to_thread(registry.set_test_overrides, {"a": True}),
+        asyncio.to_thread(registry.set_test_overrides, {"b": True}),
+    )
+    assert not provider.overlapped
+    composition = registry.composition()
+    overridden = {key for key, flag in composition.flags.items() if flag.origin == TEST_OVERRIDES}
+    assert overridden == set(registry.test_overrides) and len(overridden) == 1  # the last writer's, consistently
+    assert provider.document == composition.to_flagd()
+    await registry.stop()
