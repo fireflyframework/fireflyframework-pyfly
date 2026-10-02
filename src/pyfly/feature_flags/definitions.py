@@ -16,6 +16,10 @@
 Everything here is plain Python over flagd documents, with no OpenFeature import, so sources, gating and test
 support use it without the ``feature-flags`` extra. Validation reports the contract's messages (the shared vectors
 assert them as substrings, and LaraFly emits the same phrases); a message may add a hint after the contract phrase.
+
+An empty list (``[]``) where the contract expects an object (a flag's ``targeting`` or ``metadata``, the document's
+``flags``, ``$evaluators`` or ``metadata``) stands for the empty object and is normalized to ``{}``: PHP cannot tell
+the two apart in native configuration arrays, so both frameworks accept it. A non-empty list is still an error.
 """
 
 from __future__ import annotations
@@ -169,6 +173,11 @@ def flag_type(definition: Mapping[str, Any]) -> str:
     return kind if kind in ("boolean", "string", "number") else "object"
 
 
+def _is_empty_list(value: Any) -> bool:
+    """Whether *value* is ``[]``, which stands for ``{}`` where the contract expects an object."""
+    return isinstance(value, list) and not value
+
+
 def _is_date(value: Any) -> bool:
     if not isinstance(value, str) or _DATE.fullmatch(value) is None:
         return False
@@ -212,12 +221,14 @@ def validate_flag(key: Any, definition: Any) -> None:
     """Raise :class:`FlagDefinitionError` with the contract message of the first rule *definition* breaks.
 
     The order is the contract's: key, object, state, variants, variant types, defaultVariant, targeting, metadata
-    scalars, then the reserved metadata keys, then finite numbers. The names of the metadata entries must be
-    non-empty text (``metadata keys must be strings``, where an unquoted YAML ``on:`` is a boolean key and gets the
-    YAML hint; ``metadata keys must not be empty``). Fields beside ``state``, ``variants``, ``defaultVariant``,
-    ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields" rule), never an error, but a NaN or an
-    infinity anywhere in the definition, those fields included, is (``numbers must be finite``): JSON cannot carry
-    it, so the definition could be neither stored, served nor read by the other framework.
+    scalars, then the reserved metadata keys, then finite numbers. An empty list stands for an empty object in
+    ``targeting`` and ``metadata`` (a non-empty one is refused); :func:`parse_document` stores it as ``{}``. A ``null``
+    variant value is no flag value (``variants must share one type``), alone or beside others. The names of the
+    metadata entries must be non-empty text (``metadata keys must be strings``, where an unquoted YAML ``on:`` is a
+    boolean key and gets the YAML hint; ``metadata keys must not be empty``). Fields beside ``state``, ``variants``,
+    ``defaultVariant``, ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields" rule), never an
+    error, but a NaN or an infinity anywhere in the definition, those fields included, is (``numbers must be finite``):
+    JSON cannot carry it, so the definition could be neither stored, served nor read by the other framework.
     """
     if not is_valid_key(key):
         raise FlagDefinitionError(str(key), "invalid flag key")
@@ -230,7 +241,8 @@ def validate_flag(key: Any, definition: Any) -> None:
         raise FlagDefinitionError(key, "variants must be a non-empty object")
     if not all(isinstance(name, str) for name in variants):
         raise FlagDefinitionError(key, f"variants must be a non-empty object with text names{_VARIANT_HINT}")
-    if len({_value_class(value) for value in variants.values()}) != 1:
+    classes = {_value_class(value) for value in variants.values()}
+    if len(classes) != 1 or "null" in classes:  # one JSON type, and null is not a flag value
         raise FlagDefinitionError(key, "variants must share one type")
     default_variant = definition.get("defaultVariant")
     if isinstance(default_variant, bool):
@@ -238,7 +250,7 @@ def validate_flag(key: Any, definition: Any) -> None:
     if default_variant is not None and (not isinstance(default_variant, str) or default_variant not in variants):
         raise FlagDefinitionError(key, "defaultVariant is not a variant")
     targeting = definition.get("targeting")
-    if targeting is not None and not isinstance(targeting, Mapping):
+    if targeting is not None and not isinstance(targeting, Mapping) and not _is_empty_list(targeting):
         raise FlagDefinitionError(key, "targeting must be an object")
     metadata = definition.get("metadata")
     if metadata is not None:
@@ -248,6 +260,8 @@ def validate_flag(key: Any, definition: Any) -> None:
 
 
 def _validate_flag_metadata(key: str, metadata: Any) -> None:
+    if _is_empty_list(metadata):
+        return
     if not isinstance(metadata, Mapping) or not _scalars(metadata):
         raise FlagDefinitionError(key, "metadata values must be scalars")
     if (reason := _metadata_key_reason(metadata)) is not None:
@@ -262,10 +276,20 @@ def _validate_flag_metadata(key: str, metadata: Any) -> None:
         raise FlagDefinitionError(key, "description must be a string")
 
 
+def _canonical(definition: Mapping[str, Any]) -> dict[str, Any]:
+    """A deep copy of a valid *definition* with an empty-list ``targeting`` or ``metadata`` stored as ``{}``."""
+    canonical = copy.deepcopy(dict(definition))
+    for name in ("targeting", "metadata"):
+        if _is_empty_list(canonical.get(name)):
+            canonical[name] = {}
+    return canonical
+
+
 def _section(raw: Mapping[Any, Any], name: str, reason: str) -> Mapping[Any, Any]:
-    """The document section *name*: empty when absent or null, otherwise it must be an object (even when falsy)."""
+    """The document section *name*: empty when absent, null or an empty list, otherwise it must be an object (even
+    when falsy)."""
     value = raw.get(name)
-    if value is None:
+    if value is None or _is_empty_list(value):
         return {}
     if not isinstance(value, Mapping):
         raise FlagDefinitionError(name, reason)
@@ -279,11 +303,13 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     dates become their ISO text first. The first broken rule rejects the whole document. A ``$ref`` naming no
     evaluator is accepted: evaluating that flag yields ``PARSE_ERROR``.
 
-    Each of the three sections is empty when absent or null; a present section that is not an object is rejected
-    whatever its value (``flags: false`` is an error, not an empty set). The error's ``key`` is the section name
-    (``flags``, ``$evaluators``, ``metadata``) and its reason ``<section> must be an object``; ``<document>`` is the
-    key when the document itself is not an object. A single flag entry that is not an object keeps the contract
-    phrase ``flag definition must be an object``, with the flag's key.
+    Each of the three sections is empty when absent, null or an empty list (``[]`` stands for ``{}``, as does a flag's
+    ``targeting: []`` or ``metadata: []``, stored as ``{}``); a present section that is not an object is rejected
+    whatever its value (``flags: false`` and ``flags: [x]`` are errors, not an empty set). The error's ``key`` is the
+    section name (``flags``, ``$evaluators``, ``metadata``) and its reason ``<section> must be an object``. A document
+    that is not an object at all is reported with the key ``<document>`` and ``document must be an object``. A single
+    flag entry that is not an object keeps the contract phrase ``flag definition must be an object``, with the flag's
+    key.
 
     The names of the evaluators and the keys of the document ``metadata`` must be text, as in a flag's ``metadata``:
     YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed. A document ``metadata`` key
@@ -295,7 +321,7 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     runs out of stack), never a ``RecursionError``.
     """
     if not isinstance(raw, Mapping):
-        raise FlagDefinitionError("<document>", "flag definition must be an object")
+        raise FlagDefinitionError("<document>", "document must be an object")
     with _not_too_deep("<document>"):
         raw = _jsonable(raw)
     flags_in = _section(raw, "flags", "flags must be an object")
@@ -305,7 +331,7 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
         with _not_too_deep(str(key)):
             definition = _normalized(value) if shorthand else value
             validate_flag(key, definition)
-            flags[key] = copy.deepcopy(dict(definition))
+            flags[key] = _canonical(definition)
     evaluators_in = _section(raw, "$evaluators", "$evaluators must be an object")
     if (reason := _non_text_names(evaluators_in, "evaluator names")) is not None:
         raise FlagDefinitionError("$evaluators", reason)

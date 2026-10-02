@@ -20,7 +20,9 @@ from typing import Any
 
 import pytest
 import yaml
+from openfeature.evaluation_context import EvaluationContext
 
+from pyfly.feature_flags.composition import Layer, compose
 from pyfly.feature_flags.definitions import (
     FlagDefinitionError,
     FlagDocument,
@@ -32,7 +34,8 @@ from pyfly.feature_flags.definitions import (
     parse_document,
     validate_flag,
 )
-from tests.feature_flags.support import bool_flag
+from pyfly.feature_flags.provider import FireflyFlagProvider
+from tests.feature_flags.support import bool_flag, bound_client
 
 
 def test_shorthand_expands_and_full_definitions_are_copied() -> None:
@@ -118,7 +121,7 @@ def test_unquoted_yaml_on_off_names_get_a_hint() -> None:
 @pytest.mark.parametrize(
     ("raw", "key", "reason"),
     [
-        ([1, 2], "<document>", "flag definition must be an object"),
+        ([1, 2], "<document>", "document must be an object"),
         ({"flags": [1]}, "flags", "flags must be an object"),
         ({"flags": {"x": 42}}, "x", "flag definition must be an object"),
         ({"flags": {}, "$evaluators": {"beta": ["x"]}}, "$evaluators.beta", "targeting must be an object"),
@@ -143,13 +146,12 @@ def test_an_absent_or_null_section_is_empty(section: str) -> None:
         ({"flags": False}, "flags", "flags must be an object"),
         ({"flags": 0}, "flags", "flags must be an object"),
         ({"flags": ""}, "flags", "flags must be an object"),
-        ({"flags": []}, "flags", "flags must be an object"),
+        ({"flags": ["a"]}, "flags", "flags must be an object"),
         ({"$evaluators": False}, "$evaluators", "$evaluators must be an object"),
         ({"$evaluators": 0}, "$evaluators", "$evaluators must be an object"),
-        ({"$evaluators": []}, "$evaluators", "$evaluators must be an object"),
+        ({"$evaluators": ["a"]}, "$evaluators", "$evaluators must be an object"),
         ({"metadata": False}, "metadata", "metadata must be an object"),
         ({"metadata": ""}, "metadata", "metadata must be an object"),
-        ({"metadata": []}, "metadata", "metadata must be an object"),
         ({"metadata": ["a"]}, "metadata", "metadata must be an object"),
     ],
 )
@@ -164,7 +166,7 @@ def test_a_present_section_that_is_not_an_object_is_rejected_even_when_falsy(
 
 def test_every_section_is_rejected_when_all_are_falsy_non_objects() -> None:
     with pytest.raises(FlagDefinitionError) as raised:
-        parse_document({"flags": False, "$evaluators": 0, "metadata": []})
+        parse_document({"flags": False, "$evaluators": 0, "metadata": ""})
     assert raised.value.key == "flags"
 
 
@@ -322,3 +324,122 @@ def test_validate_flag_walks_a_deep_definition_without_recursing() -> None:
     validate_flag("deep", bool_flag(targeting=_nested(5000)))
     with pytest.raises(FlagDefinitionError, match="numbers must be finite"):
         validate_flag("deep", bool_flag(targeting={"<": [{"var": "x"}, _nested(5000), float("inf")]}))
+
+
+# An empty list stands for an empty object (CONTRACT.md, "Rules every definition must satisfy"): PHP cannot tell `[]`
+# from `{}` in native configuration arrays, so both frameworks accept it in the five positions below.
+
+EMPTY_LIST_POSITIONS = [
+    pytest.param(
+        {"flags": {"p": bool_flag(targeting=[])}},
+        FlagDocument(flags={"p": bool_flag(targeting={})}),
+        id="flag-targeting",
+    ),
+    pytest.param(
+        {"flags": {"p": bool_flag(metadata=[])}},
+        FlagDocument(flags={"p": bool_flag(metadata={})}),
+        id="flag-metadata",
+    ),
+    pytest.param({"flags": []}, FlagDocument(), id="document-flags"),
+    pytest.param({"flags": {}, "$evaluators": []}, FlagDocument(), id="document-evaluators"),
+    pytest.param({"flags": {}, "metadata": []}, FlagDocument(), id="document-metadata"),
+]
+
+
+@pytest.mark.parametrize("shorthand", [False, True], ids=["document", "shorthand"])
+@pytest.mark.parametrize(("raw", "expected"), EMPTY_LIST_POSITIONS)
+def test_an_empty_list_is_normalized_to_an_empty_object(
+    raw: dict[str, Any], expected: FlagDocument, shorthand: bool
+) -> None:
+    document = parse_document(raw, shorthand=shorthand)
+    assert document == expected  # `[] == {}` is False: the normalized form is pinned, not just accepted
+    assert document.to_flagd() == {"flags": expected.flags}
+
+
+def test_an_empty_list_in_a_flag_is_normalized_in_the_copy_not_in_the_input() -> None:
+    raw = {"flags": {"p": bool_flag(targeting=[], metadata=[])}}
+    assert parse_document(raw).flags["p"]["targeting"] == {}
+    assert raw["flags"]["p"]["targeting"] == [] and raw["flags"]["p"]["metadata"] == []
+
+
+def test_validate_flag_accepts_an_empty_list_for_targeting_and_metadata() -> None:
+    validate_flag("p", bool_flag(targeting=[], metadata=[]))
+
+
+def test_every_empty_list_position_together_parses_composes_and_evaluates_as_static() -> None:
+    document = parse_document(
+        {
+            "flags": {"el": bool_flag("off", targeting=[], metadata=[])},
+            "$evaluators": [],
+            "metadata": [],
+        }
+    )
+    assert document.flags["el"]["targeting"] == {} and document.flags["el"]["metadata"] == {}
+    assert document.evaluators == {} and document.metadata == {}
+    flagd = compose([Layer("config", document)]).to_flagd()
+    assert flagd == {"flags": {"el": bool_flag("off", targeting={}, metadata={})}}
+    provider = FireflyFlagProvider()
+    provider.update(flagd)
+    with bound_client(provider) as client:
+        details = client.get_boolean_details("el", True, EvaluationContext(targeting_key="user-1"))
+    assert (details.value, details.variant, str(details.reason)) == (False, "off", "STATIC")
+    assert details.error_code is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "key", "reason"),
+    [
+        pytest.param(
+            {"flags": {"p": bool_flag(targeting=["x"])}}, "p", "targeting must be an object", id="flag-targeting"
+        ),
+        pytest.param(
+            {"flags": {"p": bool_flag(metadata=["x"])}}, "p", "metadata values must be scalars", id="flag-metadata"
+        ),
+        pytest.param({"flags": ["x"]}, "flags", "flags must be an object", id="document-flags"),
+        pytest.param({"$evaluators": ["x"]}, "$evaluators", "$evaluators must be an object", id="document-evaluators"),
+        pytest.param({"metadata": ["x"]}, "metadata", "metadata must be an object", id="document-metadata"),
+    ],
+)
+@pytest.mark.parametrize("shorthand", [False, True], ids=["document", "shorthand"])
+def test_a_non_empty_list_where_an_object_is_expected_is_still_an_error(
+    raw: dict[str, Any], key: str, reason: str, shorthand: bool
+) -> None:
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document(raw, shorthand=shorthand)
+    assert (raised.value.key, raised.value.reason) == (key, reason)
+
+
+def test_an_empty_list_is_an_object_only_where_the_contract_says_so() -> None:
+    """Not a flag definition, not variants and not an evaluator's rule: `[]` is no object there."""
+    with pytest.raises(FlagDefinitionError, match="flag definition must be an object"):
+        parse_document({"flags": {"p": []}})
+    with pytest.raises(FlagDefinitionError, match="variants must be a non-empty object"):
+        validate_flag("p", {"state": "ENABLED", "variants": []})
+    with pytest.raises(FlagDefinitionError, match="targeting must be an object"):
+        parse_document({"flags": {}, "$evaluators": {"beta": []}})
+
+
+@pytest.mark.parametrize("raw", [[], [1, 2], "flags", 0, 1.5, True, None], ids=repr)
+def test_a_document_that_is_not_an_object_is_reported_under_the_document_key(raw: object) -> None:
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document(raw)
+    assert (raised.value.key, raised.value.reason) == ("<document>", "document must be an object")
+    assert "document must be an object" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "variants",
+    [{"a": None}, {"a": None, "b": None}, {"a": "x", "b": None}, {"on": True, "off": None}, {"a": 1, "b": None}],
+    ids=repr,
+)
+def test_a_null_variant_value_is_not_a_flag_value(variants: dict[str, object]) -> None:
+    with pytest.raises(FlagDefinitionError, match="variants must share one type"):
+        validate_flag("nv", {"state": "ENABLED", "variants": variants})
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"nv": {"state": "ENABLED", "variants": variants}}})
+    assert (raised.value.key, raised.value.reason) == ("nv", "variants must share one type")
+
+
+def test_falsy_variant_values_that_are_not_null_stay_valid() -> None:
+    for variants in ({"a": 0}, {"a": ""}, {"a": False}, {"a": {}}, {"a": []}):
+        validate_flag("f", {"state": "ENABLED", "variants": variants})

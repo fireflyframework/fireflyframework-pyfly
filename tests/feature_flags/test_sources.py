@@ -54,7 +54,7 @@ async def test_the_config_source_rejects_an_invalid_definition() -> None:
         await source.load()
 
 
-@pytest.mark.parametrize("value", [["new-checkout"], [], "new-checkout", "", True, False, 0, 1.5], ids=repr)
+@pytest.mark.parametrize("value", [["new-checkout"], "new-checkout", "", True, False, 0, 1.5], ids=repr)
 @pytest.mark.parametrize(
     ("section", "key", "reason"),
     [
@@ -72,8 +72,12 @@ async def test_a_config_section_that_is_not_a_map_fails_the_load(
     assert (error.value.key, error.value.reason) == (key, reason)
 
 
-@pytest.mark.parametrize("raw", [{}, {"flags": None, "evaluators": None}, {"flags": {}, "evaluators": {}}])
-async def test_an_absent_or_null_config_section_is_empty(raw: dict[str, object]) -> None:
+@pytest.mark.parametrize(
+    "raw",
+    [{}, {"flags": None, "evaluators": None}, {"flags": {}, "evaluators": {}}, {"flags": [], "evaluators": []}],
+    ids=["absent", "null", "empty-objects", "empty-lists"],
+)
+async def test_an_absent_or_null_or_empty_config_section_is_empty(raw: dict[str, object]) -> None:
     snapshot = await ConfigFlagSource.from_config(Config({"pyfly": {"feature-flags": raw}})).load()
     assert snapshot.document.flags == {} and snapshot.document.evaluators == {}
 
@@ -81,6 +85,12 @@ async def test_an_absent_or_null_config_section_is_empty(raw: dict[str, object])
 async def test_the_config_source_rejects_a_section_that_is_not_a_map_given_directly() -> None:
     with pytest.raises(FlagDefinitionError, match="flags must be an object"):
         await ConfigFlagSource(["new-checkout"]).load()
+
+
+async def test_the_config_source_reads_an_empty_list_as_an_empty_object_in_a_flag() -> None:
+    """A configuration written by PHP cannot tell `[]` from `{}`: the flag simply has no targeting."""
+    snapshot = await ConfigFlagSource({"p": {**bool_flag("off"), "targeting": [], "metadata": []}}).load()
+    assert snapshot.document.flags["p"] == bool_flag("off", targeting={}, metadata={})
 
 
 async def test_a_yaml_config_with_an_unquoted_expires_date_loads(tmp_path: Path) -> None:
@@ -160,8 +170,9 @@ async def test_a_file_whose_top_level_is_falsy_but_not_an_object_is_rejected(
     """Only an absent document (empty or comment-only YAML, JSON null) is empty: `[]`, `0`, `false` are errors."""
     path = tmp_path / name
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(FlagDefinitionError, match="flag definition must be an object"):
+    with pytest.raises(FlagDefinitionError, match="document must be an object") as raised:
         await FileFlagSource(path).load()
+    assert raised.value.key == "<document>"
 
 
 @pytest.mark.parametrize(
