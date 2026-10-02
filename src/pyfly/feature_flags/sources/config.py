@@ -34,6 +34,16 @@ FLAGS_SECTION = "pyfly.feature-flags.flags"
 EVALUATORS_SECTION = "pyfly.feature-flags.evaluators"
 
 
+def _section(config: Config, prefix: str) -> Any:
+    """The raw section at *prefix*: a mapping with its keys verbatim, or the value itself when it is not a mapping.
+
+    ``Config.get_section`` answers ``{}`` for anything but a mapping, which would load zero flags without a word for
+    ``flags: [new-checkout]``; the probe hands such a value on, for ``parse_document`` to reject with its reason.
+    """
+    probe = config.get(prefix)
+    return config.get_section(prefix) if probe is None or isinstance(probe, Mapping) else probe
+
+
 class ConfigFlagSource:
     """Inline definitions from the application configuration (the lowest layer)."""
 
@@ -41,14 +51,16 @@ class ConfigFlagSource:
     fail_fast = True
     refresh_interval: float | None = None
 
-    def __init__(self, flags: Mapping[Any, Any] | None = None, evaluators: Mapping[str, Any] | None = None) -> None:
-        self._flags = dict(flags or {})
-        self._evaluators = dict(evaluators or {})
+    def __init__(self, flags: Any = None, evaluators: Any = None) -> None:
+        """*flags* and *evaluators* are the two raw sections: a mapping (copied), ``None`` (empty) or any other value,
+        which ``load()`` rejects (``flags must be an object``)."""
+        self._flags = dict(flags) if isinstance(flags, Mapping) else flags
+        self._evaluators = dict(evaluators) if isinstance(evaluators, Mapping) else evaluators
 
     @classmethod
     def from_config(cls, config: Config) -> ConfigFlagSource:
         """The layer of *config*'s ``pyfly.feature-flags.flags`` and ``.evaluators`` sections."""
-        return cls(config.get_section(FLAGS_SECTION), config.get_section(EVALUATORS_SECTION))
+        return cls(_section(config, FLAGS_SECTION), _section(config, EVALUATORS_SECTION))
 
     async def load(self) -> SourceSnapshot:
         document = parse_document({"flags": self._flags, "$evaluators": self._evaluators}, shorthand=True)

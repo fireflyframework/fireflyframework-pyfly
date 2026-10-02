@@ -19,6 +19,7 @@ variant names stay names instead of turning into booleans as PyYAML's default YA
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -26,7 +27,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from pyfly.feature_flags.definitions import parse_document
+from pyfly.feature_flags.definitions import FlagDocument, parse_document
 from pyfly.feature_flags.sources import SourceSnapshot
 
 __all__ = ["FileFlagSource"]
@@ -64,15 +65,28 @@ class FileFlagSource:
         return self._path
 
     async def load(self) -> SourceSnapshot | None:
+        read = await asyncio.to_thread(self._read)  # a stalled mount must not freeze the event loop
+        if read is None:
+            return None
+        signature, document = read
+        self._signature = signature  # only after the document validated
+        return SourceSnapshot(document, revision=f"{signature[0]}:{signature[1]}")
+
+    def _read(self) -> tuple[tuple[int, int], FlagDocument] | None:
+        """The blocking part, run in a worker thread: stat, read, parse and validate. ``None`` when unchanged."""
         stat = self._path.stat()
         signature = (stat.st_mtime_ns, stat.st_size)
         if signature == self._signature:
             return None
-        text = self._path.read_text(encoding="utf-8")
-        raw: Any = json.loads(text) if self._path.suffix.lower() == ".json" else yaml.load(text, Loader=_Yaml12Loader)
+        try:
+            text = self._path.read_text(encoding="utf-8")
+            raw: Any = (
+                json.loads(text) if self._path.suffix.lower() == ".json" else yaml.load(text, Loader=_Yaml12Loader)
+            )
+        except (ValueError, yaml.YAMLError) as error:  # bad JSON, bad YAML or bad UTF-8: say which file
+            raise ValueError(f"{self._path}: {error}") from error
         document = parse_document({} if raw is None else raw)  # only an absent document is empty
-        self._signature = signature  # only after the document validated
-        return SourceSnapshot(document, revision=f"{stat.st_mtime_ns}:{stat.st_size}")
+        return signature, document
 
     async def close(self) -> None:
         return None
