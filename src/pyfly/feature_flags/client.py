@@ -28,6 +28,7 @@ facade runs it under an empty transaction context and puts the previous one back
 from __future__ import annotations
 
 import contextlib
+import importlib
 import inspect
 import logging
 import threading
@@ -40,7 +41,6 @@ from openfeature.client import OpenFeatureClient
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, FlagType, FlagValueType
 from openfeature.provider import AbstractProvider, FeatureProvider
-from openfeature.provider._registry import provider_registry
 from openfeature.provider.no_op_provider import NoOpProvider
 from openfeature.transaction_context import (
     ContextVarsTransactionContextPropagator,
@@ -399,40 +399,109 @@ def _current_propagator() -> object:
 
 
 # The SDK can replace the provider of a domain (``set_provider``) but neither tells an unbound domain from one bound to
-# the default provider nor unbinds one. The two helpers below therefore read and edit its registry's ``_providers``
-# map, under its lock; should that change, each falls back to the closest public behavior it documents.
+# the default provider nor unbinds one. The helpers below therefore use its registry (``openfeature.provider.
+# _registry.provider_registry``): its ``_providers`` map, under its ``_lock``, and its ``_shutdown_if_unused``. Each
+# use has a public fallback, and the first fallback that engages logs ``feature_flags_openfeature_fallback`` (WARNING,
+# once per process) naming every private that is missing, so a binding that leaves a no-op provider behind never goes
+# unnoticed. tests/feature_flags/test_openfeature_sdk_privates.py is the canary that fails when an SDK upgrade moves
+# any of them.
+
+_REGISTRY_PATH = "openfeature.provider._registry.provider_registry"
+
+
+def _load_registry() -> Any:
+    """The SDK's provider registry, or ``None`` when an SDK upgrade moved it (importing this module never fails)."""
+    try:
+        module = importlib.import_module("openfeature.provider._registry")
+    except ImportError:
+        return None
+    return getattr(module, "provider_registry", None)
+
+
+_provider_registry: Any = _load_registry()
+_fallback_warned = False
+_fallback_lock = threading.Lock()
+
+
+def _missing_privates() -> list[str]:
+    """The SDK privates the binding relies on that this SDK lacks; empty when it has them all."""
+    registry = _provider_registry
+    if registry is None:
+        return [_REGISTRY_PATH]
+    missing: list[str] = []
+    if not isinstance(getattr(registry, "_providers", None), dict):
+        missing.append("provider_registry._providers")
+    if not _is_lock(getattr(registry, "_lock", None)):
+        missing.append("provider_registry._lock")
+    if not _takes_one_argument(getattr(registry, "_shutdown_if_unused", None)):
+        missing.append("provider_registry._shutdown_if_unused")
+    return missing
+
+
+def _is_lock(lock: object) -> bool:
+    return hasattr(lock, "__enter__") and hasattr(lock, "__exit__")
+
+
+def _takes_one_argument(function: object) -> bool:
+    """Whether *function* can be called with one positional argument and nothing else (how the binding calls it)."""
+    if not callable(function):
+        return False
+    try:
+        inspect.signature(function).bind(None)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _fell_back() -> None:
+    """Log, once per process, that a public fallback engaged, naming every missing private."""
+    global _fallback_warned
+    with _fallback_lock:
+        if _fallback_warned:
+            return
+        _fallback_warned = True
+    _logger.warning("feature_flags_openfeature_fallback", extra={"missing": _missing_privates()})
 
 
 def _bound_provider(domain: str | None) -> FeatureProvider | None:
     """The provider bound to *domain* itself: the default provider for ``None``; for a named domain, ``None`` when
-    nothing is bound to it (it falls back to the default provider). Without the registry's map, a named domain that
-    answers the default provider counts as unbound."""
+    nothing is bound to it (it falls back to the default provider). Fallback without the registry's map: a named
+    domain that answers the default provider counts as unbound."""
+    default = OpenFeatureClient(domain=None, version=None).provider
     if domain is None:
-        return provider_registry.get_default_provider()
-    providers = getattr(provider_registry, "_providers", None)
+        return default
+    providers = getattr(_provider_registry, "_providers", None)
     if isinstance(providers, dict):
         return cast("FeatureProvider | None", providers.get(domain))
-    current = provider_registry.get_provider(domain)
-    return None if current is provider_registry.get_default_provider() else current
+    _fell_back()
+    current = OpenFeatureClient(domain=domain, version=None).provider
+    return None if current is default else current
 
 
 def _unbind(domain: str, provider: FeatureProvider) -> None:
     """Remove *domain*'s binding to *provider*, so the domain falls back to the default provider again, and let the
     SDK shut *provider* down once nothing uses it (what ``set_provider`` does to the provider it replaces). A domain
-    bound to another provider by now is left alone. Without the registry's map and lock, the closest public behavior:
-    the domain is bound to a no-op provider (it then no longer falls back to the default one)."""
-    providers = getattr(provider_registry, "_providers", None)
-    lock = getattr(provider_registry, "_lock", None)
-    if not isinstance(providers, dict) or lock is None:
+    bound to another provider by now is left alone.
+
+    Fallbacks: without the registry's map or lock, the closest public behavior, a no-op provider bound to the domain
+    (which then no longer falls back to the default one); without ``_shutdown_if_unused``, the domain is unbound and
+    only the SDK's shutdown of the unused provider is skipped (Firefly's provider keeps its document on shutdown)."""
+    registry = _provider_registry
+    providers = getattr(registry, "_providers", None)
+    lock: Any = getattr(registry, "_lock", None)  # checked by _is_lock before use
+    if not isinstance(providers, dict) or not _is_lock(lock):
+        _fell_back()
         api.set_provider_and_wait(NoOpProvider(), domain)
         return
     with lock:
         if providers.get(domain) is not provider:
             return
         del providers[domain]
-    shutdown_if_unused = getattr(provider_registry, "_shutdown_if_unused", None)
-    if callable(shutdown_if_unused):
+    shutdown_if_unused: Any = getattr(registry, "_shutdown_if_unused", None)  # checked before the call
+    if _takes_one_argument(shutdown_if_unused):
         shutdown_if_unused(provider)
+    else:
+        _fell_back()
 
 
 # A provider whose binding stopped while another binding had replaced it in its domain (so it could not put back what
@@ -445,6 +514,12 @@ _superseded_lock = threading.Lock()
 def _supersede(provider: FeatureProvider, found: FeatureProvider | None) -> None:
     with _superseded_lock:
         _superseded[id(provider)] = (provider, found)
+
+
+def _revive(provider: FeatureProvider) -> None:
+    """*provider* is installed again by its (restarted) binding: what its earlier stop recorded no longer stands."""
+    with _superseded_lock:
+        _superseded.pop(id(provider), None)
 
 
 def _to_put_back(found: FeatureProvider | None, own: FeatureProvider) -> FeatureProvider | None:
@@ -477,7 +552,8 @@ class OpenFeatureBinding:
     provider it replaced (the SDK shut that provider down when it was replaced and initializes it again), or, for a
     named domain that held none, no binding at all, so the domain falls back to the default provider again. When
     bindings that share a domain stop in another order than they started, the last one to stop puts back what the
-    first one found, never a stopped context's provider.
+    first one found, never a stopped context's provider (a binding that starts again drops what its earlier stop
+    recorded for that purpose).
 
     Installing over a provider bound to the domain that is neither the no-op one nor the binding's own logs
     ``feature_flags_provider_replaced`` (WARNING, naming the domain: ``None`` is the default one); a named domain
@@ -505,7 +581,7 @@ class OpenFeatureBinding:
         self._disabled_status = disabled_status
         self._running = False
         # what start installed, so stop undoes exactly that
-        self._provider_installed = False
+        self._installed: FeatureProvider | None = None  # the provider start bound to the domain
         self._found_provider: FeatureProvider | None = None  # what the domain held before (None: nothing bound)
         self._propagator: ContextVarsTransactionContextPropagator | None = None
         self._found_propagator: TransactionContextPropagator | None = None
@@ -521,10 +597,11 @@ class OpenFeatureBinding:
         if self._provider is None:
             _logger.warning("feature_flags_no_provider", extra={"domain": self._domain})
         else:
+            _revive(self._provider)  # a record an earlier stop of this binding left must not be followed any more
             bound = _bound_provider(self._domain)
             self._warn_if_replacing(bound)
             self._found_provider = None if bound is self._provider else bound  # its own provider is never put back
-            self._provider_installed = True  # before the call: a failed initialization leaves the provider bound
+            self._installed = self._provider  # before the call: a failed initialization leaves the provider bound
             api.set_provider_and_wait(self._provider, self._domain)
             self._warn_if_shadowed()
         found = _current_propagator()  # TransactionContextPropagator is not runtime-checkable: duck-type it
@@ -596,11 +673,9 @@ class OpenFeatureBinding:
         self._found_propagator = None
 
     def _uninstall_provider(self) -> None:
-        if not self._provider_installed:
-            return
-        self._provider_installed = False
-        provider, found, self._found_provider = self._provider, self._found_provider, None
-        if provider is None:
+        provider, found = self._installed, self._found_provider
+        self._installed = self._found_provider = None
+        if provider is None:  # start installed nothing (no provider, or it never ran)
             return
         if _bound_provider(self._domain) is not provider:
             _supersede(provider, found)  # another binding replaced it: it puts back what this one found

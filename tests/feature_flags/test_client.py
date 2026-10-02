@@ -668,3 +668,24 @@ async def test_a_provider_that_cannot_be_put_back_is_logged_and_the_stop_complet
     assert application.initialized == 2
     assert installed_feature_flags() is None
     assert isinstance(_propagator(), NoOpTransactionContextPropagator)
+
+
+async def test_a_restarted_binding_drops_the_record_its_earlier_stop_left() -> None:
+    """The reviewer's repro: application code replaces the Firefly provider while the context runs, the context stops
+    (recording what it had found) and starts again. A second context that starts and stops on the domain meanwhile
+    must put the first context's (running) provider back, not what the first one had found before its restart."""
+    application = InMemoryProvider({"app": InMemoryFlag("on", {"on": True, "off": False})})
+    api.set_provider_and_wait(application, "x")
+    _, first = _firefly_binding("x")
+    _, second = _firefly_binding("x")
+    await first.start()
+    replacement = InMemoryProvider({})
+    api.set_provider_and_wait(replacement, "x")  # application code replaces Firefly's provider mid-run
+    await first.stop()  # its provider is no longer bound: it leaves the replacement alone
+    assert _bound_to("x") is replacement
+    await first.start()  # a context restart: it now finds the replacement
+    await second.start()
+    await second.stop()
+    assert _bound_to("x") is first.provider  # the first context still runs
+    await first.stop()
+    assert _bound_to("x") is replacement
