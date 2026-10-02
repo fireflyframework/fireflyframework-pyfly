@@ -32,14 +32,21 @@ the rest of the document loads. Every reference resolved along the way costs one
 that spends at most the budget and never recurses deeper than the depth limit (a reference to a reference is
 followed in a loop), so neither a fan-out nor a long chain of references can exhaust time, memory or the stack; only
 a flag within both limits is expanded.
+
+Date-times in the evaluation context are evaluated as Unix epoch milliseconds (a ``float``), whatever the host's time
+zone (the contract's "Evaluation context"): every ``resolve_*_details`` converts the context it is handed, the merged
+OpenFeature context, before FlagdCore reads it, so facade calls, plain OpenFeature clients and the management preview
+decide alike. See :func:`_epoch_millis_context`.
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import threading
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, date, datetime
 from typing import Any
 
 from openfeature.contrib.tools.flagd.core import FlagdCore
@@ -174,6 +181,55 @@ def _for_flagd_core(projected: Mapping[str, Any]) -> dict[str, Any]:
     return document
 
 
+def _epoch_millis(value: date) -> float:
+    """*value* as Unix epoch milliseconds: a naive ``datetime`` is read as UTC (never the host's zone) and a ``date``
+    is midnight UTC."""
+    if not isinstance(value, datetime):
+        value = datetime(value.year, value.month, value.day, tzinfo=UTC)
+    elif value.utcoffset() is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp() * 1000.0
+
+
+def _epoch_millis_context(context: EvaluationContext | None) -> EvaluationContext | None:
+    """*context* with every ``datetime`` and ``date`` value, at any depth inside mappings, lists and tuples, replaced by
+    its epoch milliseconds (:func:`_epoch_millis`); anything else is untouched, strings that look like dates included.
+
+    The caller's context is never mutated: a container holding a date-time is rebuilt (a ``dict``, a ``list``, a
+    ``tuple``), one that holds none is shared as it is, and a context without any date-time is returned as it is.
+
+    The walk is bounded the way a flag's expanded targeting is: containers more than :data:`DEPTH_LIMIT` levels deep
+    (the attributes are level 1) are not entered, and after :data:`EXPANSION_LIMIT` values the rest is left as it is,
+    so neither a deep nesting, nor a structure that refers to itself or shares its parts over and over, can exhaust
+    time or the stack. A date-time out there is not converted: such a context is not a JSON value.
+    """
+    if context is None:
+        return None
+    budget = EXPANSION_LIMIT
+
+    def walk(node: Any, level: int) -> Any:
+        nonlocal budget
+        budget -= 1
+        if budget < 0:
+            return node
+        if isinstance(node, date):  # a datetime is a date
+            return _epoch_millis(node)
+        if level > DEPTH_LIMIT:
+            return node
+        if isinstance(node, Mapping):
+            changed = {key: new for key, value in node.items() if (new := walk(value, level + 1)) is not value}
+            return {**node, **changed} if changed else node
+        if isinstance(node, list | tuple):
+            items = [walk(item, level + 1) for item in node]
+            if all(new is old for new, old in zip(items, node, strict=True)):
+                return node
+            return items if isinstance(node, list) else tuple(items)
+        return node
+
+    attributes = walk(context.attributes, 1)
+    return context if attributes is context.attributes else dataclasses.replace(context, attributes=attributes)
+
+
 class FireflyFlagProvider(AbstractProvider):
     """Evaluates the composed flag document; :meth:`update` replaces it as a whole."""
 
@@ -226,22 +282,22 @@ class FireflyFlagProvider(AbstractProvider):
     def resolve_boolean_details(
         self, flag_key: str, default_value: bool, evaluation_context: EvaluationContext | None = None
     ) -> FlagResolutionDetails[bool]:
-        return self._core.resolve_boolean_value(flag_key, default_value, evaluation_context)
+        return self._core.resolve_boolean_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
 
     def resolve_string_details(
         self, flag_key: str, default_value: str, evaluation_context: EvaluationContext | None = None
     ) -> FlagResolutionDetails[str]:
-        return self._core.resolve_string_value(flag_key, default_value, evaluation_context)
+        return self._core.resolve_string_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
 
     def resolve_integer_details(
         self, flag_key: str, default_value: int, evaluation_context: EvaluationContext | None = None
     ) -> FlagResolutionDetails[int]:
-        return self._core.resolve_integer_value(flag_key, default_value, evaluation_context)
+        return self._core.resolve_integer_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
 
     def resolve_float_details(
         self, flag_key: str, default_value: float, evaluation_context: EvaluationContext | None = None
     ) -> FlagResolutionDetails[float]:
-        return self._core.resolve_float_value(flag_key, default_value, evaluation_context)
+        return self._core.resolve_float_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
 
     def resolve_object_details(
         self,
@@ -249,4 +305,4 @@ class FireflyFlagProvider(AbstractProvider):
         default_value: Sequence[FlagValueType] | Mapping[str, FlagValueType],
         evaluation_context: EvaluationContext | None = None,
     ) -> FlagResolutionDetails[Sequence[FlagValueType] | Mapping[str, FlagValueType]]:
-        return self._core.resolve_object_value(flag_key, default_value, evaluation_context)
+        return self._core.resolve_object_value(flag_key, default_value, _epoch_millis_context(evaluation_context))
