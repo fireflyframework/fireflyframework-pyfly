@@ -28,6 +28,7 @@ from openfeature.hook import Hook
 from openfeature.provider import FeatureProvider
 from openfeature.provider.no_op_provider import NoOpProvider
 
+from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
 from pyfly.feature_flags.definitions import parse_document
 from pyfly.feature_flags.sources import SourceSnapshot
 
@@ -114,3 +115,15 @@ class ScriptedSource:
 
     async def close(self) -> None:
         return None
+
+
+def recording_publisher() -> tuple[ApplicationEventPublisher, list[object]]:
+    """A real ApplicationEventPublisher whose bus records every event published on it."""
+    bus = ApplicationEventBus()
+    seen: list[object] = []
+
+    async def record(event: object) -> None:
+        seen.append(event)
+
+    bus.subscribe(object, record)
+    return ApplicationEventPublisher(bus), seen
