@@ -23,15 +23,20 @@ evaluation is unaffected. OpenFeature hooks are synchronous while PyFly's publis
 schedules the publish on the running loop, hands it to the application's loop from a worker thread, or, with no
 loop at all (a CLI script), publishes through a short-lived one. Scheduled publishes are kept until they settle, so
 none is garbage-collected mid-flight, and :meth:`ExposureEventHook.drain` awaits them on shutdown.
+
+Because the event is published later, an object value (a ``dict`` or a ``list``) is copied into it: the caller owns
+the value it was served and may adapt it, and the exposure record must still say what was served (the provider gives
+every evaluation a copy of its own, which the caller and the event would otherwise share).
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import copy
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagValueType, Reason
@@ -139,9 +144,12 @@ class ExposureEventHook(Hook):
         if hints.get(PREVIEW_HINT):
             return
         try:
+            value = details.value
+            if isinstance(value, Mapping | list | tuple):  # the caller owns details.value: publish what was served
+                value = copy.deepcopy(value)
             event = FeatureFlagEvaluated(
                 key=hook_context.flag_key,
-                value=details.value,
+                value=value,
                 variant=None if _failed(details) else details.variant,
                 reason=_reason(details),
                 error_code=details.error_code.value if details.error_code is not None else None,

@@ -502,3 +502,23 @@ async def test_a_listener_that_mutates_the_exposed_value_never_changes_the_flag(
         assert facade.get_object("banner", {}) == {"title": "Hi", "tags": ["a"]}
         assert client.get_object_value("banner", {}) == {"title": "Hi", "tags": ["a"]}
     assert provider.definition("banner") == banner
+
+
+async def test_a_caller_that_adapts_its_value_never_changes_the_exposed_value() -> None:
+    """The event is published later, from a task: it records the value served, not what the caller made of it."""
+    banner = {"state": "ENABLED", "variants": {"plain": {"title": "Hi", "tags": ["a"]}}, "defaultVariant": "plain"}
+    rows = {"state": "ENABLED", "variants": {"few": [{"id": 1}]}, "defaultVariant": "few"}
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"banner": banner, "rows": rows}})
+    publisher, seen = recording_publisher()
+    hook = ExposureEventHook(publisher)
+    with bound_client(provider, hooks=[hook]) as client:
+        facade = FeatureFlags(client, EvaluationContextResolver())
+        config = facade.get_object("banner", {})
+        config["title"] = "adapted"
+        config["tags"].append("b")
+        listed = await facade.get_object_async("rows", [])
+        listed[0]["id"] = 99
+        await hook.drain()
+    exposed = {event.key: event.value for event in seen if isinstance(event, FeatureFlagEvaluated)}
+    assert exposed == {"banner": {"title": "Hi", "tags": ["a"]}, "rows": [{"id": 1}]}
