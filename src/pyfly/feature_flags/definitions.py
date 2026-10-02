@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -175,14 +176,34 @@ def _scalars(values: Mapping[str, Any]) -> bool:
     return all(isinstance(value, str | int | float) for value in values.values())  # bool is an int
 
 
+def _non_finite(value: Any) -> bool:
+    """Whether a NaN or an infinity stands anywhere in *value*: YAML reads ``.nan``/``.inf``, JSON has neither."""
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, Mapping):
+        return any(_non_finite(item) for item in value.values())
+    if isinstance(value, list | tuple):
+        return any(_non_finite(item) for item in value)
+    return False
+
+
+def _metadata_key_reason(metadata: Mapping[Any, Any]) -> str | None:
+    """The reason when a key of *metadata* is not text or is empty (FlagdCore refuses ``""``); ``None`` when valid."""
+    if (reason := _non_text_names(metadata, "metadata keys")) is not None:
+        return reason
+    return "metadata keys must not be empty" if "" in metadata else None
+
+
 def validate_flag(key: Any, definition: Any) -> None:
     """Raise :class:`FlagDefinitionError` with the contract message of the first rule *definition* breaks.
 
     The order is the contract's: key, object, state, variants, variant types, defaultVariant, targeting, metadata
-    scalars, then the reserved metadata keys. The names of the metadata entries must be text (``metadata keys must be
-    strings``; an unquoted YAML ``on:`` is a boolean key and gets the YAML hint). Fields beside ``state``,
-    ``variants``, ``defaultVariant``, ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields"
-    rule), never an error.
+    scalars, then the reserved metadata keys, then finite numbers. The names of the metadata entries must be
+    non-empty text (``metadata keys must be strings``, where an unquoted YAML ``on:`` is a boolean key and gets the
+    YAML hint; ``metadata keys must not be empty``). Fields beside ``state``, ``variants``, ``defaultVariant``,
+    ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields" rule), never an error, but a NaN or an
+    infinity anywhere in the definition, those fields included, is (``numbers must be finite``): JSON cannot carry
+    it, so the definition could be neither stored, served nor read by the other framework.
     """
     if not is_valid_key(key):
         raise FlagDefinitionError(str(key), "invalid flag key")
@@ -206,11 +227,16 @@ def validate_flag(key: Any, definition: Any) -> None:
     if targeting is not None and not isinstance(targeting, Mapping):
         raise FlagDefinitionError(key, "targeting must be an object")
     metadata = definition.get("metadata")
-    if metadata is None:
-        return
+    if metadata is not None:
+        _validate_flag_metadata(key, metadata)
+    if _non_finite(definition):
+        raise FlagDefinitionError(key, "numbers must be finite")
+
+
+def _validate_flag_metadata(key: str, metadata: Any) -> None:
     if not isinstance(metadata, Mapping) or not _scalars(metadata):
         raise FlagDefinitionError(key, "metadata values must be scalars")
-    if (reason := _non_text_names(metadata, "metadata keys")) is not None:
+    if (reason := _metadata_key_reason(metadata)) is not None:
         raise FlagDefinitionError(key, reason)
     if "kind" in metadata and metadata["kind"] not in FLAG_KINDS:
         raise FlagDefinitionError(key, "kind must be one of release, experiment, ops, permission")
@@ -246,7 +272,9 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     phrase ``flag definition must be an object``, with the flag's key.
 
     The names of the evaluators and the keys of the document ``metadata`` must be text, as in a flag's ``metadata``:
-    YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed.
+    YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed. A document ``metadata`` key
+    must not be empty either. A NaN or an infinity in an evaluator is refused with the key ``$evaluators`` (the
+    reason names the evaluator), in the document ``metadata`` with the key ``metadata``.
     """
     if not isinstance(raw, Mapping):
         raise FlagDefinitionError("<document>", "flag definition must be an object")
@@ -264,12 +292,16 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     for name, rule in evaluators_in.items():
         if not isinstance(rule, Mapping):
             raise FlagDefinitionError(f"$evaluators.{name}", "targeting must be an object")
+        if _non_finite(rule):
+            raise FlagDefinitionError("$evaluators", f"numbers must be finite (evaluator {name!r})")
         evaluators[name] = copy.deepcopy(dict(rule))
     metadata = _section(raw, "metadata", "metadata must be an object")
     if not _scalars(metadata):
         raise FlagDefinitionError("metadata", "metadata values must be scalars")
-    if (reason := _non_text_names(metadata, "metadata keys")) is not None:
+    if (reason := _metadata_key_reason(metadata)) is not None:
         raise FlagDefinitionError("metadata", reason)
+    if _non_finite(metadata):
+        raise FlagDefinitionError("metadata", "numbers must be finite")
     return FlagDocument(flags=flags, evaluators=evaluators, metadata=dict(metadata))
 
 

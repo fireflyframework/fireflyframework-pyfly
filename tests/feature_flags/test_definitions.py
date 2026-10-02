@@ -247,3 +247,48 @@ def test_expiry_is_strictly_before_today() -> None:
     }
     assert expired_keys(flags, today) == ["old"]
     assert not is_expired(flags["today"], today)
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ('flags: {mk: {state: ENABLED, variants: {"on": true}, metadata: {"": x}}}', "mk"),
+        ('flags: {}\nmetadata: {"": x, owner: web}', "metadata"),
+    ],
+    ids=["flag", "document"],
+)
+def test_an_empty_metadata_key_is_refused(text: str, key: str) -> None:
+    """FlagdCore refuses an empty metadata key (`key must not be empty`) and would refuse the whole document."""
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document(yaml.safe_load(text))
+    assert (raised.value.key, raised.value.reason) == (key, "metadata keys must not be empty")
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("flags: {n: {state: ENABLED, variants: {a: .nan, b: 1.5}, defaultVariant: a}}", "n"),
+        ('flags: {t: {state: ENABLED, variants: {"on": true}, targeting: {"<": [{var: x}, .inf]}}}', "t"),
+        ('flags: {m: {state: ENABLED, variants: {"on": true}, metadata: {rate: .nan}}}', "m"),
+        ('flags: {u: {state: ENABLED, variants: {"on": true}, notes: {weight: -.inf}}}', "u"),
+        ("flags: {}\n$evaluators: {big: {'>': [{var: n}, -.inf]}}", "$evaluators"),
+        ("flags: {}\nmetadata: {rate: .inf}", "metadata"),
+    ],
+    ids=["variant", "targeting", "flag-metadata", "unread-field", "evaluator", "document-metadata"],
+)
+def test_a_number_that_is_not_finite_is_refused(text: str, key: str) -> None:
+    """YAML reads `.nan`/`.inf`; JSON has neither, so a definition holding one cannot travel between the frameworks."""
+    with pytest.raises(FlagDefinitionError, match="numbers must be finite") as raised:
+        parse_document(yaml.safe_load(text))
+    assert raised.value.key == key
+
+
+def test_a_non_finite_number_in_an_evaluator_names_the_evaluator() -> None:
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {}, "$evaluators": {"ok": {"var": "a"}, "big": {">": [{"var": "n"}, float("nan")]}}})
+    assert raised.value.key == "$evaluators" and "'big'" in raised.value.reason
+
+
+def test_finite_floats_and_large_integers_are_numbers_like_any_other() -> None:
+    flag = {"state": "ENABLED", "variants": {"a": 0.5, "b": 10**30}, "targeting": {"<": [{"var": "x"}, 1e308]}}
+    assert parse_document({"flags": {"f": flag}}).flags["f"] == flag
