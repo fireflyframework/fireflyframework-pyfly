@@ -10,6 +10,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+# limitations under the License.
 """The Firefly OpenFeature hooks (spec 4.9), attached to the framework's client only.
 
 - :class:`MetricsHook` counts every evaluation in ``feature_flag_evaluations_total{flag, variant, reason}``.
@@ -80,6 +81,7 @@ class MetricsHook(Hook):
         self._recorder: MetricsRecorder | None = None
         self._source: MetricsSource | None = None
         self._counter: Any = None
+        self._creating = threading.Lock()  # the registry's counter() is check-then-create: one thread creates
         if metrics is None:
             return
         if hasattr(metrics, "counter"):
@@ -88,16 +90,22 @@ class MetricsHook(Hook):
             self._source = metrics
 
     def _current(self) -> Any:
-        if self._counter is None:
-            if self._recorder is None and self._source is not None:
-                self._recorder = self._source()  # asked at every evaluation until it answers, then never again
-            if self._recorder is not None:
-                self._counter = self._recorder.counter(
+        counter = self._counter
+        if counter is not None:
+            return counter
+        recorder = self._recorder
+        if recorder is None and self._source is not None:
+            recorder = self._recorder = self._source()  # asked at every evaluation until it answers, then never again
+        if recorder is None:
+            return None
+        with self._creating:
+            if self._counter is None:  # another thread may have created it while this one waited
+                self._counter = recorder.counter(
                     EVALUATIONS_METRIC,
                     "Feature flag evaluations by flag, variant and reason",
                     ["flag", "variant", "reason"],
                 )
-        return self._counter
+            return self._counter
 
     def finally_after(
         self, hook_context: HookContext, details: FlagEvaluationDetails[FlagValueType], hints: HookHints
@@ -134,7 +142,7 @@ class ExposureEventHook(Hook):
             event = FeatureFlagEvaluated(
                 key=hook_context.flag_key,
                 value=details.value,
-                variant=details.variant,
+                variant=None if _failed(details) else details.variant,
                 reason=_reason(details),
                 error_code=details.error_code.value if details.error_code is not None else None,
                 targeting_key=hook_context.evaluation_context.targeting_key,

@@ -10,6 +10,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+# limitations under the License.
 """MetricsHook and ExposureEventHook (spec 4.9): best effort, never change an evaluation."""
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -64,6 +66,30 @@ class FakeRecorder:
 
     def gauge(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
+
+
+class RacingRecorder(FakeRecorder):
+    """``counter()`` waits (at most 0.3 s) for a second thread to be inside it too, and records whether one was.
+
+    A registry whose ``counter()`` is check-then-create loses the race exactly when two threads are inside it at
+    once. The wait is a bounded rendezvous, not a pause: it ends the moment the second thread arrives, and only the
+    thread that is alone (the hook serializing the creation) waits the whole 0.3 s.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.created = 0
+        self.overlapped = False
+        self._rendezvous = threading.Barrier(2)
+
+    def counter(self, name: str, description: str, labels: list[str] | None = None) -> FakeCounter:
+        self.created += 1
+        try:
+            self._rendezvous.wait(timeout=0.3)
+            self.overlapped = True
+        except threading.BrokenBarrierError:
+            pass
+        return super().counter(name, description, labels)
 
 
 class RaisingPublisher:
@@ -185,6 +211,15 @@ def test_an_error_reason_is_counted_as_an_error_even_when_the_provider_names_no_
     assert recorder.instrument.increments == [{"flag": "flaky", "variant": "none", "reason": "ERROR"}]
 
 
+def test_two_threads_on_the_first_evaluation_create_the_counter_once() -> None:
+    recorder = RacingRecorder()
+    hook = MetricsHook(recorder)
+    with bound_client(_provider(), hooks=[hook]) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: client.get_boolean_value("a", False), range(2)))
+    assert recorder.created == 1 and not recorder.overlapped
+    assert len(recorder.instrument.increments) == 2  # neither count is lost
+
+
 def test_a_recorder_looked_up_lazily_is_used_once_it_exists() -> None:
     recorder = FakeRecorder()
     available: list[FakeRecorder] = []
@@ -294,6 +329,15 @@ async def test_a_worker_thread_publishes_on_the_application_loop_not_on_a_loop_o
     assert publisher.threads == [threading.get_ident()] and publisher.threads != [worker]
 
 
+def test_an_error_reason_is_published_without_a_variant_even_when_the_provider_names_no_error_code() -> None:
+    publisher, seen = recording_publisher()
+    hook = ExposureEventHook(publisher)
+    context = HookContext("flaky", FlagType.BOOLEAN, False, EvaluationContext(targeting_key="u-1"))
+    details = FlagEvaluationDetails(flag_key="flaky", value=False, variant="on", reason=Reason.ERROR)
+    hook.finally_after(context, details, {})
+    assert seen == [FeatureFlagEvaluated("flaky", False, None, "ERROR", None, "u-1")]
+
+
 def test_the_targeting_key_of_the_evaluation_is_recorded() -> None:
     publisher, seen = recording_publisher()
     with bound_client(_provider(), hooks=[ExposureEventHook(publisher)]) as client:
@@ -374,17 +418,25 @@ async def test_the_management_preview_records_no_metric_and_no_exposure_event() 
 # -- scheduled publishes are kept, awaited on drain, and never lost silently ----------------------------------
 
 
+async def _let_the_loop_run(turns: int = 25) -> None:
+    """Give every other ready task (a ``drain`` that returns at once included) real chances to run: one turn
+    each. ``wait_until`` would not do, it returns without yielding when its predicate already holds."""
+    for _ in range(turns):
+        await asyncio.sleep(0)
+
+
 async def test_drain_waits_for_a_publish_that_is_still_running() -> None:
     publisher = GatedPublisher()
     hook = ExposureEventHook(publisher)  # type: ignore[arg-type]
     with bound_client(_provider(), hooks=[hook]) as client:
         client.get_boolean_value("a", False)
-    await wait_until(lambda: publisher.started == 1)
+    await wait_until(lambda: publisher.started == 1)  # the publish runs and waits for the gate
     draining = asyncio.create_task(hook.drain())
-    await wait_until(lambda: publisher.started == 1 and not publisher.delivered)
+    await _let_the_loop_run()
     assert not draining.done()  # still waiting for the listener
+    assert publisher.delivered == []
     publisher.gate.set()
-    await draining
+    await asyncio.wait_for(draining, 5)
     assert [event.key for event in publisher.delivered if isinstance(event, FeatureFlagEvaluated)] == ["a"]
 
 
@@ -397,15 +449,17 @@ async def test_drain_with_nothing_scheduled_returns_at_once() -> None:
 async def test_drain_waits_for_the_publish_of_a_worker_thread() -> None:
     publisher = GatedPublisher()
     hook = ExposureEventHook(publisher)  # type: ignore[arg-type]
+    assert not publisher.gate.is_set()  # the gate is held before the evaluation in the thread
     with bound_client(_provider(), hooks=[hook]) as client:
         await asyncio.to_thread(client.get_boolean_value, "a", False)
-    await wait_until(lambda: publisher.started == 1)
+    await wait_until(lambda: publisher.started == 1)  # handed to the application loop, waiting for the gate
     draining = asyncio.create_task(hook.drain())
-    await wait_until(lambda: not publisher.delivered)
+    await _let_the_loop_run()
     assert not draining.done()
+    assert publisher.delivered == []
     publisher.gate.set()
-    await draining
-    assert len(publisher.delivered) == 1
+    await asyncio.wait_for(draining, 5)
+    assert [event.key for event in publisher.delivered if isinstance(event, FeatureFlagEvaluated)] == ["a"]
 
 
 async def test_a_publish_that_is_cancelled_is_logged(caplog: pytest.LogCaptureFixture) -> None:
