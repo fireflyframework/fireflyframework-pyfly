@@ -25,8 +25,11 @@ one pass that never resolves a reference an evaluator brings in. The provider th
 ``targeting`` on the parsed document and hands FlagdCore a document without ``$evaluators``: a ``{"$ref": name}``
 object (one key, a text value) is replaced by the named evaluator, itself expanded, whatever the names sort as.
 A missing name or a cycle leaves the reference in place, and so does a flag whose targeting would expand to more than
-:data:`EXPANSION_LIMIT` JSON values (its whole targeting becomes an unresolvable reference): FlagdCore knows no
-``$ref`` operation, so evaluating that flag is a ``PARSE_ERROR`` while the rest of the document loads.
+:data:`EXPANSION_LIMIT` JSON values or nest deeper than :data:`DEPTH_LIMIT` levels (its whole targeting becomes an
+unresolvable reference): FlagdCore knows no ``$ref`` operation, so evaluating that flag is a ``PARSE_ERROR`` while
+the rest of the document loads. Both limits are decided in one bounded pass that never recurses deeper than the depth
+limit (a reference to a reference is followed in a loop), so neither a fan-out nor a long chain of references can
+exhaust memory or the stack; only a flag within both limits is expanded.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from openfeature.event import ProviderEventDetails
 from openfeature.flag_evaluation import FlagResolutionDetails, FlagValueType
 from openfeature.provider import AbstractProvider, Metadata
 
-__all__ = ["EXPANSION_LIMIT", "PROVIDER_NAME", "FireflyFlagProvider"]
+__all__ = ["DEPTH_LIMIT", "EXPANSION_LIMIT", "PROVIDER_NAME", "FireflyFlagProvider"]
 
 PROVIDER_NAME = "firefly"
 """The provider's name in OpenFeature metadata, the actuator and the health details."""
@@ -51,11 +54,16 @@ PROVIDER_NAME = "firefly"
 EXPANSION_LIMIT = 10_000
 """The most JSON values a flag's targeting may expand to; every object, array and scalar counts one (spec 4.1)."""
 
+DEPTH_LIMIT = 128
+"""The most nesting levels a flag's expanded targeting may have (spec 4.1): the targeting object is level 1, each
+object or array inside a container adds one, and a resolved reference takes the place of its ``{"$ref": ...}`` object
+without adding a level."""
+
 _FLAG_FIELDS = ("state", "variants", "defaultVariant", "targeting", "metadata")
 
 _OVER_THE_LIMIT = "$firefly-expansion-limit"
-"""The evaluator a flag over :data:`EXPANSION_LIMIT` is made to reference. FlagdCore is handed no ``$evaluators``, so
-the reference stays unresolved whatever the document's evaluators are named."""
+"""The evaluator a flag over :data:`EXPANSION_LIMIT` or :data:`DEPTH_LIMIT` is made to reference. FlagdCore is handed
+no ``$evaluators``, so the reference stays unresolved whatever the document's evaluators are named."""
 
 
 def _project(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -84,48 +92,67 @@ def _reference(node: Any) -> str | None:
     return None
 
 
-def _exceeds(targeting: Any, evaluators: Mapping[str, Any], limit: int) -> bool:
-    """Whether *targeting*, its references expanded, holds more than *limit* JSON values.
+def _follow(node: Any, evaluators: Mapping[str, Any], resolving: set[str]) -> tuple[Any, list[str]]:
+    """Follow *node* while it is a resolvable reference, in a loop: the node it stands for, and the evaluator names
+    entered on the way, now in *resolving* (the caller removes them once that node is done).
 
-    Counts without building the expansion and stops as soon as the budget is spent, so a fan-out of references
-    (``2**20`` of them in the vectors) costs about *limit* steps. An unresolved reference counts as the object it is.
+    A reference is resolvable when its evaluator exists and is not already being resolved on this path (a cycle).
     """
-    budget = limit
+    entered: list[str] = []
+    while (name := _reference(node)) is not None and name in evaluators and name not in resolving:
+        resolving.add(name)
+        entered.append(name)
+        node = evaluators[name]
+    return node, entered
 
-    def count(node: Any, resolving: frozenset[str]) -> None:
+
+def _over_the_limits(targeting: Any, evaluators: Mapping[str, Any]) -> bool:
+    """Whether *targeting*, its references expanded, holds more than :data:`EXPANSION_LIMIT` JSON values or nests
+    deeper than :data:`DEPTH_LIMIT` levels.
+
+    Counts without building the expansion and stops as soon as a limit is passed, so a fan-out of references
+    (``2**20`` of them in the vectors) costs about :data:`EXPANSION_LIMIT` steps. It recurses once per level, and
+    stops at a container past the depth limit, so a long chain of references never exhausts the stack. An unresolved
+    reference counts as the object it is.
+    """
+    budget = EXPANSION_LIMIT
+    resolving: set[str] = set()
+
+    def over(node: Any, level: int) -> bool:
         nonlocal budget
-        name = _reference(node)
-        if name is not None and name in evaluators and name not in resolving:
-            count(evaluators[name], resolving | {name})
-            return
-        budget -= 1
-        if isinstance(node, Mapping):
-            children: Iterable[Any] = node.values()
-        elif isinstance(node, list | tuple):
-            children = node
-        else:
-            return
-        for child in children:
+        node, entered = _follow(node, evaluators, resolving)
+        try:
+            budget -= 1
             if budget < 0:
-                return
-            count(child, resolving)
+                return True
+            if isinstance(node, Mapping):
+                children: Iterable[Any] = node.values()
+            elif isinstance(node, list | tuple):
+                children = node
+            else:
+                return False  # a scalar adds no level
+            if level > DEPTH_LIMIT:
+                return True
+            return any(over(child, level + 1) for child in children)
+        finally:
+            resolving.difference_update(entered)
 
-    count(targeting, frozenset())
-    return budget < 0
+    return over(targeting, 1)
 
 
-def _expand(node: Any, evaluators: Mapping[str, Any], resolving: frozenset[str]) -> Any:
-    """*node* with every resolvable reference replaced by its expanded evaluator (a new tree; strings untouched)."""
-    name = _reference(node)
-    if name is not None:
-        if name in evaluators and name not in resolving:
-            return _expand(evaluators[name], evaluators, resolving | {name})
-        return {"$ref": name}  # missing or a cycle: evaluating the flag is a PARSE_ERROR
-    if isinstance(node, Mapping):
-        return {key: _expand(value, evaluators, resolving) for key, value in node.items()}
-    if isinstance(node, list | tuple):
-        return [_expand(item, evaluators, resolving) for item in node]
-    return node
+def _expand(node: Any, evaluators: Mapping[str, Any], resolving: set[str]) -> Any:
+    """*node* with every resolvable reference replaced by its expanded evaluator: a new tree, strings untouched, and a
+    missing name or a cycle left as its ``{"$ref": name}`` object. Only called within both limits, so it recurses at
+    most :data:`DEPTH_LIMIT` levels."""
+    node, entered = _follow(node, evaluators, resolving)
+    try:
+        if isinstance(node, Mapping):
+            return {key: _expand(value, evaluators, resolving) for key, value in node.items()}
+        if isinstance(node, list | tuple):
+            return [_expand(item, evaluators, resolving) for item in node]
+        return node
+    finally:
+        resolving.difference_update(entered)
 
 
 def _for_flagd_core(projected: Mapping[str, Any]) -> dict[str, Any]:
@@ -135,10 +162,10 @@ def _for_flagd_core(projected: Mapping[str, Any]) -> dict[str, Any]:
     for key, definition in projected["flags"].items():
         flag = dict(definition)
         if "targeting" in flag:
-            if _exceeds(flag["targeting"], evaluators, EXPANSION_LIMIT):
+            if _over_the_limits(flag["targeting"], evaluators):
                 flag["targeting"] = {"$ref": _OVER_THE_LIMIT}
             else:
-                flag["targeting"] = _expand(flag["targeting"], evaluators, frozenset())
+                flag["targeting"] = _expand(flag["targeting"], evaluators, set())
         flags[key] = flag
     document: dict[str, Any] = {"flags": flags}
     if "metadata" in projected:

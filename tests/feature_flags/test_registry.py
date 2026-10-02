@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.event import ProviderEvent, ProviderEventDetails
-from openfeature.exception import ParseError
+from openfeature.exception import ErrorCode, ParseError
 from openfeature.provider import FeatureProvider
 
 from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
@@ -39,6 +39,7 @@ from tests.feature_flags.support import (
     ScriptedSource,
     StaticSource,
     bool_flag,
+    bound_client,
     recording_publisher,
     wait_until,
 )
@@ -336,6 +337,30 @@ async def test_the_provider_signals_the_keys_the_registry_publishes() -> None:
         ("inherits", "noted", "own"),
         ("inherits", "noted"),
     ]
+    await registry.stop()
+
+
+async def test_a_flag_nested_too_deep_is_a_parse_error_and_never_refuses_its_source() -> None:
+    """A 400-evaluator chain expands deeper than 128 levels: that flag is a PARSE_ERROR, the document applies."""
+    evaluators: dict[str, Any] = {"chain-0": {"==": [{"var": "tier"}, "gold"]}}
+    evaluators |= {f"chain-{i}": {"and": [{"$ref": f"chain-{i - 1}"}]} for i in range(1, 401)}
+    deep = {
+        "flags": {
+            "deep": bool_flag("off", targeting={"if": [{"$ref": "chain-400"}, "on", "off"]}),
+            "plain": bool_flag(),
+        },
+        "$evaluators": evaluators,
+    }
+    http = DocumentSource("http", {"flags": {"plain": bool_flag("off")}}, deep)
+    registry = FlagRegistry([http], FireflyFlagProvider())
+    await registry.start()
+    assert await registry.refresh("http") == ["deep", "plain"]
+    [status] = registry.sources()
+    assert (status.status, status.error, status.revision) == ("UP", None, "2")
+    with bound_client(registry.provider) as client:
+        details = client.get_boolean_details("deep", True, EvaluationContext("u", {"tier": "gold"}))
+        assert (details.value, details.error_code) == (True, ErrorCode.PARSE_ERROR)
+        assert client.get_boolean_value("plain", False) is True
     await registry.stop()
 
 

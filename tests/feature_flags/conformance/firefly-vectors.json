@@ -22593,6 +22593,40 @@
                 "off"
               ]
             }
+          },
+          "deep-chain-short": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-20"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "deep-chain-long": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-200"
+                },
+                "on",
+                "off"
+              ]
+            }
           }
         },
         "$evaluators": {
@@ -22801,6 +22835,1414 @@
               },
               {
                 "$ref": "fan-19"
+              }
+            ]
+          },
+          "chain-0": {
+            "==": [
+              {
+                "var": "tier"
+              },
+              "gold"
+            ]
+          },
+          "chain-1": {
+            "and": [
+              {
+                "$ref": "chain-0"
+              }
+            ]
+          },
+          "chain-2": {
+            "and": [
+              {
+                "$ref": "chain-1"
+              }
+            ]
+          },
+          "chain-3": {
+            "and": [
+              {
+                "$ref": "chain-2"
+              }
+            ]
+          },
+          "chain-4": {
+            "and": [
+              {
+                "$ref": "chain-3"
+              }
+            ]
+          },
+          "chain-5": {
+            "and": [
+              {
+                "$ref": "chain-4"
+              }
+            ]
+          },
+          "chain-6": {
+            "and": [
+              {
+                "$ref": "chain-5"
+              }
+            ]
+          },
+          "chain-7": {
+            "and": [
+              {
+                "$ref": "chain-6"
+              }
+            ]
+          },
+          "chain-8": {
+            "and": [
+              {
+                "$ref": "chain-7"
+              }
+            ]
+          },
+          "chain-9": {
+            "and": [
+              {
+                "$ref": "chain-8"
+              }
+            ]
+          },
+          "chain-10": {
+            "and": [
+              {
+                "$ref": "chain-9"
+              }
+            ]
+          },
+          "chain-11": {
+            "and": [
+              {
+                "$ref": "chain-10"
+              }
+            ]
+          },
+          "chain-12": {
+            "and": [
+              {
+                "$ref": "chain-11"
+              }
+            ]
+          },
+          "chain-13": {
+            "and": [
+              {
+                "$ref": "chain-12"
+              }
+            ]
+          },
+          "chain-14": {
+            "and": [
+              {
+                "$ref": "chain-13"
+              }
+            ]
+          },
+          "chain-15": {
+            "and": [
+              {
+                "$ref": "chain-14"
+              }
+            ]
+          },
+          "chain-16": {
+            "and": [
+              {
+                "$ref": "chain-15"
+              }
+            ]
+          },
+          "chain-17": {
+            "and": [
+              {
+                "$ref": "chain-16"
+              }
+            ]
+          },
+          "chain-18": {
+            "and": [
+              {
+                "$ref": "chain-17"
+              }
+            ]
+          },
+          "chain-19": {
+            "and": [
+              {
+                "$ref": "chain-18"
+              }
+            ]
+          },
+          "chain-20": {
+            "and": [
+              {
+                "$ref": "chain-19"
+              }
+            ]
+          },
+          "chain-21": {
+            "and": [
+              {
+                "$ref": "chain-20"
+              }
+            ]
+          },
+          "chain-22": {
+            "and": [
+              {
+                "$ref": "chain-21"
+              }
+            ]
+          },
+          "chain-23": {
+            "and": [
+              {
+                "$ref": "chain-22"
+              }
+            ]
+          },
+          "chain-24": {
+            "and": [
+              {
+                "$ref": "chain-23"
+              }
+            ]
+          },
+          "chain-25": {
+            "and": [
+              {
+                "$ref": "chain-24"
+              }
+            ]
+          },
+          "chain-26": {
+            "and": [
+              {
+                "$ref": "chain-25"
+              }
+            ]
+          },
+          "chain-27": {
+            "and": [
+              {
+                "$ref": "chain-26"
+              }
+            ]
+          },
+          "chain-28": {
+            "and": [
+              {
+                "$ref": "chain-27"
+              }
+            ]
+          },
+          "chain-29": {
+            "and": [
+              {
+                "$ref": "chain-28"
+              }
+            ]
+          },
+          "chain-30": {
+            "and": [
+              {
+                "$ref": "chain-29"
+              }
+            ]
+          },
+          "chain-31": {
+            "and": [
+              {
+                "$ref": "chain-30"
+              }
+            ]
+          },
+          "chain-32": {
+            "and": [
+              {
+                "$ref": "chain-31"
+              }
+            ]
+          },
+          "chain-33": {
+            "and": [
+              {
+                "$ref": "chain-32"
+              }
+            ]
+          },
+          "chain-34": {
+            "and": [
+              {
+                "$ref": "chain-33"
+              }
+            ]
+          },
+          "chain-35": {
+            "and": [
+              {
+                "$ref": "chain-34"
+              }
+            ]
+          },
+          "chain-36": {
+            "and": [
+              {
+                "$ref": "chain-35"
+              }
+            ]
+          },
+          "chain-37": {
+            "and": [
+              {
+                "$ref": "chain-36"
+              }
+            ]
+          },
+          "chain-38": {
+            "and": [
+              {
+                "$ref": "chain-37"
+              }
+            ]
+          },
+          "chain-39": {
+            "and": [
+              {
+                "$ref": "chain-38"
+              }
+            ]
+          },
+          "chain-40": {
+            "and": [
+              {
+                "$ref": "chain-39"
+              }
+            ]
+          },
+          "chain-41": {
+            "and": [
+              {
+                "$ref": "chain-40"
+              }
+            ]
+          },
+          "chain-42": {
+            "and": [
+              {
+                "$ref": "chain-41"
+              }
+            ]
+          },
+          "chain-43": {
+            "and": [
+              {
+                "$ref": "chain-42"
+              }
+            ]
+          },
+          "chain-44": {
+            "and": [
+              {
+                "$ref": "chain-43"
+              }
+            ]
+          },
+          "chain-45": {
+            "and": [
+              {
+                "$ref": "chain-44"
+              }
+            ]
+          },
+          "chain-46": {
+            "and": [
+              {
+                "$ref": "chain-45"
+              }
+            ]
+          },
+          "chain-47": {
+            "and": [
+              {
+                "$ref": "chain-46"
+              }
+            ]
+          },
+          "chain-48": {
+            "and": [
+              {
+                "$ref": "chain-47"
+              }
+            ]
+          },
+          "chain-49": {
+            "and": [
+              {
+                "$ref": "chain-48"
+              }
+            ]
+          },
+          "chain-50": {
+            "and": [
+              {
+                "$ref": "chain-49"
+              }
+            ]
+          },
+          "chain-51": {
+            "and": [
+              {
+                "$ref": "chain-50"
+              }
+            ]
+          },
+          "chain-52": {
+            "and": [
+              {
+                "$ref": "chain-51"
+              }
+            ]
+          },
+          "chain-53": {
+            "and": [
+              {
+                "$ref": "chain-52"
+              }
+            ]
+          },
+          "chain-54": {
+            "and": [
+              {
+                "$ref": "chain-53"
+              }
+            ]
+          },
+          "chain-55": {
+            "and": [
+              {
+                "$ref": "chain-54"
+              }
+            ]
+          },
+          "chain-56": {
+            "and": [
+              {
+                "$ref": "chain-55"
+              }
+            ]
+          },
+          "chain-57": {
+            "and": [
+              {
+                "$ref": "chain-56"
+              }
+            ]
+          },
+          "chain-58": {
+            "and": [
+              {
+                "$ref": "chain-57"
+              }
+            ]
+          },
+          "chain-59": {
+            "and": [
+              {
+                "$ref": "chain-58"
+              }
+            ]
+          },
+          "chain-60": {
+            "and": [
+              {
+                "$ref": "chain-59"
+              }
+            ]
+          },
+          "chain-61": {
+            "and": [
+              {
+                "$ref": "chain-60"
+              }
+            ]
+          },
+          "chain-62": {
+            "and": [
+              {
+                "$ref": "chain-61"
+              }
+            ]
+          },
+          "chain-63": {
+            "and": [
+              {
+                "$ref": "chain-62"
+              }
+            ]
+          },
+          "chain-64": {
+            "and": [
+              {
+                "$ref": "chain-63"
+              }
+            ]
+          },
+          "chain-65": {
+            "and": [
+              {
+                "$ref": "chain-64"
+              }
+            ]
+          },
+          "chain-66": {
+            "and": [
+              {
+                "$ref": "chain-65"
+              }
+            ]
+          },
+          "chain-67": {
+            "and": [
+              {
+                "$ref": "chain-66"
+              }
+            ]
+          },
+          "chain-68": {
+            "and": [
+              {
+                "$ref": "chain-67"
+              }
+            ]
+          },
+          "chain-69": {
+            "and": [
+              {
+                "$ref": "chain-68"
+              }
+            ]
+          },
+          "chain-70": {
+            "and": [
+              {
+                "$ref": "chain-69"
+              }
+            ]
+          },
+          "chain-71": {
+            "and": [
+              {
+                "$ref": "chain-70"
+              }
+            ]
+          },
+          "chain-72": {
+            "and": [
+              {
+                "$ref": "chain-71"
+              }
+            ]
+          },
+          "chain-73": {
+            "and": [
+              {
+                "$ref": "chain-72"
+              }
+            ]
+          },
+          "chain-74": {
+            "and": [
+              {
+                "$ref": "chain-73"
+              }
+            ]
+          },
+          "chain-75": {
+            "and": [
+              {
+                "$ref": "chain-74"
+              }
+            ]
+          },
+          "chain-76": {
+            "and": [
+              {
+                "$ref": "chain-75"
+              }
+            ]
+          },
+          "chain-77": {
+            "and": [
+              {
+                "$ref": "chain-76"
+              }
+            ]
+          },
+          "chain-78": {
+            "and": [
+              {
+                "$ref": "chain-77"
+              }
+            ]
+          },
+          "chain-79": {
+            "and": [
+              {
+                "$ref": "chain-78"
+              }
+            ]
+          },
+          "chain-80": {
+            "and": [
+              {
+                "$ref": "chain-79"
+              }
+            ]
+          },
+          "chain-81": {
+            "and": [
+              {
+                "$ref": "chain-80"
+              }
+            ]
+          },
+          "chain-82": {
+            "and": [
+              {
+                "$ref": "chain-81"
+              }
+            ]
+          },
+          "chain-83": {
+            "and": [
+              {
+                "$ref": "chain-82"
+              }
+            ]
+          },
+          "chain-84": {
+            "and": [
+              {
+                "$ref": "chain-83"
+              }
+            ]
+          },
+          "chain-85": {
+            "and": [
+              {
+                "$ref": "chain-84"
+              }
+            ]
+          },
+          "chain-86": {
+            "and": [
+              {
+                "$ref": "chain-85"
+              }
+            ]
+          },
+          "chain-87": {
+            "and": [
+              {
+                "$ref": "chain-86"
+              }
+            ]
+          },
+          "chain-88": {
+            "and": [
+              {
+                "$ref": "chain-87"
+              }
+            ]
+          },
+          "chain-89": {
+            "and": [
+              {
+                "$ref": "chain-88"
+              }
+            ]
+          },
+          "chain-90": {
+            "and": [
+              {
+                "$ref": "chain-89"
+              }
+            ]
+          },
+          "chain-91": {
+            "and": [
+              {
+                "$ref": "chain-90"
+              }
+            ]
+          },
+          "chain-92": {
+            "and": [
+              {
+                "$ref": "chain-91"
+              }
+            ]
+          },
+          "chain-93": {
+            "and": [
+              {
+                "$ref": "chain-92"
+              }
+            ]
+          },
+          "chain-94": {
+            "and": [
+              {
+                "$ref": "chain-93"
+              }
+            ]
+          },
+          "chain-95": {
+            "and": [
+              {
+                "$ref": "chain-94"
+              }
+            ]
+          },
+          "chain-96": {
+            "and": [
+              {
+                "$ref": "chain-95"
+              }
+            ]
+          },
+          "chain-97": {
+            "and": [
+              {
+                "$ref": "chain-96"
+              }
+            ]
+          },
+          "chain-98": {
+            "and": [
+              {
+                "$ref": "chain-97"
+              }
+            ]
+          },
+          "chain-99": {
+            "and": [
+              {
+                "$ref": "chain-98"
+              }
+            ]
+          },
+          "chain-100": {
+            "and": [
+              {
+                "$ref": "chain-99"
+              }
+            ]
+          },
+          "chain-101": {
+            "and": [
+              {
+                "$ref": "chain-100"
+              }
+            ]
+          },
+          "chain-102": {
+            "and": [
+              {
+                "$ref": "chain-101"
+              }
+            ]
+          },
+          "chain-103": {
+            "and": [
+              {
+                "$ref": "chain-102"
+              }
+            ]
+          },
+          "chain-104": {
+            "and": [
+              {
+                "$ref": "chain-103"
+              }
+            ]
+          },
+          "chain-105": {
+            "and": [
+              {
+                "$ref": "chain-104"
+              }
+            ]
+          },
+          "chain-106": {
+            "and": [
+              {
+                "$ref": "chain-105"
+              }
+            ]
+          },
+          "chain-107": {
+            "and": [
+              {
+                "$ref": "chain-106"
+              }
+            ]
+          },
+          "chain-108": {
+            "and": [
+              {
+                "$ref": "chain-107"
+              }
+            ]
+          },
+          "chain-109": {
+            "and": [
+              {
+                "$ref": "chain-108"
+              }
+            ]
+          },
+          "chain-110": {
+            "and": [
+              {
+                "$ref": "chain-109"
+              }
+            ]
+          },
+          "chain-111": {
+            "and": [
+              {
+                "$ref": "chain-110"
+              }
+            ]
+          },
+          "chain-112": {
+            "and": [
+              {
+                "$ref": "chain-111"
+              }
+            ]
+          },
+          "chain-113": {
+            "and": [
+              {
+                "$ref": "chain-112"
+              }
+            ]
+          },
+          "chain-114": {
+            "and": [
+              {
+                "$ref": "chain-113"
+              }
+            ]
+          },
+          "chain-115": {
+            "and": [
+              {
+                "$ref": "chain-114"
+              }
+            ]
+          },
+          "chain-116": {
+            "and": [
+              {
+                "$ref": "chain-115"
+              }
+            ]
+          },
+          "chain-117": {
+            "and": [
+              {
+                "$ref": "chain-116"
+              }
+            ]
+          },
+          "chain-118": {
+            "and": [
+              {
+                "$ref": "chain-117"
+              }
+            ]
+          },
+          "chain-119": {
+            "and": [
+              {
+                "$ref": "chain-118"
+              }
+            ]
+          },
+          "chain-120": {
+            "and": [
+              {
+                "$ref": "chain-119"
+              }
+            ]
+          },
+          "chain-121": {
+            "and": [
+              {
+                "$ref": "chain-120"
+              }
+            ]
+          },
+          "chain-122": {
+            "and": [
+              {
+                "$ref": "chain-121"
+              }
+            ]
+          },
+          "chain-123": {
+            "and": [
+              {
+                "$ref": "chain-122"
+              }
+            ]
+          },
+          "chain-124": {
+            "and": [
+              {
+                "$ref": "chain-123"
+              }
+            ]
+          },
+          "chain-125": {
+            "and": [
+              {
+                "$ref": "chain-124"
+              }
+            ]
+          },
+          "chain-126": {
+            "and": [
+              {
+                "$ref": "chain-125"
+              }
+            ]
+          },
+          "chain-127": {
+            "and": [
+              {
+                "$ref": "chain-126"
+              }
+            ]
+          },
+          "chain-128": {
+            "and": [
+              {
+                "$ref": "chain-127"
+              }
+            ]
+          },
+          "chain-129": {
+            "and": [
+              {
+                "$ref": "chain-128"
+              }
+            ]
+          },
+          "chain-130": {
+            "and": [
+              {
+                "$ref": "chain-129"
+              }
+            ]
+          },
+          "chain-131": {
+            "and": [
+              {
+                "$ref": "chain-130"
+              }
+            ]
+          },
+          "chain-132": {
+            "and": [
+              {
+                "$ref": "chain-131"
+              }
+            ]
+          },
+          "chain-133": {
+            "and": [
+              {
+                "$ref": "chain-132"
+              }
+            ]
+          },
+          "chain-134": {
+            "and": [
+              {
+                "$ref": "chain-133"
+              }
+            ]
+          },
+          "chain-135": {
+            "and": [
+              {
+                "$ref": "chain-134"
+              }
+            ]
+          },
+          "chain-136": {
+            "and": [
+              {
+                "$ref": "chain-135"
+              }
+            ]
+          },
+          "chain-137": {
+            "and": [
+              {
+                "$ref": "chain-136"
+              }
+            ]
+          },
+          "chain-138": {
+            "and": [
+              {
+                "$ref": "chain-137"
+              }
+            ]
+          },
+          "chain-139": {
+            "and": [
+              {
+                "$ref": "chain-138"
+              }
+            ]
+          },
+          "chain-140": {
+            "and": [
+              {
+                "$ref": "chain-139"
+              }
+            ]
+          },
+          "chain-141": {
+            "and": [
+              {
+                "$ref": "chain-140"
+              }
+            ]
+          },
+          "chain-142": {
+            "and": [
+              {
+                "$ref": "chain-141"
+              }
+            ]
+          },
+          "chain-143": {
+            "and": [
+              {
+                "$ref": "chain-142"
+              }
+            ]
+          },
+          "chain-144": {
+            "and": [
+              {
+                "$ref": "chain-143"
+              }
+            ]
+          },
+          "chain-145": {
+            "and": [
+              {
+                "$ref": "chain-144"
+              }
+            ]
+          },
+          "chain-146": {
+            "and": [
+              {
+                "$ref": "chain-145"
+              }
+            ]
+          },
+          "chain-147": {
+            "and": [
+              {
+                "$ref": "chain-146"
+              }
+            ]
+          },
+          "chain-148": {
+            "and": [
+              {
+                "$ref": "chain-147"
+              }
+            ]
+          },
+          "chain-149": {
+            "and": [
+              {
+                "$ref": "chain-148"
+              }
+            ]
+          },
+          "chain-150": {
+            "and": [
+              {
+                "$ref": "chain-149"
+              }
+            ]
+          },
+          "chain-151": {
+            "and": [
+              {
+                "$ref": "chain-150"
+              }
+            ]
+          },
+          "chain-152": {
+            "and": [
+              {
+                "$ref": "chain-151"
+              }
+            ]
+          },
+          "chain-153": {
+            "and": [
+              {
+                "$ref": "chain-152"
+              }
+            ]
+          },
+          "chain-154": {
+            "and": [
+              {
+                "$ref": "chain-153"
+              }
+            ]
+          },
+          "chain-155": {
+            "and": [
+              {
+                "$ref": "chain-154"
+              }
+            ]
+          },
+          "chain-156": {
+            "and": [
+              {
+                "$ref": "chain-155"
+              }
+            ]
+          },
+          "chain-157": {
+            "and": [
+              {
+                "$ref": "chain-156"
+              }
+            ]
+          },
+          "chain-158": {
+            "and": [
+              {
+                "$ref": "chain-157"
+              }
+            ]
+          },
+          "chain-159": {
+            "and": [
+              {
+                "$ref": "chain-158"
+              }
+            ]
+          },
+          "chain-160": {
+            "and": [
+              {
+                "$ref": "chain-159"
+              }
+            ]
+          },
+          "chain-161": {
+            "and": [
+              {
+                "$ref": "chain-160"
+              }
+            ]
+          },
+          "chain-162": {
+            "and": [
+              {
+                "$ref": "chain-161"
+              }
+            ]
+          },
+          "chain-163": {
+            "and": [
+              {
+                "$ref": "chain-162"
+              }
+            ]
+          },
+          "chain-164": {
+            "and": [
+              {
+                "$ref": "chain-163"
+              }
+            ]
+          },
+          "chain-165": {
+            "and": [
+              {
+                "$ref": "chain-164"
+              }
+            ]
+          },
+          "chain-166": {
+            "and": [
+              {
+                "$ref": "chain-165"
+              }
+            ]
+          },
+          "chain-167": {
+            "and": [
+              {
+                "$ref": "chain-166"
+              }
+            ]
+          },
+          "chain-168": {
+            "and": [
+              {
+                "$ref": "chain-167"
+              }
+            ]
+          },
+          "chain-169": {
+            "and": [
+              {
+                "$ref": "chain-168"
+              }
+            ]
+          },
+          "chain-170": {
+            "and": [
+              {
+                "$ref": "chain-169"
+              }
+            ]
+          },
+          "chain-171": {
+            "and": [
+              {
+                "$ref": "chain-170"
+              }
+            ]
+          },
+          "chain-172": {
+            "and": [
+              {
+                "$ref": "chain-171"
+              }
+            ]
+          },
+          "chain-173": {
+            "and": [
+              {
+                "$ref": "chain-172"
+              }
+            ]
+          },
+          "chain-174": {
+            "and": [
+              {
+                "$ref": "chain-173"
+              }
+            ]
+          },
+          "chain-175": {
+            "and": [
+              {
+                "$ref": "chain-174"
+              }
+            ]
+          },
+          "chain-176": {
+            "and": [
+              {
+                "$ref": "chain-175"
+              }
+            ]
+          },
+          "chain-177": {
+            "and": [
+              {
+                "$ref": "chain-176"
+              }
+            ]
+          },
+          "chain-178": {
+            "and": [
+              {
+                "$ref": "chain-177"
+              }
+            ]
+          },
+          "chain-179": {
+            "and": [
+              {
+                "$ref": "chain-178"
+              }
+            ]
+          },
+          "chain-180": {
+            "and": [
+              {
+                "$ref": "chain-179"
+              }
+            ]
+          },
+          "chain-181": {
+            "and": [
+              {
+                "$ref": "chain-180"
+              }
+            ]
+          },
+          "chain-182": {
+            "and": [
+              {
+                "$ref": "chain-181"
+              }
+            ]
+          },
+          "chain-183": {
+            "and": [
+              {
+                "$ref": "chain-182"
+              }
+            ]
+          },
+          "chain-184": {
+            "and": [
+              {
+                "$ref": "chain-183"
+              }
+            ]
+          },
+          "chain-185": {
+            "and": [
+              {
+                "$ref": "chain-184"
+              }
+            ]
+          },
+          "chain-186": {
+            "and": [
+              {
+                "$ref": "chain-185"
+              }
+            ]
+          },
+          "chain-187": {
+            "and": [
+              {
+                "$ref": "chain-186"
+              }
+            ]
+          },
+          "chain-188": {
+            "and": [
+              {
+                "$ref": "chain-187"
+              }
+            ]
+          },
+          "chain-189": {
+            "and": [
+              {
+                "$ref": "chain-188"
+              }
+            ]
+          },
+          "chain-190": {
+            "and": [
+              {
+                "$ref": "chain-189"
+              }
+            ]
+          },
+          "chain-191": {
+            "and": [
+              {
+                "$ref": "chain-190"
+              }
+            ]
+          },
+          "chain-192": {
+            "and": [
+              {
+                "$ref": "chain-191"
+              }
+            ]
+          },
+          "chain-193": {
+            "and": [
+              {
+                "$ref": "chain-192"
+              }
+            ]
+          },
+          "chain-194": {
+            "and": [
+              {
+                "$ref": "chain-193"
+              }
+            ]
+          },
+          "chain-195": {
+            "and": [
+              {
+                "$ref": "chain-194"
+              }
+            ]
+          },
+          "chain-196": {
+            "and": [
+              {
+                "$ref": "chain-195"
+              }
+            ]
+          },
+          "chain-197": {
+            "and": [
+              {
+                "$ref": "chain-196"
+              }
+            ]
+          },
+          "chain-198": {
+            "and": [
+              {
+                "$ref": "chain-197"
+              }
+            ]
+          },
+          "chain-199": {
+            "and": [
+              {
+                "$ref": "chain-198"
+              }
+            ]
+          },
+          "chain-200": {
+            "and": [
+              {
+                "$ref": "chain-199"
               }
             ]
           }
@@ -22857,6 +24299,40 @@
                 "off"
               ]
             }
+          },
+          "deep-chain-short": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-20"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "deep-chain-long": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-200"
+                },
+                "on",
+                "off"
+              ]
+            }
           }
         },
         "$evaluators": {
@@ -23067,6 +24543,1414 @@
                 "$ref": "fan-19"
               }
             ]
+          },
+          "chain-0": {
+            "==": [
+              {
+                "var": "tier"
+              },
+              "gold"
+            ]
+          },
+          "chain-1": {
+            "and": [
+              {
+                "$ref": "chain-0"
+              }
+            ]
+          },
+          "chain-2": {
+            "and": [
+              {
+                "$ref": "chain-1"
+              }
+            ]
+          },
+          "chain-3": {
+            "and": [
+              {
+                "$ref": "chain-2"
+              }
+            ]
+          },
+          "chain-4": {
+            "and": [
+              {
+                "$ref": "chain-3"
+              }
+            ]
+          },
+          "chain-5": {
+            "and": [
+              {
+                "$ref": "chain-4"
+              }
+            ]
+          },
+          "chain-6": {
+            "and": [
+              {
+                "$ref": "chain-5"
+              }
+            ]
+          },
+          "chain-7": {
+            "and": [
+              {
+                "$ref": "chain-6"
+              }
+            ]
+          },
+          "chain-8": {
+            "and": [
+              {
+                "$ref": "chain-7"
+              }
+            ]
+          },
+          "chain-9": {
+            "and": [
+              {
+                "$ref": "chain-8"
+              }
+            ]
+          },
+          "chain-10": {
+            "and": [
+              {
+                "$ref": "chain-9"
+              }
+            ]
+          },
+          "chain-11": {
+            "and": [
+              {
+                "$ref": "chain-10"
+              }
+            ]
+          },
+          "chain-12": {
+            "and": [
+              {
+                "$ref": "chain-11"
+              }
+            ]
+          },
+          "chain-13": {
+            "and": [
+              {
+                "$ref": "chain-12"
+              }
+            ]
+          },
+          "chain-14": {
+            "and": [
+              {
+                "$ref": "chain-13"
+              }
+            ]
+          },
+          "chain-15": {
+            "and": [
+              {
+                "$ref": "chain-14"
+              }
+            ]
+          },
+          "chain-16": {
+            "and": [
+              {
+                "$ref": "chain-15"
+              }
+            ]
+          },
+          "chain-17": {
+            "and": [
+              {
+                "$ref": "chain-16"
+              }
+            ]
+          },
+          "chain-18": {
+            "and": [
+              {
+                "$ref": "chain-17"
+              }
+            ]
+          },
+          "chain-19": {
+            "and": [
+              {
+                "$ref": "chain-18"
+              }
+            ]
+          },
+          "chain-20": {
+            "and": [
+              {
+                "$ref": "chain-19"
+              }
+            ]
+          },
+          "chain-21": {
+            "and": [
+              {
+                "$ref": "chain-20"
+              }
+            ]
+          },
+          "chain-22": {
+            "and": [
+              {
+                "$ref": "chain-21"
+              }
+            ]
+          },
+          "chain-23": {
+            "and": [
+              {
+                "$ref": "chain-22"
+              }
+            ]
+          },
+          "chain-24": {
+            "and": [
+              {
+                "$ref": "chain-23"
+              }
+            ]
+          },
+          "chain-25": {
+            "and": [
+              {
+                "$ref": "chain-24"
+              }
+            ]
+          },
+          "chain-26": {
+            "and": [
+              {
+                "$ref": "chain-25"
+              }
+            ]
+          },
+          "chain-27": {
+            "and": [
+              {
+                "$ref": "chain-26"
+              }
+            ]
+          },
+          "chain-28": {
+            "and": [
+              {
+                "$ref": "chain-27"
+              }
+            ]
+          },
+          "chain-29": {
+            "and": [
+              {
+                "$ref": "chain-28"
+              }
+            ]
+          },
+          "chain-30": {
+            "and": [
+              {
+                "$ref": "chain-29"
+              }
+            ]
+          },
+          "chain-31": {
+            "and": [
+              {
+                "$ref": "chain-30"
+              }
+            ]
+          },
+          "chain-32": {
+            "and": [
+              {
+                "$ref": "chain-31"
+              }
+            ]
+          },
+          "chain-33": {
+            "and": [
+              {
+                "$ref": "chain-32"
+              }
+            ]
+          },
+          "chain-34": {
+            "and": [
+              {
+                "$ref": "chain-33"
+              }
+            ]
+          },
+          "chain-35": {
+            "and": [
+              {
+                "$ref": "chain-34"
+              }
+            ]
+          },
+          "chain-36": {
+            "and": [
+              {
+                "$ref": "chain-35"
+              }
+            ]
+          },
+          "chain-37": {
+            "and": [
+              {
+                "$ref": "chain-36"
+              }
+            ]
+          },
+          "chain-38": {
+            "and": [
+              {
+                "$ref": "chain-37"
+              }
+            ]
+          },
+          "chain-39": {
+            "and": [
+              {
+                "$ref": "chain-38"
+              }
+            ]
+          },
+          "chain-40": {
+            "and": [
+              {
+                "$ref": "chain-39"
+              }
+            ]
+          },
+          "chain-41": {
+            "and": [
+              {
+                "$ref": "chain-40"
+              }
+            ]
+          },
+          "chain-42": {
+            "and": [
+              {
+                "$ref": "chain-41"
+              }
+            ]
+          },
+          "chain-43": {
+            "and": [
+              {
+                "$ref": "chain-42"
+              }
+            ]
+          },
+          "chain-44": {
+            "and": [
+              {
+                "$ref": "chain-43"
+              }
+            ]
+          },
+          "chain-45": {
+            "and": [
+              {
+                "$ref": "chain-44"
+              }
+            ]
+          },
+          "chain-46": {
+            "and": [
+              {
+                "$ref": "chain-45"
+              }
+            ]
+          },
+          "chain-47": {
+            "and": [
+              {
+                "$ref": "chain-46"
+              }
+            ]
+          },
+          "chain-48": {
+            "and": [
+              {
+                "$ref": "chain-47"
+              }
+            ]
+          },
+          "chain-49": {
+            "and": [
+              {
+                "$ref": "chain-48"
+              }
+            ]
+          },
+          "chain-50": {
+            "and": [
+              {
+                "$ref": "chain-49"
+              }
+            ]
+          },
+          "chain-51": {
+            "and": [
+              {
+                "$ref": "chain-50"
+              }
+            ]
+          },
+          "chain-52": {
+            "and": [
+              {
+                "$ref": "chain-51"
+              }
+            ]
+          },
+          "chain-53": {
+            "and": [
+              {
+                "$ref": "chain-52"
+              }
+            ]
+          },
+          "chain-54": {
+            "and": [
+              {
+                "$ref": "chain-53"
+              }
+            ]
+          },
+          "chain-55": {
+            "and": [
+              {
+                "$ref": "chain-54"
+              }
+            ]
+          },
+          "chain-56": {
+            "and": [
+              {
+                "$ref": "chain-55"
+              }
+            ]
+          },
+          "chain-57": {
+            "and": [
+              {
+                "$ref": "chain-56"
+              }
+            ]
+          },
+          "chain-58": {
+            "and": [
+              {
+                "$ref": "chain-57"
+              }
+            ]
+          },
+          "chain-59": {
+            "and": [
+              {
+                "$ref": "chain-58"
+              }
+            ]
+          },
+          "chain-60": {
+            "and": [
+              {
+                "$ref": "chain-59"
+              }
+            ]
+          },
+          "chain-61": {
+            "and": [
+              {
+                "$ref": "chain-60"
+              }
+            ]
+          },
+          "chain-62": {
+            "and": [
+              {
+                "$ref": "chain-61"
+              }
+            ]
+          },
+          "chain-63": {
+            "and": [
+              {
+                "$ref": "chain-62"
+              }
+            ]
+          },
+          "chain-64": {
+            "and": [
+              {
+                "$ref": "chain-63"
+              }
+            ]
+          },
+          "chain-65": {
+            "and": [
+              {
+                "$ref": "chain-64"
+              }
+            ]
+          },
+          "chain-66": {
+            "and": [
+              {
+                "$ref": "chain-65"
+              }
+            ]
+          },
+          "chain-67": {
+            "and": [
+              {
+                "$ref": "chain-66"
+              }
+            ]
+          },
+          "chain-68": {
+            "and": [
+              {
+                "$ref": "chain-67"
+              }
+            ]
+          },
+          "chain-69": {
+            "and": [
+              {
+                "$ref": "chain-68"
+              }
+            ]
+          },
+          "chain-70": {
+            "and": [
+              {
+                "$ref": "chain-69"
+              }
+            ]
+          },
+          "chain-71": {
+            "and": [
+              {
+                "$ref": "chain-70"
+              }
+            ]
+          },
+          "chain-72": {
+            "and": [
+              {
+                "$ref": "chain-71"
+              }
+            ]
+          },
+          "chain-73": {
+            "and": [
+              {
+                "$ref": "chain-72"
+              }
+            ]
+          },
+          "chain-74": {
+            "and": [
+              {
+                "$ref": "chain-73"
+              }
+            ]
+          },
+          "chain-75": {
+            "and": [
+              {
+                "$ref": "chain-74"
+              }
+            ]
+          },
+          "chain-76": {
+            "and": [
+              {
+                "$ref": "chain-75"
+              }
+            ]
+          },
+          "chain-77": {
+            "and": [
+              {
+                "$ref": "chain-76"
+              }
+            ]
+          },
+          "chain-78": {
+            "and": [
+              {
+                "$ref": "chain-77"
+              }
+            ]
+          },
+          "chain-79": {
+            "and": [
+              {
+                "$ref": "chain-78"
+              }
+            ]
+          },
+          "chain-80": {
+            "and": [
+              {
+                "$ref": "chain-79"
+              }
+            ]
+          },
+          "chain-81": {
+            "and": [
+              {
+                "$ref": "chain-80"
+              }
+            ]
+          },
+          "chain-82": {
+            "and": [
+              {
+                "$ref": "chain-81"
+              }
+            ]
+          },
+          "chain-83": {
+            "and": [
+              {
+                "$ref": "chain-82"
+              }
+            ]
+          },
+          "chain-84": {
+            "and": [
+              {
+                "$ref": "chain-83"
+              }
+            ]
+          },
+          "chain-85": {
+            "and": [
+              {
+                "$ref": "chain-84"
+              }
+            ]
+          },
+          "chain-86": {
+            "and": [
+              {
+                "$ref": "chain-85"
+              }
+            ]
+          },
+          "chain-87": {
+            "and": [
+              {
+                "$ref": "chain-86"
+              }
+            ]
+          },
+          "chain-88": {
+            "and": [
+              {
+                "$ref": "chain-87"
+              }
+            ]
+          },
+          "chain-89": {
+            "and": [
+              {
+                "$ref": "chain-88"
+              }
+            ]
+          },
+          "chain-90": {
+            "and": [
+              {
+                "$ref": "chain-89"
+              }
+            ]
+          },
+          "chain-91": {
+            "and": [
+              {
+                "$ref": "chain-90"
+              }
+            ]
+          },
+          "chain-92": {
+            "and": [
+              {
+                "$ref": "chain-91"
+              }
+            ]
+          },
+          "chain-93": {
+            "and": [
+              {
+                "$ref": "chain-92"
+              }
+            ]
+          },
+          "chain-94": {
+            "and": [
+              {
+                "$ref": "chain-93"
+              }
+            ]
+          },
+          "chain-95": {
+            "and": [
+              {
+                "$ref": "chain-94"
+              }
+            ]
+          },
+          "chain-96": {
+            "and": [
+              {
+                "$ref": "chain-95"
+              }
+            ]
+          },
+          "chain-97": {
+            "and": [
+              {
+                "$ref": "chain-96"
+              }
+            ]
+          },
+          "chain-98": {
+            "and": [
+              {
+                "$ref": "chain-97"
+              }
+            ]
+          },
+          "chain-99": {
+            "and": [
+              {
+                "$ref": "chain-98"
+              }
+            ]
+          },
+          "chain-100": {
+            "and": [
+              {
+                "$ref": "chain-99"
+              }
+            ]
+          },
+          "chain-101": {
+            "and": [
+              {
+                "$ref": "chain-100"
+              }
+            ]
+          },
+          "chain-102": {
+            "and": [
+              {
+                "$ref": "chain-101"
+              }
+            ]
+          },
+          "chain-103": {
+            "and": [
+              {
+                "$ref": "chain-102"
+              }
+            ]
+          },
+          "chain-104": {
+            "and": [
+              {
+                "$ref": "chain-103"
+              }
+            ]
+          },
+          "chain-105": {
+            "and": [
+              {
+                "$ref": "chain-104"
+              }
+            ]
+          },
+          "chain-106": {
+            "and": [
+              {
+                "$ref": "chain-105"
+              }
+            ]
+          },
+          "chain-107": {
+            "and": [
+              {
+                "$ref": "chain-106"
+              }
+            ]
+          },
+          "chain-108": {
+            "and": [
+              {
+                "$ref": "chain-107"
+              }
+            ]
+          },
+          "chain-109": {
+            "and": [
+              {
+                "$ref": "chain-108"
+              }
+            ]
+          },
+          "chain-110": {
+            "and": [
+              {
+                "$ref": "chain-109"
+              }
+            ]
+          },
+          "chain-111": {
+            "and": [
+              {
+                "$ref": "chain-110"
+              }
+            ]
+          },
+          "chain-112": {
+            "and": [
+              {
+                "$ref": "chain-111"
+              }
+            ]
+          },
+          "chain-113": {
+            "and": [
+              {
+                "$ref": "chain-112"
+              }
+            ]
+          },
+          "chain-114": {
+            "and": [
+              {
+                "$ref": "chain-113"
+              }
+            ]
+          },
+          "chain-115": {
+            "and": [
+              {
+                "$ref": "chain-114"
+              }
+            ]
+          },
+          "chain-116": {
+            "and": [
+              {
+                "$ref": "chain-115"
+              }
+            ]
+          },
+          "chain-117": {
+            "and": [
+              {
+                "$ref": "chain-116"
+              }
+            ]
+          },
+          "chain-118": {
+            "and": [
+              {
+                "$ref": "chain-117"
+              }
+            ]
+          },
+          "chain-119": {
+            "and": [
+              {
+                "$ref": "chain-118"
+              }
+            ]
+          },
+          "chain-120": {
+            "and": [
+              {
+                "$ref": "chain-119"
+              }
+            ]
+          },
+          "chain-121": {
+            "and": [
+              {
+                "$ref": "chain-120"
+              }
+            ]
+          },
+          "chain-122": {
+            "and": [
+              {
+                "$ref": "chain-121"
+              }
+            ]
+          },
+          "chain-123": {
+            "and": [
+              {
+                "$ref": "chain-122"
+              }
+            ]
+          },
+          "chain-124": {
+            "and": [
+              {
+                "$ref": "chain-123"
+              }
+            ]
+          },
+          "chain-125": {
+            "and": [
+              {
+                "$ref": "chain-124"
+              }
+            ]
+          },
+          "chain-126": {
+            "and": [
+              {
+                "$ref": "chain-125"
+              }
+            ]
+          },
+          "chain-127": {
+            "and": [
+              {
+                "$ref": "chain-126"
+              }
+            ]
+          },
+          "chain-128": {
+            "and": [
+              {
+                "$ref": "chain-127"
+              }
+            ]
+          },
+          "chain-129": {
+            "and": [
+              {
+                "$ref": "chain-128"
+              }
+            ]
+          },
+          "chain-130": {
+            "and": [
+              {
+                "$ref": "chain-129"
+              }
+            ]
+          },
+          "chain-131": {
+            "and": [
+              {
+                "$ref": "chain-130"
+              }
+            ]
+          },
+          "chain-132": {
+            "and": [
+              {
+                "$ref": "chain-131"
+              }
+            ]
+          },
+          "chain-133": {
+            "and": [
+              {
+                "$ref": "chain-132"
+              }
+            ]
+          },
+          "chain-134": {
+            "and": [
+              {
+                "$ref": "chain-133"
+              }
+            ]
+          },
+          "chain-135": {
+            "and": [
+              {
+                "$ref": "chain-134"
+              }
+            ]
+          },
+          "chain-136": {
+            "and": [
+              {
+                "$ref": "chain-135"
+              }
+            ]
+          },
+          "chain-137": {
+            "and": [
+              {
+                "$ref": "chain-136"
+              }
+            ]
+          },
+          "chain-138": {
+            "and": [
+              {
+                "$ref": "chain-137"
+              }
+            ]
+          },
+          "chain-139": {
+            "and": [
+              {
+                "$ref": "chain-138"
+              }
+            ]
+          },
+          "chain-140": {
+            "and": [
+              {
+                "$ref": "chain-139"
+              }
+            ]
+          },
+          "chain-141": {
+            "and": [
+              {
+                "$ref": "chain-140"
+              }
+            ]
+          },
+          "chain-142": {
+            "and": [
+              {
+                "$ref": "chain-141"
+              }
+            ]
+          },
+          "chain-143": {
+            "and": [
+              {
+                "$ref": "chain-142"
+              }
+            ]
+          },
+          "chain-144": {
+            "and": [
+              {
+                "$ref": "chain-143"
+              }
+            ]
+          },
+          "chain-145": {
+            "and": [
+              {
+                "$ref": "chain-144"
+              }
+            ]
+          },
+          "chain-146": {
+            "and": [
+              {
+                "$ref": "chain-145"
+              }
+            ]
+          },
+          "chain-147": {
+            "and": [
+              {
+                "$ref": "chain-146"
+              }
+            ]
+          },
+          "chain-148": {
+            "and": [
+              {
+                "$ref": "chain-147"
+              }
+            ]
+          },
+          "chain-149": {
+            "and": [
+              {
+                "$ref": "chain-148"
+              }
+            ]
+          },
+          "chain-150": {
+            "and": [
+              {
+                "$ref": "chain-149"
+              }
+            ]
+          },
+          "chain-151": {
+            "and": [
+              {
+                "$ref": "chain-150"
+              }
+            ]
+          },
+          "chain-152": {
+            "and": [
+              {
+                "$ref": "chain-151"
+              }
+            ]
+          },
+          "chain-153": {
+            "and": [
+              {
+                "$ref": "chain-152"
+              }
+            ]
+          },
+          "chain-154": {
+            "and": [
+              {
+                "$ref": "chain-153"
+              }
+            ]
+          },
+          "chain-155": {
+            "and": [
+              {
+                "$ref": "chain-154"
+              }
+            ]
+          },
+          "chain-156": {
+            "and": [
+              {
+                "$ref": "chain-155"
+              }
+            ]
+          },
+          "chain-157": {
+            "and": [
+              {
+                "$ref": "chain-156"
+              }
+            ]
+          },
+          "chain-158": {
+            "and": [
+              {
+                "$ref": "chain-157"
+              }
+            ]
+          },
+          "chain-159": {
+            "and": [
+              {
+                "$ref": "chain-158"
+              }
+            ]
+          },
+          "chain-160": {
+            "and": [
+              {
+                "$ref": "chain-159"
+              }
+            ]
+          },
+          "chain-161": {
+            "and": [
+              {
+                "$ref": "chain-160"
+              }
+            ]
+          },
+          "chain-162": {
+            "and": [
+              {
+                "$ref": "chain-161"
+              }
+            ]
+          },
+          "chain-163": {
+            "and": [
+              {
+                "$ref": "chain-162"
+              }
+            ]
+          },
+          "chain-164": {
+            "and": [
+              {
+                "$ref": "chain-163"
+              }
+            ]
+          },
+          "chain-165": {
+            "and": [
+              {
+                "$ref": "chain-164"
+              }
+            ]
+          },
+          "chain-166": {
+            "and": [
+              {
+                "$ref": "chain-165"
+              }
+            ]
+          },
+          "chain-167": {
+            "and": [
+              {
+                "$ref": "chain-166"
+              }
+            ]
+          },
+          "chain-168": {
+            "and": [
+              {
+                "$ref": "chain-167"
+              }
+            ]
+          },
+          "chain-169": {
+            "and": [
+              {
+                "$ref": "chain-168"
+              }
+            ]
+          },
+          "chain-170": {
+            "and": [
+              {
+                "$ref": "chain-169"
+              }
+            ]
+          },
+          "chain-171": {
+            "and": [
+              {
+                "$ref": "chain-170"
+              }
+            ]
+          },
+          "chain-172": {
+            "and": [
+              {
+                "$ref": "chain-171"
+              }
+            ]
+          },
+          "chain-173": {
+            "and": [
+              {
+                "$ref": "chain-172"
+              }
+            ]
+          },
+          "chain-174": {
+            "and": [
+              {
+                "$ref": "chain-173"
+              }
+            ]
+          },
+          "chain-175": {
+            "and": [
+              {
+                "$ref": "chain-174"
+              }
+            ]
+          },
+          "chain-176": {
+            "and": [
+              {
+                "$ref": "chain-175"
+              }
+            ]
+          },
+          "chain-177": {
+            "and": [
+              {
+                "$ref": "chain-176"
+              }
+            ]
+          },
+          "chain-178": {
+            "and": [
+              {
+                "$ref": "chain-177"
+              }
+            ]
+          },
+          "chain-179": {
+            "and": [
+              {
+                "$ref": "chain-178"
+              }
+            ]
+          },
+          "chain-180": {
+            "and": [
+              {
+                "$ref": "chain-179"
+              }
+            ]
+          },
+          "chain-181": {
+            "and": [
+              {
+                "$ref": "chain-180"
+              }
+            ]
+          },
+          "chain-182": {
+            "and": [
+              {
+                "$ref": "chain-181"
+              }
+            ]
+          },
+          "chain-183": {
+            "and": [
+              {
+                "$ref": "chain-182"
+              }
+            ]
+          },
+          "chain-184": {
+            "and": [
+              {
+                "$ref": "chain-183"
+              }
+            ]
+          },
+          "chain-185": {
+            "and": [
+              {
+                "$ref": "chain-184"
+              }
+            ]
+          },
+          "chain-186": {
+            "and": [
+              {
+                "$ref": "chain-185"
+              }
+            ]
+          },
+          "chain-187": {
+            "and": [
+              {
+                "$ref": "chain-186"
+              }
+            ]
+          },
+          "chain-188": {
+            "and": [
+              {
+                "$ref": "chain-187"
+              }
+            ]
+          },
+          "chain-189": {
+            "and": [
+              {
+                "$ref": "chain-188"
+              }
+            ]
+          },
+          "chain-190": {
+            "and": [
+              {
+                "$ref": "chain-189"
+              }
+            ]
+          },
+          "chain-191": {
+            "and": [
+              {
+                "$ref": "chain-190"
+              }
+            ]
+          },
+          "chain-192": {
+            "and": [
+              {
+                "$ref": "chain-191"
+              }
+            ]
+          },
+          "chain-193": {
+            "and": [
+              {
+                "$ref": "chain-192"
+              }
+            ]
+          },
+          "chain-194": {
+            "and": [
+              {
+                "$ref": "chain-193"
+              }
+            ]
+          },
+          "chain-195": {
+            "and": [
+              {
+                "$ref": "chain-194"
+              }
+            ]
+          },
+          "chain-196": {
+            "and": [
+              {
+                "$ref": "chain-195"
+              }
+            ]
+          },
+          "chain-197": {
+            "and": [
+              {
+                "$ref": "chain-196"
+              }
+            ]
+          },
+          "chain-198": {
+            "and": [
+              {
+                "$ref": "chain-197"
+              }
+            ]
+          },
+          "chain-199": {
+            "and": [
+              {
+                "$ref": "chain-198"
+              }
+            ]
+          },
+          "chain-200": {
+            "and": [
+              {
+                "$ref": "chain-199"
+              }
+            ]
           }
         }
       },
@@ -23074,6 +25958,3419 @@
       "type": "boolean",
       "default": true,
       "targetingKey": "u-34",
+      "context": {
+        "tier": "gold"
+      },
+      "expect": {
+        "value": true,
+        "variant": null,
+        "reason": "ERROR",
+        "errorCode": "PARSE_ERROR"
+      }
+    },
+    {
+      "name": "a chain of references within 128 nesting levels evaluates",
+      "kind": "evaluate",
+      "document": {
+        "flags": {
+          "fan-out-small": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "fan-5"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "fan-out-huge": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "fan-20"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "deep-chain-short": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-20"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "deep-chain-long": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-200"
+                },
+                "on",
+                "off"
+              ]
+            }
+          }
+        },
+        "$evaluators": {
+          "fan-0": {
+            "==": [
+              {
+                "var": "tier"
+              },
+              "gold"
+            ]
+          },
+          "fan-1": {
+            "or": [
+              {
+                "$ref": "fan-0"
+              },
+              {
+                "$ref": "fan-0"
+              }
+            ]
+          },
+          "fan-2": {
+            "or": [
+              {
+                "$ref": "fan-1"
+              },
+              {
+                "$ref": "fan-1"
+              }
+            ]
+          },
+          "fan-3": {
+            "or": [
+              {
+                "$ref": "fan-2"
+              },
+              {
+                "$ref": "fan-2"
+              }
+            ]
+          },
+          "fan-4": {
+            "or": [
+              {
+                "$ref": "fan-3"
+              },
+              {
+                "$ref": "fan-3"
+              }
+            ]
+          },
+          "fan-5": {
+            "or": [
+              {
+                "$ref": "fan-4"
+              },
+              {
+                "$ref": "fan-4"
+              }
+            ]
+          },
+          "fan-6": {
+            "or": [
+              {
+                "$ref": "fan-5"
+              },
+              {
+                "$ref": "fan-5"
+              }
+            ]
+          },
+          "fan-7": {
+            "or": [
+              {
+                "$ref": "fan-6"
+              },
+              {
+                "$ref": "fan-6"
+              }
+            ]
+          },
+          "fan-8": {
+            "or": [
+              {
+                "$ref": "fan-7"
+              },
+              {
+                "$ref": "fan-7"
+              }
+            ]
+          },
+          "fan-9": {
+            "or": [
+              {
+                "$ref": "fan-8"
+              },
+              {
+                "$ref": "fan-8"
+              }
+            ]
+          },
+          "fan-10": {
+            "or": [
+              {
+                "$ref": "fan-9"
+              },
+              {
+                "$ref": "fan-9"
+              }
+            ]
+          },
+          "fan-11": {
+            "or": [
+              {
+                "$ref": "fan-10"
+              },
+              {
+                "$ref": "fan-10"
+              }
+            ]
+          },
+          "fan-12": {
+            "or": [
+              {
+                "$ref": "fan-11"
+              },
+              {
+                "$ref": "fan-11"
+              }
+            ]
+          },
+          "fan-13": {
+            "or": [
+              {
+                "$ref": "fan-12"
+              },
+              {
+                "$ref": "fan-12"
+              }
+            ]
+          },
+          "fan-14": {
+            "or": [
+              {
+                "$ref": "fan-13"
+              },
+              {
+                "$ref": "fan-13"
+              }
+            ]
+          },
+          "fan-15": {
+            "or": [
+              {
+                "$ref": "fan-14"
+              },
+              {
+                "$ref": "fan-14"
+              }
+            ]
+          },
+          "fan-16": {
+            "or": [
+              {
+                "$ref": "fan-15"
+              },
+              {
+                "$ref": "fan-15"
+              }
+            ]
+          },
+          "fan-17": {
+            "or": [
+              {
+                "$ref": "fan-16"
+              },
+              {
+                "$ref": "fan-16"
+              }
+            ]
+          },
+          "fan-18": {
+            "or": [
+              {
+                "$ref": "fan-17"
+              },
+              {
+                "$ref": "fan-17"
+              }
+            ]
+          },
+          "fan-19": {
+            "or": [
+              {
+                "$ref": "fan-18"
+              },
+              {
+                "$ref": "fan-18"
+              }
+            ]
+          },
+          "fan-20": {
+            "or": [
+              {
+                "$ref": "fan-19"
+              },
+              {
+                "$ref": "fan-19"
+              }
+            ]
+          },
+          "chain-0": {
+            "==": [
+              {
+                "var": "tier"
+              },
+              "gold"
+            ]
+          },
+          "chain-1": {
+            "and": [
+              {
+                "$ref": "chain-0"
+              }
+            ]
+          },
+          "chain-2": {
+            "and": [
+              {
+                "$ref": "chain-1"
+              }
+            ]
+          },
+          "chain-3": {
+            "and": [
+              {
+                "$ref": "chain-2"
+              }
+            ]
+          },
+          "chain-4": {
+            "and": [
+              {
+                "$ref": "chain-3"
+              }
+            ]
+          },
+          "chain-5": {
+            "and": [
+              {
+                "$ref": "chain-4"
+              }
+            ]
+          },
+          "chain-6": {
+            "and": [
+              {
+                "$ref": "chain-5"
+              }
+            ]
+          },
+          "chain-7": {
+            "and": [
+              {
+                "$ref": "chain-6"
+              }
+            ]
+          },
+          "chain-8": {
+            "and": [
+              {
+                "$ref": "chain-7"
+              }
+            ]
+          },
+          "chain-9": {
+            "and": [
+              {
+                "$ref": "chain-8"
+              }
+            ]
+          },
+          "chain-10": {
+            "and": [
+              {
+                "$ref": "chain-9"
+              }
+            ]
+          },
+          "chain-11": {
+            "and": [
+              {
+                "$ref": "chain-10"
+              }
+            ]
+          },
+          "chain-12": {
+            "and": [
+              {
+                "$ref": "chain-11"
+              }
+            ]
+          },
+          "chain-13": {
+            "and": [
+              {
+                "$ref": "chain-12"
+              }
+            ]
+          },
+          "chain-14": {
+            "and": [
+              {
+                "$ref": "chain-13"
+              }
+            ]
+          },
+          "chain-15": {
+            "and": [
+              {
+                "$ref": "chain-14"
+              }
+            ]
+          },
+          "chain-16": {
+            "and": [
+              {
+                "$ref": "chain-15"
+              }
+            ]
+          },
+          "chain-17": {
+            "and": [
+              {
+                "$ref": "chain-16"
+              }
+            ]
+          },
+          "chain-18": {
+            "and": [
+              {
+                "$ref": "chain-17"
+              }
+            ]
+          },
+          "chain-19": {
+            "and": [
+              {
+                "$ref": "chain-18"
+              }
+            ]
+          },
+          "chain-20": {
+            "and": [
+              {
+                "$ref": "chain-19"
+              }
+            ]
+          },
+          "chain-21": {
+            "and": [
+              {
+                "$ref": "chain-20"
+              }
+            ]
+          },
+          "chain-22": {
+            "and": [
+              {
+                "$ref": "chain-21"
+              }
+            ]
+          },
+          "chain-23": {
+            "and": [
+              {
+                "$ref": "chain-22"
+              }
+            ]
+          },
+          "chain-24": {
+            "and": [
+              {
+                "$ref": "chain-23"
+              }
+            ]
+          },
+          "chain-25": {
+            "and": [
+              {
+                "$ref": "chain-24"
+              }
+            ]
+          },
+          "chain-26": {
+            "and": [
+              {
+                "$ref": "chain-25"
+              }
+            ]
+          },
+          "chain-27": {
+            "and": [
+              {
+                "$ref": "chain-26"
+              }
+            ]
+          },
+          "chain-28": {
+            "and": [
+              {
+                "$ref": "chain-27"
+              }
+            ]
+          },
+          "chain-29": {
+            "and": [
+              {
+                "$ref": "chain-28"
+              }
+            ]
+          },
+          "chain-30": {
+            "and": [
+              {
+                "$ref": "chain-29"
+              }
+            ]
+          },
+          "chain-31": {
+            "and": [
+              {
+                "$ref": "chain-30"
+              }
+            ]
+          },
+          "chain-32": {
+            "and": [
+              {
+                "$ref": "chain-31"
+              }
+            ]
+          },
+          "chain-33": {
+            "and": [
+              {
+                "$ref": "chain-32"
+              }
+            ]
+          },
+          "chain-34": {
+            "and": [
+              {
+                "$ref": "chain-33"
+              }
+            ]
+          },
+          "chain-35": {
+            "and": [
+              {
+                "$ref": "chain-34"
+              }
+            ]
+          },
+          "chain-36": {
+            "and": [
+              {
+                "$ref": "chain-35"
+              }
+            ]
+          },
+          "chain-37": {
+            "and": [
+              {
+                "$ref": "chain-36"
+              }
+            ]
+          },
+          "chain-38": {
+            "and": [
+              {
+                "$ref": "chain-37"
+              }
+            ]
+          },
+          "chain-39": {
+            "and": [
+              {
+                "$ref": "chain-38"
+              }
+            ]
+          },
+          "chain-40": {
+            "and": [
+              {
+                "$ref": "chain-39"
+              }
+            ]
+          },
+          "chain-41": {
+            "and": [
+              {
+                "$ref": "chain-40"
+              }
+            ]
+          },
+          "chain-42": {
+            "and": [
+              {
+                "$ref": "chain-41"
+              }
+            ]
+          },
+          "chain-43": {
+            "and": [
+              {
+                "$ref": "chain-42"
+              }
+            ]
+          },
+          "chain-44": {
+            "and": [
+              {
+                "$ref": "chain-43"
+              }
+            ]
+          },
+          "chain-45": {
+            "and": [
+              {
+                "$ref": "chain-44"
+              }
+            ]
+          },
+          "chain-46": {
+            "and": [
+              {
+                "$ref": "chain-45"
+              }
+            ]
+          },
+          "chain-47": {
+            "and": [
+              {
+                "$ref": "chain-46"
+              }
+            ]
+          },
+          "chain-48": {
+            "and": [
+              {
+                "$ref": "chain-47"
+              }
+            ]
+          },
+          "chain-49": {
+            "and": [
+              {
+                "$ref": "chain-48"
+              }
+            ]
+          },
+          "chain-50": {
+            "and": [
+              {
+                "$ref": "chain-49"
+              }
+            ]
+          },
+          "chain-51": {
+            "and": [
+              {
+                "$ref": "chain-50"
+              }
+            ]
+          },
+          "chain-52": {
+            "and": [
+              {
+                "$ref": "chain-51"
+              }
+            ]
+          },
+          "chain-53": {
+            "and": [
+              {
+                "$ref": "chain-52"
+              }
+            ]
+          },
+          "chain-54": {
+            "and": [
+              {
+                "$ref": "chain-53"
+              }
+            ]
+          },
+          "chain-55": {
+            "and": [
+              {
+                "$ref": "chain-54"
+              }
+            ]
+          },
+          "chain-56": {
+            "and": [
+              {
+                "$ref": "chain-55"
+              }
+            ]
+          },
+          "chain-57": {
+            "and": [
+              {
+                "$ref": "chain-56"
+              }
+            ]
+          },
+          "chain-58": {
+            "and": [
+              {
+                "$ref": "chain-57"
+              }
+            ]
+          },
+          "chain-59": {
+            "and": [
+              {
+                "$ref": "chain-58"
+              }
+            ]
+          },
+          "chain-60": {
+            "and": [
+              {
+                "$ref": "chain-59"
+              }
+            ]
+          },
+          "chain-61": {
+            "and": [
+              {
+                "$ref": "chain-60"
+              }
+            ]
+          },
+          "chain-62": {
+            "and": [
+              {
+                "$ref": "chain-61"
+              }
+            ]
+          },
+          "chain-63": {
+            "and": [
+              {
+                "$ref": "chain-62"
+              }
+            ]
+          },
+          "chain-64": {
+            "and": [
+              {
+                "$ref": "chain-63"
+              }
+            ]
+          },
+          "chain-65": {
+            "and": [
+              {
+                "$ref": "chain-64"
+              }
+            ]
+          },
+          "chain-66": {
+            "and": [
+              {
+                "$ref": "chain-65"
+              }
+            ]
+          },
+          "chain-67": {
+            "and": [
+              {
+                "$ref": "chain-66"
+              }
+            ]
+          },
+          "chain-68": {
+            "and": [
+              {
+                "$ref": "chain-67"
+              }
+            ]
+          },
+          "chain-69": {
+            "and": [
+              {
+                "$ref": "chain-68"
+              }
+            ]
+          },
+          "chain-70": {
+            "and": [
+              {
+                "$ref": "chain-69"
+              }
+            ]
+          },
+          "chain-71": {
+            "and": [
+              {
+                "$ref": "chain-70"
+              }
+            ]
+          },
+          "chain-72": {
+            "and": [
+              {
+                "$ref": "chain-71"
+              }
+            ]
+          },
+          "chain-73": {
+            "and": [
+              {
+                "$ref": "chain-72"
+              }
+            ]
+          },
+          "chain-74": {
+            "and": [
+              {
+                "$ref": "chain-73"
+              }
+            ]
+          },
+          "chain-75": {
+            "and": [
+              {
+                "$ref": "chain-74"
+              }
+            ]
+          },
+          "chain-76": {
+            "and": [
+              {
+                "$ref": "chain-75"
+              }
+            ]
+          },
+          "chain-77": {
+            "and": [
+              {
+                "$ref": "chain-76"
+              }
+            ]
+          },
+          "chain-78": {
+            "and": [
+              {
+                "$ref": "chain-77"
+              }
+            ]
+          },
+          "chain-79": {
+            "and": [
+              {
+                "$ref": "chain-78"
+              }
+            ]
+          },
+          "chain-80": {
+            "and": [
+              {
+                "$ref": "chain-79"
+              }
+            ]
+          },
+          "chain-81": {
+            "and": [
+              {
+                "$ref": "chain-80"
+              }
+            ]
+          },
+          "chain-82": {
+            "and": [
+              {
+                "$ref": "chain-81"
+              }
+            ]
+          },
+          "chain-83": {
+            "and": [
+              {
+                "$ref": "chain-82"
+              }
+            ]
+          },
+          "chain-84": {
+            "and": [
+              {
+                "$ref": "chain-83"
+              }
+            ]
+          },
+          "chain-85": {
+            "and": [
+              {
+                "$ref": "chain-84"
+              }
+            ]
+          },
+          "chain-86": {
+            "and": [
+              {
+                "$ref": "chain-85"
+              }
+            ]
+          },
+          "chain-87": {
+            "and": [
+              {
+                "$ref": "chain-86"
+              }
+            ]
+          },
+          "chain-88": {
+            "and": [
+              {
+                "$ref": "chain-87"
+              }
+            ]
+          },
+          "chain-89": {
+            "and": [
+              {
+                "$ref": "chain-88"
+              }
+            ]
+          },
+          "chain-90": {
+            "and": [
+              {
+                "$ref": "chain-89"
+              }
+            ]
+          },
+          "chain-91": {
+            "and": [
+              {
+                "$ref": "chain-90"
+              }
+            ]
+          },
+          "chain-92": {
+            "and": [
+              {
+                "$ref": "chain-91"
+              }
+            ]
+          },
+          "chain-93": {
+            "and": [
+              {
+                "$ref": "chain-92"
+              }
+            ]
+          },
+          "chain-94": {
+            "and": [
+              {
+                "$ref": "chain-93"
+              }
+            ]
+          },
+          "chain-95": {
+            "and": [
+              {
+                "$ref": "chain-94"
+              }
+            ]
+          },
+          "chain-96": {
+            "and": [
+              {
+                "$ref": "chain-95"
+              }
+            ]
+          },
+          "chain-97": {
+            "and": [
+              {
+                "$ref": "chain-96"
+              }
+            ]
+          },
+          "chain-98": {
+            "and": [
+              {
+                "$ref": "chain-97"
+              }
+            ]
+          },
+          "chain-99": {
+            "and": [
+              {
+                "$ref": "chain-98"
+              }
+            ]
+          },
+          "chain-100": {
+            "and": [
+              {
+                "$ref": "chain-99"
+              }
+            ]
+          },
+          "chain-101": {
+            "and": [
+              {
+                "$ref": "chain-100"
+              }
+            ]
+          },
+          "chain-102": {
+            "and": [
+              {
+                "$ref": "chain-101"
+              }
+            ]
+          },
+          "chain-103": {
+            "and": [
+              {
+                "$ref": "chain-102"
+              }
+            ]
+          },
+          "chain-104": {
+            "and": [
+              {
+                "$ref": "chain-103"
+              }
+            ]
+          },
+          "chain-105": {
+            "and": [
+              {
+                "$ref": "chain-104"
+              }
+            ]
+          },
+          "chain-106": {
+            "and": [
+              {
+                "$ref": "chain-105"
+              }
+            ]
+          },
+          "chain-107": {
+            "and": [
+              {
+                "$ref": "chain-106"
+              }
+            ]
+          },
+          "chain-108": {
+            "and": [
+              {
+                "$ref": "chain-107"
+              }
+            ]
+          },
+          "chain-109": {
+            "and": [
+              {
+                "$ref": "chain-108"
+              }
+            ]
+          },
+          "chain-110": {
+            "and": [
+              {
+                "$ref": "chain-109"
+              }
+            ]
+          },
+          "chain-111": {
+            "and": [
+              {
+                "$ref": "chain-110"
+              }
+            ]
+          },
+          "chain-112": {
+            "and": [
+              {
+                "$ref": "chain-111"
+              }
+            ]
+          },
+          "chain-113": {
+            "and": [
+              {
+                "$ref": "chain-112"
+              }
+            ]
+          },
+          "chain-114": {
+            "and": [
+              {
+                "$ref": "chain-113"
+              }
+            ]
+          },
+          "chain-115": {
+            "and": [
+              {
+                "$ref": "chain-114"
+              }
+            ]
+          },
+          "chain-116": {
+            "and": [
+              {
+                "$ref": "chain-115"
+              }
+            ]
+          },
+          "chain-117": {
+            "and": [
+              {
+                "$ref": "chain-116"
+              }
+            ]
+          },
+          "chain-118": {
+            "and": [
+              {
+                "$ref": "chain-117"
+              }
+            ]
+          },
+          "chain-119": {
+            "and": [
+              {
+                "$ref": "chain-118"
+              }
+            ]
+          },
+          "chain-120": {
+            "and": [
+              {
+                "$ref": "chain-119"
+              }
+            ]
+          },
+          "chain-121": {
+            "and": [
+              {
+                "$ref": "chain-120"
+              }
+            ]
+          },
+          "chain-122": {
+            "and": [
+              {
+                "$ref": "chain-121"
+              }
+            ]
+          },
+          "chain-123": {
+            "and": [
+              {
+                "$ref": "chain-122"
+              }
+            ]
+          },
+          "chain-124": {
+            "and": [
+              {
+                "$ref": "chain-123"
+              }
+            ]
+          },
+          "chain-125": {
+            "and": [
+              {
+                "$ref": "chain-124"
+              }
+            ]
+          },
+          "chain-126": {
+            "and": [
+              {
+                "$ref": "chain-125"
+              }
+            ]
+          },
+          "chain-127": {
+            "and": [
+              {
+                "$ref": "chain-126"
+              }
+            ]
+          },
+          "chain-128": {
+            "and": [
+              {
+                "$ref": "chain-127"
+              }
+            ]
+          },
+          "chain-129": {
+            "and": [
+              {
+                "$ref": "chain-128"
+              }
+            ]
+          },
+          "chain-130": {
+            "and": [
+              {
+                "$ref": "chain-129"
+              }
+            ]
+          },
+          "chain-131": {
+            "and": [
+              {
+                "$ref": "chain-130"
+              }
+            ]
+          },
+          "chain-132": {
+            "and": [
+              {
+                "$ref": "chain-131"
+              }
+            ]
+          },
+          "chain-133": {
+            "and": [
+              {
+                "$ref": "chain-132"
+              }
+            ]
+          },
+          "chain-134": {
+            "and": [
+              {
+                "$ref": "chain-133"
+              }
+            ]
+          },
+          "chain-135": {
+            "and": [
+              {
+                "$ref": "chain-134"
+              }
+            ]
+          },
+          "chain-136": {
+            "and": [
+              {
+                "$ref": "chain-135"
+              }
+            ]
+          },
+          "chain-137": {
+            "and": [
+              {
+                "$ref": "chain-136"
+              }
+            ]
+          },
+          "chain-138": {
+            "and": [
+              {
+                "$ref": "chain-137"
+              }
+            ]
+          },
+          "chain-139": {
+            "and": [
+              {
+                "$ref": "chain-138"
+              }
+            ]
+          },
+          "chain-140": {
+            "and": [
+              {
+                "$ref": "chain-139"
+              }
+            ]
+          },
+          "chain-141": {
+            "and": [
+              {
+                "$ref": "chain-140"
+              }
+            ]
+          },
+          "chain-142": {
+            "and": [
+              {
+                "$ref": "chain-141"
+              }
+            ]
+          },
+          "chain-143": {
+            "and": [
+              {
+                "$ref": "chain-142"
+              }
+            ]
+          },
+          "chain-144": {
+            "and": [
+              {
+                "$ref": "chain-143"
+              }
+            ]
+          },
+          "chain-145": {
+            "and": [
+              {
+                "$ref": "chain-144"
+              }
+            ]
+          },
+          "chain-146": {
+            "and": [
+              {
+                "$ref": "chain-145"
+              }
+            ]
+          },
+          "chain-147": {
+            "and": [
+              {
+                "$ref": "chain-146"
+              }
+            ]
+          },
+          "chain-148": {
+            "and": [
+              {
+                "$ref": "chain-147"
+              }
+            ]
+          },
+          "chain-149": {
+            "and": [
+              {
+                "$ref": "chain-148"
+              }
+            ]
+          },
+          "chain-150": {
+            "and": [
+              {
+                "$ref": "chain-149"
+              }
+            ]
+          },
+          "chain-151": {
+            "and": [
+              {
+                "$ref": "chain-150"
+              }
+            ]
+          },
+          "chain-152": {
+            "and": [
+              {
+                "$ref": "chain-151"
+              }
+            ]
+          },
+          "chain-153": {
+            "and": [
+              {
+                "$ref": "chain-152"
+              }
+            ]
+          },
+          "chain-154": {
+            "and": [
+              {
+                "$ref": "chain-153"
+              }
+            ]
+          },
+          "chain-155": {
+            "and": [
+              {
+                "$ref": "chain-154"
+              }
+            ]
+          },
+          "chain-156": {
+            "and": [
+              {
+                "$ref": "chain-155"
+              }
+            ]
+          },
+          "chain-157": {
+            "and": [
+              {
+                "$ref": "chain-156"
+              }
+            ]
+          },
+          "chain-158": {
+            "and": [
+              {
+                "$ref": "chain-157"
+              }
+            ]
+          },
+          "chain-159": {
+            "and": [
+              {
+                "$ref": "chain-158"
+              }
+            ]
+          },
+          "chain-160": {
+            "and": [
+              {
+                "$ref": "chain-159"
+              }
+            ]
+          },
+          "chain-161": {
+            "and": [
+              {
+                "$ref": "chain-160"
+              }
+            ]
+          },
+          "chain-162": {
+            "and": [
+              {
+                "$ref": "chain-161"
+              }
+            ]
+          },
+          "chain-163": {
+            "and": [
+              {
+                "$ref": "chain-162"
+              }
+            ]
+          },
+          "chain-164": {
+            "and": [
+              {
+                "$ref": "chain-163"
+              }
+            ]
+          },
+          "chain-165": {
+            "and": [
+              {
+                "$ref": "chain-164"
+              }
+            ]
+          },
+          "chain-166": {
+            "and": [
+              {
+                "$ref": "chain-165"
+              }
+            ]
+          },
+          "chain-167": {
+            "and": [
+              {
+                "$ref": "chain-166"
+              }
+            ]
+          },
+          "chain-168": {
+            "and": [
+              {
+                "$ref": "chain-167"
+              }
+            ]
+          },
+          "chain-169": {
+            "and": [
+              {
+                "$ref": "chain-168"
+              }
+            ]
+          },
+          "chain-170": {
+            "and": [
+              {
+                "$ref": "chain-169"
+              }
+            ]
+          },
+          "chain-171": {
+            "and": [
+              {
+                "$ref": "chain-170"
+              }
+            ]
+          },
+          "chain-172": {
+            "and": [
+              {
+                "$ref": "chain-171"
+              }
+            ]
+          },
+          "chain-173": {
+            "and": [
+              {
+                "$ref": "chain-172"
+              }
+            ]
+          },
+          "chain-174": {
+            "and": [
+              {
+                "$ref": "chain-173"
+              }
+            ]
+          },
+          "chain-175": {
+            "and": [
+              {
+                "$ref": "chain-174"
+              }
+            ]
+          },
+          "chain-176": {
+            "and": [
+              {
+                "$ref": "chain-175"
+              }
+            ]
+          },
+          "chain-177": {
+            "and": [
+              {
+                "$ref": "chain-176"
+              }
+            ]
+          },
+          "chain-178": {
+            "and": [
+              {
+                "$ref": "chain-177"
+              }
+            ]
+          },
+          "chain-179": {
+            "and": [
+              {
+                "$ref": "chain-178"
+              }
+            ]
+          },
+          "chain-180": {
+            "and": [
+              {
+                "$ref": "chain-179"
+              }
+            ]
+          },
+          "chain-181": {
+            "and": [
+              {
+                "$ref": "chain-180"
+              }
+            ]
+          },
+          "chain-182": {
+            "and": [
+              {
+                "$ref": "chain-181"
+              }
+            ]
+          },
+          "chain-183": {
+            "and": [
+              {
+                "$ref": "chain-182"
+              }
+            ]
+          },
+          "chain-184": {
+            "and": [
+              {
+                "$ref": "chain-183"
+              }
+            ]
+          },
+          "chain-185": {
+            "and": [
+              {
+                "$ref": "chain-184"
+              }
+            ]
+          },
+          "chain-186": {
+            "and": [
+              {
+                "$ref": "chain-185"
+              }
+            ]
+          },
+          "chain-187": {
+            "and": [
+              {
+                "$ref": "chain-186"
+              }
+            ]
+          },
+          "chain-188": {
+            "and": [
+              {
+                "$ref": "chain-187"
+              }
+            ]
+          },
+          "chain-189": {
+            "and": [
+              {
+                "$ref": "chain-188"
+              }
+            ]
+          },
+          "chain-190": {
+            "and": [
+              {
+                "$ref": "chain-189"
+              }
+            ]
+          },
+          "chain-191": {
+            "and": [
+              {
+                "$ref": "chain-190"
+              }
+            ]
+          },
+          "chain-192": {
+            "and": [
+              {
+                "$ref": "chain-191"
+              }
+            ]
+          },
+          "chain-193": {
+            "and": [
+              {
+                "$ref": "chain-192"
+              }
+            ]
+          },
+          "chain-194": {
+            "and": [
+              {
+                "$ref": "chain-193"
+              }
+            ]
+          },
+          "chain-195": {
+            "and": [
+              {
+                "$ref": "chain-194"
+              }
+            ]
+          },
+          "chain-196": {
+            "and": [
+              {
+                "$ref": "chain-195"
+              }
+            ]
+          },
+          "chain-197": {
+            "and": [
+              {
+                "$ref": "chain-196"
+              }
+            ]
+          },
+          "chain-198": {
+            "and": [
+              {
+                "$ref": "chain-197"
+              }
+            ]
+          },
+          "chain-199": {
+            "and": [
+              {
+                "$ref": "chain-198"
+              }
+            ]
+          },
+          "chain-200": {
+            "and": [
+              {
+                "$ref": "chain-199"
+              }
+            ]
+          }
+        }
+      },
+      "flag": "deep-chain-short",
+      "type": "boolean",
+      "default": false,
+      "targetingKey": "u-35",
+      "context": {
+        "tier": "gold"
+      },
+      "expect": {
+        "value": true,
+        "variant": "on",
+        "reason": "TARGETING_MATCH"
+      }
+    },
+    {
+      "name": "a chain of references nesting deeper than 128 levels is a parse error",
+      "kind": "evaluate",
+      "document": {
+        "flags": {
+          "fan-out-small": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "fan-5"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "fan-out-huge": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "fan-20"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "deep-chain-short": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-20"
+                },
+                "on",
+                "off"
+              ]
+            }
+          },
+          "deep-chain-long": {
+            "state": "ENABLED",
+            "variants": {
+              "on": true,
+              "off": false
+            },
+            "defaultVariant": "off",
+            "targeting": {
+              "if": [
+                {
+                  "$ref": "chain-200"
+                },
+                "on",
+                "off"
+              ]
+            }
+          }
+        },
+        "$evaluators": {
+          "fan-0": {
+            "==": [
+              {
+                "var": "tier"
+              },
+              "gold"
+            ]
+          },
+          "fan-1": {
+            "or": [
+              {
+                "$ref": "fan-0"
+              },
+              {
+                "$ref": "fan-0"
+              }
+            ]
+          },
+          "fan-2": {
+            "or": [
+              {
+                "$ref": "fan-1"
+              },
+              {
+                "$ref": "fan-1"
+              }
+            ]
+          },
+          "fan-3": {
+            "or": [
+              {
+                "$ref": "fan-2"
+              },
+              {
+                "$ref": "fan-2"
+              }
+            ]
+          },
+          "fan-4": {
+            "or": [
+              {
+                "$ref": "fan-3"
+              },
+              {
+                "$ref": "fan-3"
+              }
+            ]
+          },
+          "fan-5": {
+            "or": [
+              {
+                "$ref": "fan-4"
+              },
+              {
+                "$ref": "fan-4"
+              }
+            ]
+          },
+          "fan-6": {
+            "or": [
+              {
+                "$ref": "fan-5"
+              },
+              {
+                "$ref": "fan-5"
+              }
+            ]
+          },
+          "fan-7": {
+            "or": [
+              {
+                "$ref": "fan-6"
+              },
+              {
+                "$ref": "fan-6"
+              }
+            ]
+          },
+          "fan-8": {
+            "or": [
+              {
+                "$ref": "fan-7"
+              },
+              {
+                "$ref": "fan-7"
+              }
+            ]
+          },
+          "fan-9": {
+            "or": [
+              {
+                "$ref": "fan-8"
+              },
+              {
+                "$ref": "fan-8"
+              }
+            ]
+          },
+          "fan-10": {
+            "or": [
+              {
+                "$ref": "fan-9"
+              },
+              {
+                "$ref": "fan-9"
+              }
+            ]
+          },
+          "fan-11": {
+            "or": [
+              {
+                "$ref": "fan-10"
+              },
+              {
+                "$ref": "fan-10"
+              }
+            ]
+          },
+          "fan-12": {
+            "or": [
+              {
+                "$ref": "fan-11"
+              },
+              {
+                "$ref": "fan-11"
+              }
+            ]
+          },
+          "fan-13": {
+            "or": [
+              {
+                "$ref": "fan-12"
+              },
+              {
+                "$ref": "fan-12"
+              }
+            ]
+          },
+          "fan-14": {
+            "or": [
+              {
+                "$ref": "fan-13"
+              },
+              {
+                "$ref": "fan-13"
+              }
+            ]
+          },
+          "fan-15": {
+            "or": [
+              {
+                "$ref": "fan-14"
+              },
+              {
+                "$ref": "fan-14"
+              }
+            ]
+          },
+          "fan-16": {
+            "or": [
+              {
+                "$ref": "fan-15"
+              },
+              {
+                "$ref": "fan-15"
+              }
+            ]
+          },
+          "fan-17": {
+            "or": [
+              {
+                "$ref": "fan-16"
+              },
+              {
+                "$ref": "fan-16"
+              }
+            ]
+          },
+          "fan-18": {
+            "or": [
+              {
+                "$ref": "fan-17"
+              },
+              {
+                "$ref": "fan-17"
+              }
+            ]
+          },
+          "fan-19": {
+            "or": [
+              {
+                "$ref": "fan-18"
+              },
+              {
+                "$ref": "fan-18"
+              }
+            ]
+          },
+          "fan-20": {
+            "or": [
+              {
+                "$ref": "fan-19"
+              },
+              {
+                "$ref": "fan-19"
+              }
+            ]
+          },
+          "chain-0": {
+            "==": [
+              {
+                "var": "tier"
+              },
+              "gold"
+            ]
+          },
+          "chain-1": {
+            "and": [
+              {
+                "$ref": "chain-0"
+              }
+            ]
+          },
+          "chain-2": {
+            "and": [
+              {
+                "$ref": "chain-1"
+              }
+            ]
+          },
+          "chain-3": {
+            "and": [
+              {
+                "$ref": "chain-2"
+              }
+            ]
+          },
+          "chain-4": {
+            "and": [
+              {
+                "$ref": "chain-3"
+              }
+            ]
+          },
+          "chain-5": {
+            "and": [
+              {
+                "$ref": "chain-4"
+              }
+            ]
+          },
+          "chain-6": {
+            "and": [
+              {
+                "$ref": "chain-5"
+              }
+            ]
+          },
+          "chain-7": {
+            "and": [
+              {
+                "$ref": "chain-6"
+              }
+            ]
+          },
+          "chain-8": {
+            "and": [
+              {
+                "$ref": "chain-7"
+              }
+            ]
+          },
+          "chain-9": {
+            "and": [
+              {
+                "$ref": "chain-8"
+              }
+            ]
+          },
+          "chain-10": {
+            "and": [
+              {
+                "$ref": "chain-9"
+              }
+            ]
+          },
+          "chain-11": {
+            "and": [
+              {
+                "$ref": "chain-10"
+              }
+            ]
+          },
+          "chain-12": {
+            "and": [
+              {
+                "$ref": "chain-11"
+              }
+            ]
+          },
+          "chain-13": {
+            "and": [
+              {
+                "$ref": "chain-12"
+              }
+            ]
+          },
+          "chain-14": {
+            "and": [
+              {
+                "$ref": "chain-13"
+              }
+            ]
+          },
+          "chain-15": {
+            "and": [
+              {
+                "$ref": "chain-14"
+              }
+            ]
+          },
+          "chain-16": {
+            "and": [
+              {
+                "$ref": "chain-15"
+              }
+            ]
+          },
+          "chain-17": {
+            "and": [
+              {
+                "$ref": "chain-16"
+              }
+            ]
+          },
+          "chain-18": {
+            "and": [
+              {
+                "$ref": "chain-17"
+              }
+            ]
+          },
+          "chain-19": {
+            "and": [
+              {
+                "$ref": "chain-18"
+              }
+            ]
+          },
+          "chain-20": {
+            "and": [
+              {
+                "$ref": "chain-19"
+              }
+            ]
+          },
+          "chain-21": {
+            "and": [
+              {
+                "$ref": "chain-20"
+              }
+            ]
+          },
+          "chain-22": {
+            "and": [
+              {
+                "$ref": "chain-21"
+              }
+            ]
+          },
+          "chain-23": {
+            "and": [
+              {
+                "$ref": "chain-22"
+              }
+            ]
+          },
+          "chain-24": {
+            "and": [
+              {
+                "$ref": "chain-23"
+              }
+            ]
+          },
+          "chain-25": {
+            "and": [
+              {
+                "$ref": "chain-24"
+              }
+            ]
+          },
+          "chain-26": {
+            "and": [
+              {
+                "$ref": "chain-25"
+              }
+            ]
+          },
+          "chain-27": {
+            "and": [
+              {
+                "$ref": "chain-26"
+              }
+            ]
+          },
+          "chain-28": {
+            "and": [
+              {
+                "$ref": "chain-27"
+              }
+            ]
+          },
+          "chain-29": {
+            "and": [
+              {
+                "$ref": "chain-28"
+              }
+            ]
+          },
+          "chain-30": {
+            "and": [
+              {
+                "$ref": "chain-29"
+              }
+            ]
+          },
+          "chain-31": {
+            "and": [
+              {
+                "$ref": "chain-30"
+              }
+            ]
+          },
+          "chain-32": {
+            "and": [
+              {
+                "$ref": "chain-31"
+              }
+            ]
+          },
+          "chain-33": {
+            "and": [
+              {
+                "$ref": "chain-32"
+              }
+            ]
+          },
+          "chain-34": {
+            "and": [
+              {
+                "$ref": "chain-33"
+              }
+            ]
+          },
+          "chain-35": {
+            "and": [
+              {
+                "$ref": "chain-34"
+              }
+            ]
+          },
+          "chain-36": {
+            "and": [
+              {
+                "$ref": "chain-35"
+              }
+            ]
+          },
+          "chain-37": {
+            "and": [
+              {
+                "$ref": "chain-36"
+              }
+            ]
+          },
+          "chain-38": {
+            "and": [
+              {
+                "$ref": "chain-37"
+              }
+            ]
+          },
+          "chain-39": {
+            "and": [
+              {
+                "$ref": "chain-38"
+              }
+            ]
+          },
+          "chain-40": {
+            "and": [
+              {
+                "$ref": "chain-39"
+              }
+            ]
+          },
+          "chain-41": {
+            "and": [
+              {
+                "$ref": "chain-40"
+              }
+            ]
+          },
+          "chain-42": {
+            "and": [
+              {
+                "$ref": "chain-41"
+              }
+            ]
+          },
+          "chain-43": {
+            "and": [
+              {
+                "$ref": "chain-42"
+              }
+            ]
+          },
+          "chain-44": {
+            "and": [
+              {
+                "$ref": "chain-43"
+              }
+            ]
+          },
+          "chain-45": {
+            "and": [
+              {
+                "$ref": "chain-44"
+              }
+            ]
+          },
+          "chain-46": {
+            "and": [
+              {
+                "$ref": "chain-45"
+              }
+            ]
+          },
+          "chain-47": {
+            "and": [
+              {
+                "$ref": "chain-46"
+              }
+            ]
+          },
+          "chain-48": {
+            "and": [
+              {
+                "$ref": "chain-47"
+              }
+            ]
+          },
+          "chain-49": {
+            "and": [
+              {
+                "$ref": "chain-48"
+              }
+            ]
+          },
+          "chain-50": {
+            "and": [
+              {
+                "$ref": "chain-49"
+              }
+            ]
+          },
+          "chain-51": {
+            "and": [
+              {
+                "$ref": "chain-50"
+              }
+            ]
+          },
+          "chain-52": {
+            "and": [
+              {
+                "$ref": "chain-51"
+              }
+            ]
+          },
+          "chain-53": {
+            "and": [
+              {
+                "$ref": "chain-52"
+              }
+            ]
+          },
+          "chain-54": {
+            "and": [
+              {
+                "$ref": "chain-53"
+              }
+            ]
+          },
+          "chain-55": {
+            "and": [
+              {
+                "$ref": "chain-54"
+              }
+            ]
+          },
+          "chain-56": {
+            "and": [
+              {
+                "$ref": "chain-55"
+              }
+            ]
+          },
+          "chain-57": {
+            "and": [
+              {
+                "$ref": "chain-56"
+              }
+            ]
+          },
+          "chain-58": {
+            "and": [
+              {
+                "$ref": "chain-57"
+              }
+            ]
+          },
+          "chain-59": {
+            "and": [
+              {
+                "$ref": "chain-58"
+              }
+            ]
+          },
+          "chain-60": {
+            "and": [
+              {
+                "$ref": "chain-59"
+              }
+            ]
+          },
+          "chain-61": {
+            "and": [
+              {
+                "$ref": "chain-60"
+              }
+            ]
+          },
+          "chain-62": {
+            "and": [
+              {
+                "$ref": "chain-61"
+              }
+            ]
+          },
+          "chain-63": {
+            "and": [
+              {
+                "$ref": "chain-62"
+              }
+            ]
+          },
+          "chain-64": {
+            "and": [
+              {
+                "$ref": "chain-63"
+              }
+            ]
+          },
+          "chain-65": {
+            "and": [
+              {
+                "$ref": "chain-64"
+              }
+            ]
+          },
+          "chain-66": {
+            "and": [
+              {
+                "$ref": "chain-65"
+              }
+            ]
+          },
+          "chain-67": {
+            "and": [
+              {
+                "$ref": "chain-66"
+              }
+            ]
+          },
+          "chain-68": {
+            "and": [
+              {
+                "$ref": "chain-67"
+              }
+            ]
+          },
+          "chain-69": {
+            "and": [
+              {
+                "$ref": "chain-68"
+              }
+            ]
+          },
+          "chain-70": {
+            "and": [
+              {
+                "$ref": "chain-69"
+              }
+            ]
+          },
+          "chain-71": {
+            "and": [
+              {
+                "$ref": "chain-70"
+              }
+            ]
+          },
+          "chain-72": {
+            "and": [
+              {
+                "$ref": "chain-71"
+              }
+            ]
+          },
+          "chain-73": {
+            "and": [
+              {
+                "$ref": "chain-72"
+              }
+            ]
+          },
+          "chain-74": {
+            "and": [
+              {
+                "$ref": "chain-73"
+              }
+            ]
+          },
+          "chain-75": {
+            "and": [
+              {
+                "$ref": "chain-74"
+              }
+            ]
+          },
+          "chain-76": {
+            "and": [
+              {
+                "$ref": "chain-75"
+              }
+            ]
+          },
+          "chain-77": {
+            "and": [
+              {
+                "$ref": "chain-76"
+              }
+            ]
+          },
+          "chain-78": {
+            "and": [
+              {
+                "$ref": "chain-77"
+              }
+            ]
+          },
+          "chain-79": {
+            "and": [
+              {
+                "$ref": "chain-78"
+              }
+            ]
+          },
+          "chain-80": {
+            "and": [
+              {
+                "$ref": "chain-79"
+              }
+            ]
+          },
+          "chain-81": {
+            "and": [
+              {
+                "$ref": "chain-80"
+              }
+            ]
+          },
+          "chain-82": {
+            "and": [
+              {
+                "$ref": "chain-81"
+              }
+            ]
+          },
+          "chain-83": {
+            "and": [
+              {
+                "$ref": "chain-82"
+              }
+            ]
+          },
+          "chain-84": {
+            "and": [
+              {
+                "$ref": "chain-83"
+              }
+            ]
+          },
+          "chain-85": {
+            "and": [
+              {
+                "$ref": "chain-84"
+              }
+            ]
+          },
+          "chain-86": {
+            "and": [
+              {
+                "$ref": "chain-85"
+              }
+            ]
+          },
+          "chain-87": {
+            "and": [
+              {
+                "$ref": "chain-86"
+              }
+            ]
+          },
+          "chain-88": {
+            "and": [
+              {
+                "$ref": "chain-87"
+              }
+            ]
+          },
+          "chain-89": {
+            "and": [
+              {
+                "$ref": "chain-88"
+              }
+            ]
+          },
+          "chain-90": {
+            "and": [
+              {
+                "$ref": "chain-89"
+              }
+            ]
+          },
+          "chain-91": {
+            "and": [
+              {
+                "$ref": "chain-90"
+              }
+            ]
+          },
+          "chain-92": {
+            "and": [
+              {
+                "$ref": "chain-91"
+              }
+            ]
+          },
+          "chain-93": {
+            "and": [
+              {
+                "$ref": "chain-92"
+              }
+            ]
+          },
+          "chain-94": {
+            "and": [
+              {
+                "$ref": "chain-93"
+              }
+            ]
+          },
+          "chain-95": {
+            "and": [
+              {
+                "$ref": "chain-94"
+              }
+            ]
+          },
+          "chain-96": {
+            "and": [
+              {
+                "$ref": "chain-95"
+              }
+            ]
+          },
+          "chain-97": {
+            "and": [
+              {
+                "$ref": "chain-96"
+              }
+            ]
+          },
+          "chain-98": {
+            "and": [
+              {
+                "$ref": "chain-97"
+              }
+            ]
+          },
+          "chain-99": {
+            "and": [
+              {
+                "$ref": "chain-98"
+              }
+            ]
+          },
+          "chain-100": {
+            "and": [
+              {
+                "$ref": "chain-99"
+              }
+            ]
+          },
+          "chain-101": {
+            "and": [
+              {
+                "$ref": "chain-100"
+              }
+            ]
+          },
+          "chain-102": {
+            "and": [
+              {
+                "$ref": "chain-101"
+              }
+            ]
+          },
+          "chain-103": {
+            "and": [
+              {
+                "$ref": "chain-102"
+              }
+            ]
+          },
+          "chain-104": {
+            "and": [
+              {
+                "$ref": "chain-103"
+              }
+            ]
+          },
+          "chain-105": {
+            "and": [
+              {
+                "$ref": "chain-104"
+              }
+            ]
+          },
+          "chain-106": {
+            "and": [
+              {
+                "$ref": "chain-105"
+              }
+            ]
+          },
+          "chain-107": {
+            "and": [
+              {
+                "$ref": "chain-106"
+              }
+            ]
+          },
+          "chain-108": {
+            "and": [
+              {
+                "$ref": "chain-107"
+              }
+            ]
+          },
+          "chain-109": {
+            "and": [
+              {
+                "$ref": "chain-108"
+              }
+            ]
+          },
+          "chain-110": {
+            "and": [
+              {
+                "$ref": "chain-109"
+              }
+            ]
+          },
+          "chain-111": {
+            "and": [
+              {
+                "$ref": "chain-110"
+              }
+            ]
+          },
+          "chain-112": {
+            "and": [
+              {
+                "$ref": "chain-111"
+              }
+            ]
+          },
+          "chain-113": {
+            "and": [
+              {
+                "$ref": "chain-112"
+              }
+            ]
+          },
+          "chain-114": {
+            "and": [
+              {
+                "$ref": "chain-113"
+              }
+            ]
+          },
+          "chain-115": {
+            "and": [
+              {
+                "$ref": "chain-114"
+              }
+            ]
+          },
+          "chain-116": {
+            "and": [
+              {
+                "$ref": "chain-115"
+              }
+            ]
+          },
+          "chain-117": {
+            "and": [
+              {
+                "$ref": "chain-116"
+              }
+            ]
+          },
+          "chain-118": {
+            "and": [
+              {
+                "$ref": "chain-117"
+              }
+            ]
+          },
+          "chain-119": {
+            "and": [
+              {
+                "$ref": "chain-118"
+              }
+            ]
+          },
+          "chain-120": {
+            "and": [
+              {
+                "$ref": "chain-119"
+              }
+            ]
+          },
+          "chain-121": {
+            "and": [
+              {
+                "$ref": "chain-120"
+              }
+            ]
+          },
+          "chain-122": {
+            "and": [
+              {
+                "$ref": "chain-121"
+              }
+            ]
+          },
+          "chain-123": {
+            "and": [
+              {
+                "$ref": "chain-122"
+              }
+            ]
+          },
+          "chain-124": {
+            "and": [
+              {
+                "$ref": "chain-123"
+              }
+            ]
+          },
+          "chain-125": {
+            "and": [
+              {
+                "$ref": "chain-124"
+              }
+            ]
+          },
+          "chain-126": {
+            "and": [
+              {
+                "$ref": "chain-125"
+              }
+            ]
+          },
+          "chain-127": {
+            "and": [
+              {
+                "$ref": "chain-126"
+              }
+            ]
+          },
+          "chain-128": {
+            "and": [
+              {
+                "$ref": "chain-127"
+              }
+            ]
+          },
+          "chain-129": {
+            "and": [
+              {
+                "$ref": "chain-128"
+              }
+            ]
+          },
+          "chain-130": {
+            "and": [
+              {
+                "$ref": "chain-129"
+              }
+            ]
+          },
+          "chain-131": {
+            "and": [
+              {
+                "$ref": "chain-130"
+              }
+            ]
+          },
+          "chain-132": {
+            "and": [
+              {
+                "$ref": "chain-131"
+              }
+            ]
+          },
+          "chain-133": {
+            "and": [
+              {
+                "$ref": "chain-132"
+              }
+            ]
+          },
+          "chain-134": {
+            "and": [
+              {
+                "$ref": "chain-133"
+              }
+            ]
+          },
+          "chain-135": {
+            "and": [
+              {
+                "$ref": "chain-134"
+              }
+            ]
+          },
+          "chain-136": {
+            "and": [
+              {
+                "$ref": "chain-135"
+              }
+            ]
+          },
+          "chain-137": {
+            "and": [
+              {
+                "$ref": "chain-136"
+              }
+            ]
+          },
+          "chain-138": {
+            "and": [
+              {
+                "$ref": "chain-137"
+              }
+            ]
+          },
+          "chain-139": {
+            "and": [
+              {
+                "$ref": "chain-138"
+              }
+            ]
+          },
+          "chain-140": {
+            "and": [
+              {
+                "$ref": "chain-139"
+              }
+            ]
+          },
+          "chain-141": {
+            "and": [
+              {
+                "$ref": "chain-140"
+              }
+            ]
+          },
+          "chain-142": {
+            "and": [
+              {
+                "$ref": "chain-141"
+              }
+            ]
+          },
+          "chain-143": {
+            "and": [
+              {
+                "$ref": "chain-142"
+              }
+            ]
+          },
+          "chain-144": {
+            "and": [
+              {
+                "$ref": "chain-143"
+              }
+            ]
+          },
+          "chain-145": {
+            "and": [
+              {
+                "$ref": "chain-144"
+              }
+            ]
+          },
+          "chain-146": {
+            "and": [
+              {
+                "$ref": "chain-145"
+              }
+            ]
+          },
+          "chain-147": {
+            "and": [
+              {
+                "$ref": "chain-146"
+              }
+            ]
+          },
+          "chain-148": {
+            "and": [
+              {
+                "$ref": "chain-147"
+              }
+            ]
+          },
+          "chain-149": {
+            "and": [
+              {
+                "$ref": "chain-148"
+              }
+            ]
+          },
+          "chain-150": {
+            "and": [
+              {
+                "$ref": "chain-149"
+              }
+            ]
+          },
+          "chain-151": {
+            "and": [
+              {
+                "$ref": "chain-150"
+              }
+            ]
+          },
+          "chain-152": {
+            "and": [
+              {
+                "$ref": "chain-151"
+              }
+            ]
+          },
+          "chain-153": {
+            "and": [
+              {
+                "$ref": "chain-152"
+              }
+            ]
+          },
+          "chain-154": {
+            "and": [
+              {
+                "$ref": "chain-153"
+              }
+            ]
+          },
+          "chain-155": {
+            "and": [
+              {
+                "$ref": "chain-154"
+              }
+            ]
+          },
+          "chain-156": {
+            "and": [
+              {
+                "$ref": "chain-155"
+              }
+            ]
+          },
+          "chain-157": {
+            "and": [
+              {
+                "$ref": "chain-156"
+              }
+            ]
+          },
+          "chain-158": {
+            "and": [
+              {
+                "$ref": "chain-157"
+              }
+            ]
+          },
+          "chain-159": {
+            "and": [
+              {
+                "$ref": "chain-158"
+              }
+            ]
+          },
+          "chain-160": {
+            "and": [
+              {
+                "$ref": "chain-159"
+              }
+            ]
+          },
+          "chain-161": {
+            "and": [
+              {
+                "$ref": "chain-160"
+              }
+            ]
+          },
+          "chain-162": {
+            "and": [
+              {
+                "$ref": "chain-161"
+              }
+            ]
+          },
+          "chain-163": {
+            "and": [
+              {
+                "$ref": "chain-162"
+              }
+            ]
+          },
+          "chain-164": {
+            "and": [
+              {
+                "$ref": "chain-163"
+              }
+            ]
+          },
+          "chain-165": {
+            "and": [
+              {
+                "$ref": "chain-164"
+              }
+            ]
+          },
+          "chain-166": {
+            "and": [
+              {
+                "$ref": "chain-165"
+              }
+            ]
+          },
+          "chain-167": {
+            "and": [
+              {
+                "$ref": "chain-166"
+              }
+            ]
+          },
+          "chain-168": {
+            "and": [
+              {
+                "$ref": "chain-167"
+              }
+            ]
+          },
+          "chain-169": {
+            "and": [
+              {
+                "$ref": "chain-168"
+              }
+            ]
+          },
+          "chain-170": {
+            "and": [
+              {
+                "$ref": "chain-169"
+              }
+            ]
+          },
+          "chain-171": {
+            "and": [
+              {
+                "$ref": "chain-170"
+              }
+            ]
+          },
+          "chain-172": {
+            "and": [
+              {
+                "$ref": "chain-171"
+              }
+            ]
+          },
+          "chain-173": {
+            "and": [
+              {
+                "$ref": "chain-172"
+              }
+            ]
+          },
+          "chain-174": {
+            "and": [
+              {
+                "$ref": "chain-173"
+              }
+            ]
+          },
+          "chain-175": {
+            "and": [
+              {
+                "$ref": "chain-174"
+              }
+            ]
+          },
+          "chain-176": {
+            "and": [
+              {
+                "$ref": "chain-175"
+              }
+            ]
+          },
+          "chain-177": {
+            "and": [
+              {
+                "$ref": "chain-176"
+              }
+            ]
+          },
+          "chain-178": {
+            "and": [
+              {
+                "$ref": "chain-177"
+              }
+            ]
+          },
+          "chain-179": {
+            "and": [
+              {
+                "$ref": "chain-178"
+              }
+            ]
+          },
+          "chain-180": {
+            "and": [
+              {
+                "$ref": "chain-179"
+              }
+            ]
+          },
+          "chain-181": {
+            "and": [
+              {
+                "$ref": "chain-180"
+              }
+            ]
+          },
+          "chain-182": {
+            "and": [
+              {
+                "$ref": "chain-181"
+              }
+            ]
+          },
+          "chain-183": {
+            "and": [
+              {
+                "$ref": "chain-182"
+              }
+            ]
+          },
+          "chain-184": {
+            "and": [
+              {
+                "$ref": "chain-183"
+              }
+            ]
+          },
+          "chain-185": {
+            "and": [
+              {
+                "$ref": "chain-184"
+              }
+            ]
+          },
+          "chain-186": {
+            "and": [
+              {
+                "$ref": "chain-185"
+              }
+            ]
+          },
+          "chain-187": {
+            "and": [
+              {
+                "$ref": "chain-186"
+              }
+            ]
+          },
+          "chain-188": {
+            "and": [
+              {
+                "$ref": "chain-187"
+              }
+            ]
+          },
+          "chain-189": {
+            "and": [
+              {
+                "$ref": "chain-188"
+              }
+            ]
+          },
+          "chain-190": {
+            "and": [
+              {
+                "$ref": "chain-189"
+              }
+            ]
+          },
+          "chain-191": {
+            "and": [
+              {
+                "$ref": "chain-190"
+              }
+            ]
+          },
+          "chain-192": {
+            "and": [
+              {
+                "$ref": "chain-191"
+              }
+            ]
+          },
+          "chain-193": {
+            "and": [
+              {
+                "$ref": "chain-192"
+              }
+            ]
+          },
+          "chain-194": {
+            "and": [
+              {
+                "$ref": "chain-193"
+              }
+            ]
+          },
+          "chain-195": {
+            "and": [
+              {
+                "$ref": "chain-194"
+              }
+            ]
+          },
+          "chain-196": {
+            "and": [
+              {
+                "$ref": "chain-195"
+              }
+            ]
+          },
+          "chain-197": {
+            "and": [
+              {
+                "$ref": "chain-196"
+              }
+            ]
+          },
+          "chain-198": {
+            "and": [
+              {
+                "$ref": "chain-197"
+              }
+            ]
+          },
+          "chain-199": {
+            "and": [
+              {
+                "$ref": "chain-198"
+              }
+            ]
+          },
+          "chain-200": {
+            "and": [
+              {
+                "$ref": "chain-199"
+              }
+            ]
+          }
+        }
+      },
+      "flag": "deep-chain-long",
+      "type": "boolean",
+      "default": true,
+      "targetingKey": "u-36",
       "context": {
         "tier": "gold"
       },

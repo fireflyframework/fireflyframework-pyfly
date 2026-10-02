@@ -24,7 +24,7 @@ from openfeature.exception import ErrorCode
 from openfeature.flag_evaluation import FlagEvaluationDetails, Reason
 from openfeature.provider import FeatureProvider
 
-from pyfly.feature_flags.provider import EXPANSION_LIMIT, PROVIDER_NAME, FireflyFlagProvider
+from pyfly.feature_flags.provider import DEPTH_LIMIT, EXPANSION_LIMIT, PROVIDER_NAME, FireflyFlagProvider
 from tests.feature_flags.support import bool_flag, bound_client
 
 
@@ -35,6 +35,13 @@ def _document(**flags: dict[str, Any]) -> dict[str, Any]:
 def _segment(name: str) -> dict[str, Any]:
     """A boolean flag that is ``on`` when the evaluator *name* holds."""
     return bool_flag("off", targeting={"if": [{"$ref": name}, "on", "off"]})
+
+
+def _chain(length: int, leaf: dict[str, Any]) -> dict[str, Any]:
+    """Evaluators ``chain-0`` (*leaf*) to ``chain-<length>``, each ``{"and": [{"$ref": <the one before>}]}``."""
+    evaluators: dict[str, Any] = {"chain-0": leaf}
+    evaluators |= {f"chain-{i}": {"and": [{"$ref": f"chain-{i - 1}"}]} for i in range(1, length + 1)}
+    return evaluators
 
 
 def _evaluate(
@@ -222,3 +229,67 @@ def test_the_expansion_limit_counts_every_json_value(extra: int, parse_error: bo
         assert _parse_error(provider, key, context) is parse_error
         if not parse_error:
             assert _evaluate(provider, key, False, context).value is True
+
+
+@pytest.mark.parametrize(
+    ("leaf", "parse_error"),
+    [({"var": ["tier"]}, False), ({"==": [{"var": "tier"}, "gold"]}, True)],
+    ids=["at-the-limit", "one-over"],
+)
+def test_the_nesting_limit_counts_container_levels(leaf: dict[str, Any], parse_error: bool) -> None:
+    """{"if": [...]} is level 1, its list 2, and the reference in it puts chain-62 at level 3 (a resolved reference
+    adds no level). Each chain step adds two (its object, its list): chain-0 sits at level 127, so its list is level
+    128, and the {"var": ...} object inside the second leaf's list is level 129."""
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"deep": _segment("chain-62")}, "$evaluators": _chain(62, leaf)})
+    gold = EvaluationContext("u", {"tier": "gold"})
+    assert DEPTH_LIMIT == 128
+    assert _parse_error(provider, "deep", gold) is parse_error
+    if not parse_error:
+        assert _evaluate(provider, "deep", False, gold).reason == Reason.TARGETING_MATCH
+
+
+def test_a_chain_too_deep_is_a_parse_error_for_that_flag_only() -> None:
+    """400 chained evaluators expand to some 800 levels: past the stack a recursive pass could use, so the limits are
+    decided without recursing deeper than the depth limit."""
+    evaluators = _chain(400, {"==": [{"var": "tier"}, "gold"]})
+    document = {"flags": {"deep": _segment("chain-400"), "shallow": _segment("chain-20"), "plain": bool_flag()}}
+    provider = FireflyFlagProvider()
+    provider.update({**document, "$evaluators": evaluators})
+    gold = EvaluationContext("u", {"tier": "gold"})
+    assert _parse_error(provider, "deep", gold)
+    assert _evaluate(provider, "shallow", False, gold).value is True
+    assert _evaluate(provider, "plain", False).value is True
+
+
+def test_a_chain_of_references_to_references_adds_no_level() -> None:
+    """2 000 evaluators that each only name the next: followed in a loop, never one Python frame per reference."""
+    evaluators: dict[str, Any] = {"alias-0": {"==": [{"var": "tier"}, "gold"]}}
+    evaluators |= {f"alias-{i}": {"$ref": f"alias-{i - 1}"} for i in range(1, 2001)}
+    provider = FireflyFlagProvider()
+    provider.update({"flags": {"aliased": _segment("alias-2000")}, "$evaluators": evaluators})
+    details = _evaluate(provider, "aliased", False, EvaluationContext("u", {"tier": "gold"}))
+    assert (details.value, details.reason) == (True, Reason.TARGETING_MATCH)
+
+
+def test_a_reference_used_twice_is_counted_and_resolved_twice() -> None:
+    """A diamond is not a cycle: an evaluator named in two sibling places expands in both, and counts in both."""
+    items = [f"v{i}" for i in range(5000)]  # {"in": [{"var": "x"}, items]} holds 5 005 values
+    provider = FireflyFlagProvider()
+    provider.update(
+        {
+            "flags": {
+                "both": bool_flag(
+                    "off", targeting={"if": [{"and": [{"$ref": "gold"}, {"$ref": "gold"}]}, "on", "off"]}
+                ),
+                "twice": bool_flag(
+                    "off", targeting={"if": [{"or": [{"$ref": "half"}, {"$ref": "half"}]}, "on", "off"]}
+                ),
+                "once": _segment("half"),
+            },
+            "$evaluators": {"gold": {"==": [{"var": "tier"}, "gold"]}, "half": {"in": [{"var": "x"}, items]}},
+        }
+    )
+    assert _evaluate(provider, "both", False, EvaluationContext("u", {"tier": "gold"})).value is True
+    assert _parse_error(provider, "twice", EvaluationContext("u", {"x": "v1"}))  # 2 x 5 005 + 6 > 10 000
+    assert _evaluate(provider, "once", False, EvaluationContext("u", {"x": "v1"})).value is True
