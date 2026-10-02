@@ -27,19 +27,24 @@ from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvid
 from prometheus_client import REGISTRY
 
 from pyfly.config.auto import discover_auto_configurations
+from pyfly.container import component
 from pyfly.container.bean import bean
+from pyfly.container.container import Container
 from pyfly.container.exceptions import BeanCreationException, NoSuchBeanError
 from pyfly.container.stereotypes import configuration
 from pyfly.context.application_context import ApplicationContext
+from pyfly.context.events import app_event_listener
+from pyfly.context.lifecycle import post_construct
 from pyfly.core.config import Config
 from pyfly.feature_flags.auto_configuration import FeatureFlagsAutoConfiguration
 from pyfly.feature_flags.client import FeatureFlags, OpenFeatureBinding
 from pyfly.feature_flags.context import EvaluationContextResolver, FeatureFlagsContextFilter
-from pyfly.feature_flags.events import FeatureFlagEvaluated
+from pyfly.feature_flags.events import FeatureFlagEvaluated, FeatureFlagsChanged
 from pyfly.feature_flags.hooks import EVALUATIONS_METRIC, ExposureEventHook, MetricsHook
 from pyfly.feature_flags.provider import FireflyFlagProvider
-from pyfly.feature_flags.registry import FeatureFlagsError, FlagRegistry
+from pyfly.feature_flags.registry import FEATURE_FLAGS_PHASE, FeatureFlagsError, FlagRegistry
 from pyfly.feature_flags.slot import installed_feature_flags
+from pyfly.kernel.lifecycle import lifecycle_phase
 from pyfly.observability.correlation import set_tenant_id
 from tests.feature_flags.support import bool_flag
 
@@ -299,3 +304,134 @@ async def test_a_refused_boot_composition_fails_startup(monkeypatch: pytest.Monk
     assert isinstance(info.value.__cause__, FeatureFlagsError)
     assert installed_feature_flags() is None
     assert api.get_provider_metadata().name == "No-op Provider"  # the binding never started
+
+
+# -- the lifecycle: events reach the listeners, the application's beans see the flags ---------------------------
+
+
+class FlagChanges:
+    """Records every FeatureFlagsChanged its @app_event_listener receives."""
+
+    def __init__(self) -> None:
+        self.changes: list[FeatureFlagsChanged] = []
+
+    @app_event_listener
+    async def on_change(self, event: FeatureFlagsChanged) -> None:
+        self.changes.append(event)
+
+
+@component
+class ScannedFlagChanges(FlagChanges):
+    pass
+
+
+class ProducedFlagChanges(FlagChanges):
+    pass
+
+
+@configuration
+class ListenerConfiguration:
+    @bean
+    def produced_flag_changes(self) -> ProducedFlagChanges:
+        return ProducedFlagChanges()
+
+
+def _theme_file(theme: str) -> dict[str, Any]:
+    """A flag file (plain flagd) whose ``theme`` flag answers *theme*."""
+    return {"flags": {"theme": {"state": "ENABLED", "variants": {theme: theme}, "defaultVariant": theme}}}
+
+
+@component
+class ChangesTheFileBeforeTheContextIsRefreshed:
+    """Between the lifecycle start (step 2e) and ContextRefreshedEvent (step 7): the flag file changes and the
+    registry refreshes it, so a ``file`` change is published before any listener is wired."""
+
+    def __init__(self, registry: FlagRegistry, config: Config) -> None:
+        self._registry = registry
+        self._path = Path(str(config.get("pyfly.feature-flags.sources.file.path")))
+
+    @post_construct
+    async def change_the_file(self) -> None:
+        self._path.write_text(json.dumps(_theme_file("dark")), encoding="utf-8")
+        assert await self._registry.refresh("file") == ["theme"]
+
+
+async def test_listeners_receive_the_startup_change_once_and_before_any_file_change(tmp_path: Path) -> None:
+    path = tmp_path / "flags.json"
+    path.write_text(json.dumps(_theme_file("light")), encoding="utf-8")
+    file = {"enabled": True, "path": str(path), "refresh-interval": "1h"}
+    context = await _started(
+        _config(flags={"a": True}, sources={"file": file}),
+        ScannedFlagChanges,
+        ListenerConfiguration,
+        ChangesTheFileBeforeTheContextIsRefreshed,
+    )
+    expected = [FeatureFlagsChanged(("a", "theme"), "startup"), FeatureFlagsChanged(("theme",), "file")]
+    assert context.get_bean(ScannedFlagChanges).changes == expected
+    assert context.get_bean(ProducedFlagChanges).changes == expected  # a @bean product's listener is wired too
+    path.write_text(json.dumps(_theme_file("blue")), encoding="utf-8")
+    await context.get_bean(FlagRegistry).refresh("file")  # after the refresh: published at once
+    assert context.get_bean(ScannedFlagChanges).changes[2:] == [FeatureFlagsChanged(("theme",), "file")]
+    await context.stop()
+
+
+class SeesTheFlags:
+    """An application lifecycle bean that reads the flags (through the facade and the gating slot) when it starts and
+    when it stops. It is created before the auto-configuration's beans, so only the phase orders it after them."""
+
+    def __init__(self, container: Container) -> None:
+        self._container = container
+        self._facade: FeatureFlags | None = None
+        self.seen: list[tuple[str, bool, bool]] = []
+
+    async def start(self) -> None:
+        self._facade = self._container.resolve(FeatureFlags)
+        self._record("start")
+
+    async def stop(self) -> None:
+        self._record("stop")
+
+    def _record(self, moment: str) -> None:
+        assert self._facade is not None
+        installed = installed_feature_flags()
+        self.seen.append(
+            (moment, self._facade.is_enabled("a"), installed is not None and installed.facade is self._facade)
+        )
+
+
+@configuration
+class LifecycleConfiguration:
+    @bean
+    def sees_the_flags(self, container: Container) -> SeesTheFlags:
+        return SeesTheFlags(container)
+
+
+async def test_an_application_lifecycle_bean_sees_the_flags_when_it_starts_and_when_it_stops() -> None:
+    context = await _started(_config(flags={"a": True}), LifecycleConfiguration)
+    bean_instance = context.get_bean(SeesTheFlags)
+    assert bean_instance.seen == [("start", True, True)]
+    await context.stop()
+    assert bean_instance.seen == [("start", True, True), ("stop", True, True)]
+
+
+def test_the_registry_and_the_binding_share_the_feature_flags_phase() -> None:
+    facade = FeatureFlags(OpenFeatureClient(domain="phase", version=None), EvaluationContextResolver())
+    assert lifecycle_phase(OpenFeatureBinding(None, facade)) == FEATURE_FLAGS_PHASE
+    assert lifecycle_phase(FlagRegistry([], FireflyFlagProvider())) == FEATURE_FLAGS_PHASE
+
+
+async def test_the_context_stops_and_starts_again_with_the_feature_flags() -> None:
+    context = await _started(_config(flags={"a": True}), ScannedFlagChanges)
+    for _ in range(2):
+        facade = context.get_bean(FeatureFlags)
+        assert facade.is_enabled("a") is True
+        assert api.get_provider_metadata().name == "firefly"
+        installed = installed_feature_flags()
+        assert installed is not None and installed.facade is facade
+        assert context.get_bean(FlagRegistry).started
+        assert context.get_bean(ScannedFlagChanges).changes == [FeatureFlagsChanged(("a",), "startup")]
+        await context.stop()
+        assert installed_feature_flags() is None
+        assert api.get_provider_metadata().name == "No-op Provider"
+        await context.start()
+    await context.stop()

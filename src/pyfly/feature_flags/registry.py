@@ -33,6 +33,12 @@ document, the composition in force stays (and ``feature_flag_provider_update_fai
   even across a later failed load, until the source delivers a new document;
 - after a test-override change, the previous overrides are restored and :class:`FeatureFlagsError` is raised to the
   test.
+
+The registry starts in :data:`FEATURE_FLAGS_PHASE`. The context starts its lifecycle beans before it wires the
+``@app_event_listener`` methods, so a registry built with ``hold_events=True`` (the auto-configuration's) keeps the
+events it publishes (the boot composition's, and any refresh before the context is refreshed) and releases them, in
+order and once, when ``ContextRefreshedEvent`` reaches :meth:`FlagRegistry.on_context_refreshed`, itself an
+``@app_event_listener``. A stop before that drops them. A standalone registry publishes at once.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
+from pyfly.context.events import ContextRefreshedEvent, app_event_listener
 from pyfly.feature_flags._references import referenced_evaluator
 from pyfly.feature_flags.composition import ComposedFlag, Composition, Layer, compose
 from pyfly.feature_flags.definitions import FlagDocument, expired_keys, parse_document, utc_today
@@ -54,7 +61,7 @@ if TYPE_CHECKING:
     from pyfly.context.events import ApplicationEventPublisher
     from pyfly.feature_flags.provider import FireflyFlagProvider
 
-__all__ = ["STARTUP", "TEST_OVERRIDES", "FeatureFlagsError", "FlagRegistry", "SourceStatus"]
+__all__ = ["FEATURE_FLAGS_PHASE", "STARTUP", "TEST_OVERRIDES", "FeatureFlagsError", "FlagRegistry", "SourceStatus"]
 
 _logger = logging.getLogger(__name__)
 
@@ -63,6 +70,14 @@ TEST_OVERRIDES = "test-overrides"
 
 STARTUP = "startup"
 """The ``origin`` of the boot composition's ``FeatureFlagsChanged``."""
+
+FEATURE_FLAGS_PHASE = -(1 << 10)
+"""The lifecycle phase of the registry and of the OpenFeature binding (``pyfly.kernel.lifecycle``).
+
+Above the datasource, the migrations and the schema (``-(1 << 20)`` and below), which the database store needs, and
+below the default phase 0 of the application's lifecycle beans: those start once the flags are loaded and the
+provider and the gating slot are installed, and stop while they still are. (A user ``@configuration``'s lifecycle
+beans are created before the auto-configuration's, so creation order alone would start them first.)"""
 
 
 def _utc_now() -> datetime:
@@ -184,7 +199,13 @@ class _SourceState:
 
 
 class FlagRegistry:
-    """The effective flag set of the application (see the module documentation)."""
+    """The effective flag set of the application (see the module documentation).
+
+    *hold_events*: keep every event published before :meth:`on_context_refreshed`, then release them in order (the
+    auto-configuration passes ``True``; see the module documentation).
+    """
+
+    phase = FEATURE_FLAGS_PHASE
 
     def __init__(
         self,
@@ -194,6 +215,7 @@ class FlagRegistry:
         publisher: ApplicationEventPublisher | None = None,
         today: Callable[[], date] = utc_today,
         clock: Callable[[], datetime] = _utc_now,
+        hold_events: bool = False,
     ) -> None:
         names = [source.name for source in sources]
         if len(set(names)) != len(names):
@@ -213,6 +235,9 @@ class FlagRegistry:
         self._tasks: list[asyncio.Task[None]] = []
         self._pending: set[asyncio.Task[None]] = set()
         self._started = False
+        self._hold_events = hold_events
+        self._holding = hold_events  # until the context is refreshed
+        self._held: list[object] = []
 
     # -- lifecycle -------------------------------------------------------------------------------------------
 
@@ -270,7 +295,23 @@ class FlagRegistry:
                 await state.source.close()
             except Exception:  # noqa: BLE001 — stopping goes on
                 _logger.warning("feature_flag_source_close_failed", extra={"source": state.source.name}, exc_info=True)
+        if self._held:  # stopped before the context was refreshed: nobody is listening any more
+            _logger.debug("feature_flag_events_dropped", extra={"events": len(self._held)})
+        self._held = []
+        self._holding = self._hold_events  # started again, the registry holds until the next refresh
         self._started = False
+
+    @app_event_listener
+    async def on_context_refreshed(self, event: ContextRefreshedEvent) -> None:
+        """Release the held events, in the order they were published, once; from then on events are published at
+        once. Events published while the held ones are being delivered join the end of the queue, so the order holds.
+        A stopped registry ignores the event: it holds again until the refresh that follows its next start.
+        """
+        if not self._holding or not self._started:
+            return
+        while self._held:
+            await self._deliver(self._held.pop(0))
+        self._holding = False
 
     async def _poll(self, name: str, interval: float) -> None:
         while True:
@@ -371,8 +412,17 @@ class FlagRegistry:
     async def _publish(self, event: object) -> None:
         if self._publisher is None:
             return
+        if self._holding:
+            self._held.append(event)
+            return
+        await self._deliver(event)
+
+    async def _deliver(self, event: object) -> None:
+        publisher = self._publisher
+        if publisher is None:
+            return
         try:
-            await self._publisher.publish(event)
+            await publisher.publish(event)
         except Exception:  # noqa: BLE001 — a listener never breaks the flags
             _logger.warning("feature_flag_event_listener_failed", extra={"event": type(event).__name__}, exc_info=True)
 

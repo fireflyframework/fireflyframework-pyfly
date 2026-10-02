@@ -28,12 +28,15 @@ from openfeature.event import ProviderEvent, ProviderEventDetails
 from openfeature.exception import ErrorCode, ParseError
 from openfeature.provider import FeatureProvider
 
-from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
+from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher, ContextRefreshedEvent
+from pyfly.data.relational.migrations import MIGRATION_PHASE
+from pyfly.data.relational.schema import SCHEMA_PHASE
 from pyfly.feature_flags.definitions import FlagDefinitionError, FlagDocument, parse_document
 from pyfly.feature_flags.events import FeatureFlagsChanged
 from pyfly.feature_flags.provider import FireflyFlagProvider
-from pyfly.feature_flags.registry import TEST_OVERRIDES, FeatureFlagsError, FlagRegistry
+from pyfly.feature_flags.registry import FEATURE_FLAGS_PHASE, TEST_OVERRIDES, FeatureFlagsError, FlagRegistry
 from pyfly.feature_flags.sources import FlagSourceError, SourceSnapshot
+from pyfly.kernel.lifecycle import DEFAULT_PHASE, lifecycle_phase
 from tests.feature_flags.support import (
     DocumentSource,
     ScriptedSource,
@@ -512,3 +515,61 @@ def test_source_names_are_unique_and_test_overrides_is_reserved() -> None:
         FlagRegistry([StaticSource("config", {}), StaticSource("config", {})], FireflyFlagProvider())
     with pytest.raises(ValueError, match="reserved"):
         FlagRegistry([StaticSource(TEST_OVERRIDES, {})], FireflyFlagProvider())
+
+
+# -- events held until the context is refreshed, and the lifecycle phase ------------------------------------------
+
+
+async def test_held_events_wait_for_the_context_refresh_and_are_released_once_in_order() -> None:
+    """The context wires the ``@app_event_listener`` methods after it started the lifecycle beans: the events of the
+    boot composition and of the refreshes before the listeners exist wait for ``ContextRefreshedEvent``."""
+    publisher, seen = recording_publisher()
+    file = ScriptedSource("file", {"a": False}, {"a": True}, {"a": False})
+    registry = FlagRegistry([file], FireflyFlagProvider(), publisher=publisher, hold_events=True)
+    await registry.start()
+    assert await registry.refresh("file") == ["a"]
+    assert registry.set_test_overrides({"b": True}) == ["b"]
+    await wait_until(lambda: not registry._pending)  # noqa: SLF001 — the override's publish ran, and was held
+    assert seen == []
+    await registry.on_context_refreshed(ContextRefreshedEvent())
+    assert seen == [
+        FeatureFlagsChanged(("a",), "startup"),
+        FeatureFlagsChanged(("a",), "file"),
+        FeatureFlagsChanged(("b",), TEST_OVERRIDES),
+    ]
+    await registry.on_context_refreshed(ContextRefreshedEvent())  # released once: nothing is published twice
+    assert len(seen) == 3
+    assert await registry.refresh("file") == ["a"]  # from now on, published at once
+    assert seen[-1] == FeatureFlagsChanged(("a",), "file") and len(seen) == 4
+    await registry.stop()
+
+
+async def test_a_stop_before_the_context_refresh_drops_the_held_events() -> None:
+    publisher, seen = recording_publisher()
+    config = ScriptedSource("config", {"a": True}, {"a": False})
+    registry = FlagRegistry([config], FireflyFlagProvider(), publisher=publisher, hold_events=True)
+    await registry.start()
+    await registry.stop()
+    await registry.on_context_refreshed(ContextRefreshedEvent())  # a refresh after the stop finds nothing held
+    assert seen == []
+    await registry.start()  # started again (the source now answers a=false), it holds until the next refresh
+    assert seen == []
+    await registry.on_context_refreshed(ContextRefreshedEvent())
+    assert seen == [FeatureFlagsChanged(("a",), "startup")]
+    await registry.stop()
+
+
+async def test_a_registry_that_does_not_hold_publishes_at_once() -> None:
+    publisher, seen = recording_publisher()
+    registry = FlagRegistry([StaticSource("config", {"a": True})], FireflyFlagProvider(), publisher=publisher)
+    await registry.start()
+    assert seen == [FeatureFlagsChanged(("a",), "startup")]
+    await registry.on_context_refreshed(ContextRefreshedEvent())
+    assert seen == [FeatureFlagsChanged(("a",), "startup")]
+    await registry.stop()
+
+
+def test_the_registry_starts_in_the_feature_flags_phase() -> None:
+    """After the datasource, the migrations and the schema (the store needs them), before the application's beans."""
+    assert lifecycle_phase(FlagRegistry([], FireflyFlagProvider())) == FEATURE_FLAGS_PHASE
+    assert MIGRATION_PHASE < SCHEMA_PHASE < FEATURE_FLAGS_PHASE < DEFAULT_PHASE

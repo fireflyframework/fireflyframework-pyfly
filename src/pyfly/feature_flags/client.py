@@ -50,7 +50,7 @@ from openfeature.transaction_context import (
 
 from pyfly.feature_flags.definitions import flag_type
 from pyfly.feature_flags.provider import FireflyFlagProvider
-from pyfly.feature_flags.registry import FeatureFlagsError
+from pyfly.feature_flags.registry import FEATURE_FLAGS_PHASE, FeatureFlagsError
 from pyfly.feature_flags.slot import install_feature_flags, uninstall_feature_flags
 
 if TYPE_CHECKING:
@@ -405,7 +405,13 @@ class OpenFeatureBinding:
     after a ``start`` that failed half-way too, and when it is cancelled while draining the hooks (the cancellation
     is re-raised once everything is restored). A context may therefore stop and start again; a second ``start`` (or
     ``stop``) in a row does nothing.
+
+    It starts in :data:`~pyfly.feature_flags.registry.FEATURE_FLAGS_PHASE`, after the registry (created first, so
+    started first in the phase) and before the application's lifecycle beans, which therefore see the flags and the
+    gating slot in their ``start()`` and ``stop()``.
     """
+
+    phase = FEATURE_FLAGS_PHASE
 
     def __init__(
         self,

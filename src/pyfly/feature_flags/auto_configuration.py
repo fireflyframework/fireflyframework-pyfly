@@ -18,8 +18,13 @@ with ``typing.get_type_hints``, which looks them up in this module's globals. Ea
 consumes is declared and consumed with the same hint (``X | None`` on both sides when it may be absent), which is how
 the context orders the methods (a topological sort, ties in name order): properties, provider, resolver, client,
 registry, filter, facade, binding. The registry comes before the facade and the binding, which both take it, and the
-two lifecycle beans start in creation order, so the registry has loaded every source before the binding installs the
-provider.
+two lifecycle beans start in creation order within their phase (``FEATURE_FLAGS_PHASE``: after the datasource,
+migrations and schema, before the application's lifecycle beans), so the registry has loaded every source before the
+binding installs the provider.
+
+The registry holds its ``FeatureFlagsChanged`` events (the boot composition's included) until
+``ContextRefreshedEvent``: the context wires the ``@app_event_listener`` methods only after it started the lifecycle
+beans, so an event published at start would reach no listener.
 
 Nothing here catches a startup failure: an invalid setting (``ValueError`` naming the key), several OpenFeature
 provider beans (:class:`~pyfly.feature_flags.registry.FeatureFlagsError` from the binding's bean method), a source
@@ -111,7 +116,7 @@ class FeatureFlagsAutoConfiguration:
     ) -> FlagRegistry | None:
         if provider is None:  # the application declared its own OpenFeature provider
             return None
-        return FlagRegistry(self.sources(properties, config), provider, publisher=publisher)
+        return FlagRegistry(self.sources(properties, config), provider, publisher=publisher, hold_events=True)
 
     @bean
     def evaluation_context_resolver(
