@@ -216,21 +216,35 @@ def _scalars(values: Mapping[str, Any]) -> bool:
     return all(isinstance(value, str | int | float) for value in values.values())  # bool is an int
 
 
+_OBJECT_KEYS = "object keys"
+
+
 def _walk_reason(value: Any) -> str | None:
-    """Why *value* (a flag definition, an evaluator rule or the document ``metadata``: level 1) breaks the two rules
-    that reach its every corner, or ``None``.
+    """Why *value* (a flag definition, an evaluator rule or the document ``metadata``: level 1) breaks the rules that
+    reach its every corner, or ``None``.
 
     ``definition nests too deeply`` when an object or an array sits deeper than :data:`MAX_DEFINITION_DEPTH` (reported
-    first, whatever else the walk met); otherwise ``numbers must be finite`` when a NaN or an infinity stands anywhere
-    (YAML reads ``.nan``/``.inf``, JSON has neither). Walks with a stack of its own and ends at the first container too
-    deep, so the work is bounded whatever the depth, and a structure that contains itself is refused, never looped on.
+    first, whatever else the walk met); otherwise ``object keys must be strings`` when a key of any object, at any
+    depth, is not text; otherwise ``numbers must be finite`` when a NaN or an infinity stands anywhere (YAML reads
+    ``.nan``/``.inf``, JSON has neither). Walks with a stack of its own and ends at the first container too deep, so the
+    work is bounded whatever the depth, and a structure that contains itself is refused, never looped on.
+
+    Keys: YAML 1.1 reads an unquoted ``on:``/``null:``/``1.5:``/``2024-01-01:`` key as a boolean, ``None``, a float or
+    a date. JSON would rename the first three (``"true"``, ``"null"``, ``"1.5"``) and cannot encode the dates, and a mix
+    of boolean and text keys cannot even be sorted (``json.dumps(..., sort_keys=True)`` raises), so such a key is
+    refused rather than renamed, with the YAML hint for a boolean. :func:`parse_document` has already given the int
+    keys their text (``1:`` is the key ``"1"``) when it calls this; called on a raw definition (:func:`validate_flag`)
+    an int key is not text either.
     """
     non_finite = False
+    non_text: list[Any] = []
     pending = [(value, 1)]
     while pending:
         item, level = pending.pop()
         if isinstance(item, Mapping):
             members: Iterable[Any] = item.values()
+            if not non_text:
+                non_text.extend(key for key in item if not isinstance(key, str))
         elif isinstance(item, list | tuple):
             members = item
         else:
@@ -239,6 +253,8 @@ def _walk_reason(value: Any) -> str | None:
         if level > MAX_DEFINITION_DEPTH:
             return "definition nests too deeply"
         pending.extend((member, level + 1) for member in members)
+    if non_text:
+        return _non_text_names(non_text, _OBJECT_KEYS)
     return "numbers must be finite" if non_finite else None
 
 
@@ -254,8 +270,10 @@ def validate_flag(key: Any, definition: Any) -> None:
 
     The order is the contract's: key, object, state, variants, variant types, defaultVariant, targeting, metadata
     scalars, then the reserved metadata keys, then depth (``definition nests too deeply``: the definition is level 1 and
-    every object or array inside adds one, at most :data:`MAX_DEFINITION_DEPTH`), then finite numbers. Depth is checked
-    iteratively and before the numbers, so a definition too deep to walk is refused without inspecting them, and
+    every object or array inside adds one, at most :data:`MAX_DEFINITION_DEPTH`), then text keys at every depth
+    (``object keys must be strings``, PyFly's side of the contract's portability note: an unquoted YAML ``on:``,
+    ``null:``, ``1.5:`` or date key anywhere is refused, not renamed), then finite numbers. Depth is checked
+    iteratively and before the rest, so a definition too deep to walk is refused without inspecting it further, and
     nothing here recurses whatever the definition's depth. An empty list stands for an empty object in
     ``targeting`` and ``metadata`` (a non-empty one is refused); :func:`parse_document` stores it as ``{}``. A ``null``
     variant value is no flag value (``variants must share one type``), alone or beside others. The names of the
@@ -350,6 +368,11 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed. A document ``metadata`` key
     must not be empty either. A NaN or an infinity in an evaluator is refused with the key ``$evaluators`` (the
     reason names the evaluator), in the document ``metadata`` with the key ``metadata``.
+
+    A key that is not text anywhere inside a definition or an evaluator rule (YAML's ``on:``, ``null:``, ``1.5:``, a
+    date) is refused with ``object keys must be strings`` (the flag's key, or ``$evaluators`` with the evaluator named),
+    so every stored document serializes as JSON, ``sort_keys=True`` included; an int key is its text (``1:`` is
+    ``"1"``) at any depth.
 
     A definition nesting deeper than :data:`MAX_DEFINITION_DEPTH` levels is refused with ``definition nests too deeply``
     (the flag's key; ``$evaluators``, the reason naming the evaluator, as for a rule that is not an object or a number

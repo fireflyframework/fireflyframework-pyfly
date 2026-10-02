@@ -629,3 +629,120 @@ def test_a_null_variant_value_is_not_a_flag_value(variants: dict[str, object]) -
 def test_falsy_variant_values_that_are_not_null_stay_valid() -> None:
     for variants in ({"a": 0}, {"a": ""}, {"a": False}, {"a": {}}, {"a": []}):
         validate_flag("f", {"state": "ENABLED", "variants": variants})
+
+
+# -- every key at every depth is text ------------------------------------------------------------------------------
+
+# YAML 1.1 reads each of these unquoted keys as something other than text: a boolean, null, a float, a date and a
+# timestamp. JSON keys are text, so json.dumps would rename the first three ("true", "null", "1.5"), fail on the dates,
+# and refuse a mix of boolean and text keys under sort_keys=True (which the sync server serves with).
+NON_TEXT_KEYS = [
+    ("on", True),
+    ("null", None),
+    ("1.5", 1.5),
+    ("2024-01-01", dt.date(2024, 1, 1)),
+    (
+        "2024-01-01T10:00:00Z",
+        dt.datetime(2024, 1, 1, 10, tzinfo=dt.UTC),
+    ),
+]
+
+# Where a nested key can stand, as YAML text with a ``KEY`` placeholder, and the key of the error.
+NESTED_KEY_POSITIONS = {
+    "a variant object": (
+        "flags:\n  f:\n    state: ENABLED\n    variants: {plain: {KEY: 1, label: x}}\n    defaultVariant: plain\n",
+        "f",
+    ),
+    "targeting": (
+        "flags:\n  f:\n    state: ENABLED\n    variants: {'on': true, 'off': false}\n"
+        "    targeting: {if: [{KEY: [1]}, 'on', 'off']}\n",
+        "f",
+    ),
+    "an unknown field": (
+        "flags:\n  f:\n    state: ENABLED\n    variants: {'on': true}\n    notes: {owners: {KEY: web}}\n",
+        "f",
+    ),
+    "the top level of a definition": (
+        "flags:\n  f:\n    state: ENABLED\n    variants: {'on': true}\n    KEY: x\n",
+        "f",
+    ),
+    "an evaluator rule": (
+        "flags: {}\n$evaluators:\n  segment: {in: [x, {KEY: roles}]}\n",
+        "$evaluators",
+    ),
+}
+
+
+@pytest.mark.parametrize(("text", "expected"), NON_TEXT_KEYS, ids=[text for text, _ in NON_TEXT_KEYS])
+@pytest.mark.parametrize("position", list(NESTED_KEY_POSITIONS))
+def test_a_nested_key_that_is_not_text_is_refused_with_the_flag_or_the_section(
+    position: str, text: str, expected: object
+) -> None:
+    template, key = NESTED_KEY_POSITIONS[position]
+    raw = yaml.safe_load(template.replace("KEY", text))
+    assert expected in _all_keys(raw), "YAML must read the key as a non-text value for this test to mean anything"
+    with pytest.raises(FlagDefinitionError, match="object keys must be strings") as raised:
+        parse_document(raw)
+    assert raised.value.key == key
+    if key == "$evaluators":
+        assert raised.value.reason.endswith("(evaluator 'segment')")
+    if isinstance(expected, bool):
+        assert "quote object keys" in raised.value.reason
+    else:
+        assert "YAML" not in raised.value.reason
+
+
+def _all_keys(value: Any) -> list[Any]:
+    """Every mapping key of *value*, at any depth."""
+    if isinstance(value, dict):
+        return [*value, *(key for member in value.values() for key in _all_keys(member))]
+    if isinstance(value, list):
+        return [key for member in value for key in _all_keys(member)]
+    return []
+
+
+def test_a_nested_key_that_is_not_text_is_refused_by_validate_flag_too() -> None:
+    with pytest.raises(FlagDefinitionError, match="object keys must be strings") as raised:
+        validate_flag("f", bool_flag(targeting={"if": [{None: 1}, "on", "off"]}))
+    assert raised.value.key == "f"
+
+
+def test_nested_keys_that_are_not_text_are_refused_before_numbers_that_are_not_finite() -> None:
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"f": bool_flag(notes={"ratio": float("nan"), True: 1})}})
+    assert raised.value.reason.startswith("object keys must be strings")
+
+
+def test_a_definition_too_deep_is_refused_as_too_deep_whatever_its_keys() -> None:
+    deep: Any = {True: 1}
+    for _ in range(MAX_DEFINITION_DEPTH):
+        deep = {"and": [deep]}
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": {"f": bool_flag(targeting=deep)}})
+    assert raised.value.reason == "definition nests too deeply"
+
+
+def test_a_valid_document_with_nested_text_and_numeric_keys_serializes_with_sorted_keys() -> None:
+    """Numeric keys read as their digits at any depth, so every key is text and the document serializes with
+    ``sort_keys=True`` (the sync server's encoding), through the provider too."""
+    raw = yaml.safe_load(
+        "flags:\n"
+        "  f:\n"
+        "    state: ENABLED\n"
+        "    variants: {plain: {'on': 1, 2: two, label: {'null': x, 10: y}}}\n"
+        "    defaultVariant: plain\n"
+        "    notes: {3: c, b: {1: a}}\n"
+        "$evaluators:\n"
+        "  segment: {in: [x, {var: roles}], 7: {'1.5': z}}\n"
+    )
+    document = parse_document(raw)
+    encoded = json.dumps(document.to_flagd(), sort_keys=True)
+    assert json.loads(encoded)["flags"]["f"]["variants"]["plain"] == {
+        "on": 1,
+        "2": "two",
+        "label": {"null": "x", "10": "y"},
+    }
+    provider = FireflyFlagProvider()
+    provider.update(document.to_flagd())
+    with bound_client(provider) as client:
+        assert client.get_object_value("f", {}) == {"on": 1, "2": "two", "label": {"null": "x", "10": "y"}}
