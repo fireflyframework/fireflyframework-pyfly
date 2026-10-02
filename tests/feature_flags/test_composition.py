@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from pyfly.feature_flags.composition import ComposedFlag, Layer, compose
-from pyfly.feature_flags.definitions import FlagDocument
+from pyfly.feature_flags.definitions import FlagDocument, parse_document
 from tests.feature_flags.support import bool_flag
 
 
@@ -56,3 +56,17 @@ def test_to_flagd_is_sorted_and_independent() -> None:
 
 def test_no_layers_compose_to_an_empty_set() -> None:
     assert compose([]).to_flagd() == {"flags": {}}
+
+
+def test_a_parsed_document_with_text_keys_composes_and_serializes() -> None:
+    document = parse_document(
+        {
+            "flags": {"a": bool_flag(metadata={"on": 1, "owner": "web"})},
+            "$evaluators": {"on": {"var": "x"}, "beta": {"var": "y"}},
+            "metadata": {"on": 1, "name": 2},
+        }
+    )
+    flagd = compose([Layer("config", document)]).to_flagd()
+    assert list(flagd["$evaluators"]) == ["beta", "on"]
+    assert flagd["metadata"] == {"name": 2, "on": 1}
+    assert flagd["flags"]["a"]["metadata"] == {"on": 1, "owner": "web"}

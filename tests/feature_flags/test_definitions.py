@@ -129,6 +129,84 @@ def test_document_level_rules(raw: object, key: str, reason: str) -> None:
     assert (raised.value.key, raised.value.reason) == (key, reason)
 
 
+@pytest.mark.parametrize("section", ["flags", "$evaluators", "metadata"])
+def test_an_absent_or_null_section_is_empty(section: str) -> None:
+    assert parse_document({}) == FlagDocument()
+    assert parse_document({section: None}) == FlagDocument()
+
+
+@pytest.mark.parametrize(
+    ("raw", "key", "reason"),
+    [
+        ({"flags": False}, "flags", "flag definition must be an object"),
+        ({"flags": 0}, "flags", "flag definition must be an object"),
+        ({"flags": ""}, "flags", "flag definition must be an object"),
+        ({"flags": []}, "flags", "flag definition must be an object"),
+        ({"$evaluators": False}, "$evaluators", "$evaluators must be an object"),
+        ({"$evaluators": 0}, "$evaluators", "$evaluators must be an object"),
+        ({"$evaluators": []}, "$evaluators", "$evaluators must be an object"),
+        ({"metadata": False}, "metadata", "metadata must be an object"),
+        ({"metadata": ""}, "metadata", "metadata must be an object"),
+        ({"metadata": []}, "metadata", "metadata must be an object"),
+        ({"metadata": ["a"]}, "metadata", "metadata must be an object"),
+    ],
+)
+def test_a_present_section_that_is_not_an_object_is_rejected_even_when_falsy(
+    raw: dict[str, object], key: str, reason: str
+) -> None:
+    """The error's key is the section name; `flags: false` must not silently load no flags."""
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document(raw)
+    assert (raised.value.key, raised.value.reason) == (key, reason)
+
+
+def test_every_section_is_rejected_when_all_are_falsy_non_objects() -> None:
+    with pytest.raises(FlagDefinitionError) as raised:
+        parse_document({"flags": False, "$evaluators": 0, "metadata": []})
+    assert raised.value.key == "flags"
+
+
+def test_unquoted_yaml_on_off_flag_metadata_keys_get_a_hint() -> None:
+    raw = yaml.safe_load(PROMO_YAML.replace("{expires: 2026-12-31}", "{on: 1, owner: web}"))
+    with pytest.raises(FlagDefinitionError, match="metadata keys must be strings") as raised:
+        parse_document(raw)
+    assert raised.value.key == "promo"
+    assert "quote metadata keys" in str(raised.value)
+
+
+def test_quoted_yaml_on_off_flag_metadata_keys_are_text_and_valid() -> None:
+    raw = yaml.safe_load(PROMO_YAML.replace("{expires: 2026-12-31}", '{"on": 1, "off": 2}'))
+    assert parse_document(raw).flags["promo"]["metadata"] == {"on": 1, "off": 2}
+
+
+def test_unquoted_yaml_document_metadata_keys_are_refused() -> None:
+    raw = yaml.safe_load("flags: {}\nmetadata: {on: 1, name: 2}\n")
+    with pytest.raises(FlagDefinitionError, match="metadata keys must be strings") as raised:
+        parse_document(raw)
+    assert raised.value.key == "metadata"
+    assert "quote metadata keys" in str(raised.value)
+
+
+def test_unquoted_yaml_evaluator_names_are_refused_not_renamed() -> None:
+    raw = yaml.safe_load("flags: {}\n$evaluators:\n  on: {in: [a, {var: roles}]}\n")
+    with pytest.raises(FlagDefinitionError, match="evaluator names must be strings") as raised:
+        parse_document(raw)
+    assert raised.value.key == "$evaluators"
+    assert "quote evaluator names" in str(raised.value)
+
+
+def test_a_non_text_key_that_is_not_a_boolean_gets_no_yaml_hint() -> None:
+    with pytest.raises(FlagDefinitionError, match="metadata keys must be strings") as raised:
+        parse_document({"flags": {}, "metadata": {None: 1}})
+    assert "YAML" not in str(raised.value)
+
+
+def test_numeric_yaml_keys_are_text() -> None:
+    """`1: x` is an int key in YAML; JSON keys are text, so numeric keys read as their digits."""
+    document = parse_document({"flags": {}, "$evaluators": {7: {"var": "a"}}, "metadata": {2: "x"}})
+    assert document.evaluators == {"7": {"var": "a"}} and document.metadata == {"2": "x"}
+
+
 def test_parse_document_returns_plain_flagd() -> None:
     document = parse_document(
         {"flags": {"a": True}, "$evaluators": {"beta": {"in": ["beta", {"var": "roles"}]}}, "metadata": {"v": 1}},

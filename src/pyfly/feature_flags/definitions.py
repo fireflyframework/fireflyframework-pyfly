@@ -23,7 +23,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,7 +49,22 @@ FLAG_KINDS: tuple[str, ...] = ("release", "experiment", "ops", "permission")
 """The values of the reserved ``metadata.kind``."""
 
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_YAML_HINT = " (YAML 1.1 reads an unquoted on/off/yes/no as a boolean: quote variant names in pyfly.yaml)"
+
+
+def _yaml_hint(names: str) -> str:
+    """The hint appended where an unquoted YAML ``on``/``off`` key (read as a boolean) is the likely cause."""
+    return f" (YAML 1.1 reads an unquoted on/off/yes/no as a boolean: quote {names} in pyfly.yaml)"
+
+
+_VARIANT_HINT = _yaml_hint("variant names")
+
+
+def _non_text_names(names: Iterable[Any], what: str) -> str | None:
+    """The reason when some of *names* (``what``: ``metadata keys``...) are not text; ``None`` when all are."""
+    bad = [name for name in names if not isinstance(name, str)]
+    if not bad:
+        return None
+    return f"{what} must be strings{_yaml_hint(what) if any(isinstance(name, bool) for name in bad) else ''}"
 
 
 class FlagDefinitionError(ValueError):
@@ -164,8 +179,10 @@ def validate_flag(key: Any, definition: Any) -> None:
     """Raise :class:`FlagDefinitionError` with the contract message of the first rule *definition* breaks.
 
     The order is the contract's: key, object, state, variants, variant types, defaultVariant, targeting, metadata
-    scalars, then the reserved metadata keys. Fields beside ``state``, ``variants``, ``defaultVariant``,
-    ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields" rule), never an error.
+    scalars, then the reserved metadata keys. The names of the metadata entries must be text (``metadata keys must be
+    strings``; an unquoted YAML ``on:`` is a boolean key and gets the YAML hint). Fields beside ``state``,
+    ``variants``, ``defaultVariant``, ``targeting`` and ``metadata`` are ignored (the contract's "unknown fields"
+    rule), never an error.
     """
     if not is_valid_key(key):
         raise FlagDefinitionError(str(key), "invalid flag key")
@@ -177,12 +194,12 @@ def validate_flag(key: Any, definition: Any) -> None:
     if not isinstance(variants, Mapping) or not variants:
         raise FlagDefinitionError(key, "variants must be a non-empty object")
     if not all(isinstance(name, str) for name in variants):
-        raise FlagDefinitionError(key, f"variants must be a non-empty object with text names{_YAML_HINT}")
+        raise FlagDefinitionError(key, f"variants must be a non-empty object with text names{_VARIANT_HINT}")
     if len({_value_class(value) for value in variants.values()}) != 1:
         raise FlagDefinitionError(key, "variants must share one type")
     default_variant = definition.get("defaultVariant")
     if isinstance(default_variant, bool):
-        raise FlagDefinitionError(key, f"defaultVariant is not a variant{_YAML_HINT}")
+        raise FlagDefinitionError(key, f"defaultVariant is not a variant{_VARIANT_HINT}")
     if default_variant is not None and (not isinstance(default_variant, str) or default_variant not in variants):
         raise FlagDefinitionError(key, "defaultVariant is not a variant")
     targeting = definition.get("targeting")
@@ -193,6 +210,8 @@ def validate_flag(key: Any, definition: Any) -> None:
         return
     if not isinstance(metadata, Mapping) or not _scalars(metadata):
         raise FlagDefinitionError(key, "metadata values must be scalars")
+    if (reason := _non_text_names(metadata, "metadata keys")) is not None:
+        raise FlagDefinitionError(key, reason)
     if "kind" in metadata and metadata["kind"] not in FLAG_KINDS:
         raise FlagDefinitionError(key, "kind must be one of release, experiment, ops, permission")
     if "expires" in metadata and not _is_date(metadata["expires"]):
@@ -203,35 +222,51 @@ def validate_flag(key: Any, definition: Any) -> None:
         raise FlagDefinitionError(key, "description must be a string")
 
 
+def _section(raw: Mapping[Any, Any], name: str, reason: str) -> Mapping[Any, Any]:
+    """The document section *name*: empty when absent or null, otherwise it must be an object (even when falsy)."""
+    value = raw.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise FlagDefinitionError(name, reason)
+    return value
+
+
 def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     """Validate a flagd document (``flags``, ``$evaluators``, ``metadata``) as a whole.
 
     With *shorthand* (configuration and test overrides only) the ``flags`` may use the spec 4.2 shorthand. YAML
     dates become their ISO text first. The first broken rule rejects the whole document. A ``$ref`` naming no
     evaluator is accepted: evaluating that flag yields ``PARSE_ERROR``.
+
+    Each of the three sections is empty when absent or null; a present section that is not an object is rejected
+    whatever its value (``flags: false`` is an error, not an empty set), and the error's ``key`` is the
+    section name (``flags``, ``$evaluators``, ``metadata``; ``<document>`` when the document itself is not an
+    object). The names of the evaluators and the keys of the document ``metadata`` must be text, as in a flag's
+    ``metadata``: YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed.
     """
     if not isinstance(raw, Mapping):
         raise FlagDefinitionError("<document>", "flag definition must be an object")
     raw = _jsonable(raw)
-    flags_in = raw.get("flags") or {}
-    if not isinstance(flags_in, Mapping):
-        raise FlagDefinitionError("flags", "flag definition must be an object")
+    flags_in = _section(raw, "flags", "flag definition must be an object")
     candidates = normalize_flags(flags_in) if shorthand else {_text_key(k): v for k, v in flags_in.items()}
     flags: dict[str, dict[str, Any]] = {}
     for key, definition in candidates.items():
         validate_flag(key, definition)
         flags[key] = copy.deepcopy(dict(definition))
-    evaluators_in = raw.get("$evaluators") or {}
-    if not isinstance(evaluators_in, Mapping):
-        raise FlagDefinitionError("$evaluators", "targeting must be an object")
+    evaluators_in = _section(raw, "$evaluators", "$evaluators must be an object")
+    if (reason := _non_text_names(evaluators_in, "evaluator names")) is not None:
+        raise FlagDefinitionError("$evaluators", reason)
     evaluators: dict[str, dict[str, Any]] = {}
     for name, rule in evaluators_in.items():
         if not isinstance(rule, Mapping):
             raise FlagDefinitionError(f"$evaluators.{name}", "targeting must be an object")
-        evaluators[str(name)] = copy.deepcopy(dict(rule))
-    metadata = raw.get("metadata") or {}
-    if not isinstance(metadata, Mapping) or not _scalars(metadata):
+        evaluators[name] = copy.deepcopy(dict(rule))
+    metadata = _section(raw, "metadata", "metadata must be an object")
+    if not _scalars(metadata):
         raise FlagDefinitionError("metadata", "metadata values must be scalars")
+    if (reason := _non_text_names(metadata, "metadata keys")) is not None:
+        raise FlagDefinitionError("metadata", reason)
     return FlagDocument(flags=flags, evaluators=evaluators, metadata=dict(metadata))
 
 
