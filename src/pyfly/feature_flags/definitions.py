@@ -240,15 +240,18 @@ def parse_document(raw: Any, *, shorthand: bool = False) -> FlagDocument:
     evaluator is accepted: evaluating that flag yields ``PARSE_ERROR``.
 
     Each of the three sections is empty when absent or null; a present section that is not an object is rejected
-    whatever its value (``flags: false`` is an error, not an empty set), and the error's ``key`` is the
-    section name (``flags``, ``$evaluators``, ``metadata``; ``<document>`` when the document itself is not an
-    object). The names of the evaluators and the keys of the document ``metadata`` must be text, as in a flag's
-    ``metadata``: YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed.
+    whatever its value (``flags: false`` is an error, not an empty set). The error's ``key`` is the section name
+    (``flags``, ``$evaluators``, ``metadata``) and its reason ``<section> must be an object``; ``<document>`` is the
+    key when the document itself is not an object. A single flag entry that is not an object keeps the contract
+    phrase ``flag definition must be an object``, with the flag's key.
+
+    The names of the evaluators and the keys of the document ``metadata`` must be text, as in a flag's ``metadata``:
+    YAML reads an unquoted ``on:`` as a boolean key, which is refused rather than renamed.
     """
     if not isinstance(raw, Mapping):
         raise FlagDefinitionError("<document>", "flag definition must be an object")
     raw = _jsonable(raw)
-    flags_in = _section(raw, "flags", "flag definition must be an object")
+    flags_in = _section(raw, "flags", "flags must be an object")
     candidates = normalize_flags(flags_in) if shorthand else {_text_key(k): v for k, v in flags_in.items()}
     flags: dict[str, dict[str, Any]] = {}
     for key, definition in candidates.items():

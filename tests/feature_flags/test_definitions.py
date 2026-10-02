@@ -118,7 +118,8 @@ def test_unquoted_yaml_on_off_names_get_a_hint() -> None:
     ("raw", "key", "reason"),
     [
         ([1, 2], "<document>", "flag definition must be an object"),
-        ({"flags": [1]}, "flags", "flag definition must be an object"),
+        ({"flags": [1]}, "flags", "flags must be an object"),
+        ({"flags": {"x": 42}}, "x", "flag definition must be an object"),
         ({"flags": {}, "$evaluators": {"beta": ["x"]}}, "$evaluators.beta", "targeting must be an object"),
         ({"flags": {}, "metadata": {"tags": ["a"]}}, "metadata", "metadata values must be scalars"),
     ],
@@ -138,10 +139,10 @@ def test_an_absent_or_null_section_is_empty(section: str) -> None:
 @pytest.mark.parametrize(
     ("raw", "key", "reason"),
     [
-        ({"flags": False}, "flags", "flag definition must be an object"),
-        ({"flags": 0}, "flags", "flag definition must be an object"),
-        ({"flags": ""}, "flags", "flag definition must be an object"),
-        ({"flags": []}, "flags", "flag definition must be an object"),
+        ({"flags": False}, "flags", "flags must be an object"),
+        ({"flags": 0}, "flags", "flags must be an object"),
+        ({"flags": ""}, "flags", "flags must be an object"),
+        ({"flags": []}, "flags", "flags must be an object"),
         ({"$evaluators": False}, "$evaluators", "$evaluators must be an object"),
         ({"$evaluators": 0}, "$evaluators", "$evaluators must be an object"),
         ({"$evaluators": []}, "$evaluators", "$evaluators must be an object"),
