@@ -108,9 +108,8 @@ async def test_missing_tables_fail_fast_when_the_store_may_not_create_them(
         await store.start()
 
 
-# Tables as LaraFly's migration creates them (Laravel schema builder: id() is a big auto-increment, timestamp() is a
-# zone-less timestamp; SQLite stores datetime text without fractional seconds).
-LARAFLY_DDL: dict[str, list[str]] = {
+# LaraFly FeatureFlagSchema.php at 0e3dad5: binary keys, unbounded JSON and zoneless UTC microseconds.
+LARAFLY_SCHEMA: dict[str, list[str]] = {
     "sqlite": [
         "CREATE TABLE firefly_feature_flags (flag_key varchar NOT NULL PRIMARY KEY, definition text NOT NULL, "
         "version integer NOT NULL, updated_at datetime NOT NULL, updated_by varchar NULL)",
@@ -120,52 +119,84 @@ LARAFLY_DDL: dict[str, list[str]] = {
     ],
     "postgresql": [
         "CREATE TABLE firefly_feature_flags (flag_key varchar(128) NOT NULL PRIMARY KEY, definition text NOT NULL, "
-        "version integer NOT NULL, updated_at timestamp(0) without time zone NOT NULL, updated_by varchar(255) NULL)",
+        "version integer NOT NULL, updated_at timestamp(6) without time zone NOT NULL, updated_by varchar(255) NULL)",
         "CREATE TABLE firefly_feature_flag_changes (id bigserial PRIMARY KEY, flag_key varchar(128) NOT NULL, "
         "action varchar(16) NOT NULL, definition text NULL, previous text NULL, actor varchar(255) NULL, "
-        "changed_at timestamp(0) without time zone NOT NULL)",
+        "changed_at timestamp(6) without time zone NOT NULL)",
     ],
     "mysql": [
-        "CREATE TABLE firefly_feature_flags (flag_key varchar(128) NOT NULL PRIMARY KEY, definition text NOT NULL, "
-        "version int NOT NULL, updated_at timestamp NOT NULL, updated_by varchar(255) NULL) DEFAULT CHARSET utf8mb4",
+        "CREATE TABLE firefly_feature_flags (flag_key varchar(128) CHARACTER SET utf8mb4 "
+        "COLLATE {collation} NOT NULL PRIMARY KEY, definition longtext NOT NULL, "
+        "version int NOT NULL, updated_at datetime(6) NOT NULL, updated_by varchar(255) NULL) DEFAULT CHARSET utf8mb4",
         "CREATE TABLE firefly_feature_flag_changes (id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY, "
-        "flag_key varchar(128) NOT NULL, action varchar(16) NOT NULL, definition text NULL, previous text NULL, "
-        "actor varchar(255) NULL, changed_at timestamp NOT NULL) DEFAULT CHARSET utf8mb4",
+        "flag_key varchar(128) CHARACTER SET utf8mb4 COLLATE {collation} NOT NULL, action varchar(16) NOT NULL, "
+        "definition longtext NULL, previous longtext NULL, actor varchar(255) NULL, changed_at datetime(6) "
+        "NOT NULL) DEFAULT CHARSET utf8mb4",
     ],
 }
 LARAFLY_INDEX = "CREATE INDEX firefly_feature_flag_changes_key ON firefly_feature_flag_changes (flag_key, id)"
 PHP_DEFINITION = (
     '{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"on","metadata":{"owner":"php"}}'
 )
+PHP_LARGE_DEFINITION = json.dumps({"state": "ENABLED", "variants": {"text": "x" * 80_000}, "defaultVariant": "text"})
 
 
 async def test_tables_created_by_larafly_are_read_and_written(relational_backend: RelationalBackend) -> None:
     """Review focus 3: a service on a database LaraFly migrated (shared control plane) must boot, read and write."""
     engine = relational_backend.create_engine()
     dialect = "mysql" if relational_backend.dialect in ("mysql", "mariadb") else relational_backend.dialect
+    collation = "utf8mb4_nopad_bin" if relational_backend.dialect == "mariadb" else "utf8mb4_0900_bin"
     async with engine.begin() as connection:
-        for statement in [*LARAFLY_DDL[dialect], LARAFLY_INDEX]:
-            await connection.execute(text(statement))
+        for statement in [*LARAFLY_SCHEMA[dialect], LARAFLY_INDEX]:
+            await connection.execute(text(statement.format(collation=collation)))
         await connection.execute(
             text(
                 "INSERT INTO firefly_feature_flags (flag_key, definition, version, updated_at, updated_by) "
-                "VALUES ('php-flag', :definition, 3, '2026-10-01 09:30:00', 'ops@example.com')"
+                "VALUES ('php-flag', :definition, 3, '2026-10-01 09:30:00.123456', 'ops@example.com')"
             ),
             {"definition": PHP_DEFINITION},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO firefly_feature_flags (flag_key, definition, version, updated_at, updated_by) "
+                "VALUES ('PHP-FLAG', :definition, 1, '2026-10-01 09:30:00.654321', NULL)"
+            ),
+            {"definition": PHP_LARGE_DEFINITION},
         )
         await connection.execute(
             text(
                 "INSERT INTO firefly_feature_flag_changes (flag_key, action, definition, previous, actor, changed_at) "
-                "VALUES ('php-flag', 'put', :definition, NULL, 'ops@example.com', '2026-10-01 09:30:00')"
+                "VALUES ('php-flag', 'put', :definition, NULL, 'ops@example.com', '2026-10-01 09:30:00.123456')"
             ),
             {"definition": PHP_DEFINITION},
         )
+    if dialect != "sqlite":
+        async with engine.connect() as connection:
+            if dialect == "postgresql":
+                await connection.execute(text("SET TIME ZONE '+08:00'"))
+            else:
+                await connection.execute(text("SET time_zone = '+08:00'"))
+            try:
+                raw = await connection.execute(
+                    text("SELECT updated_at FROM firefly_feature_flags WHERE flag_key = 'php-flag'")
+                )
+                assert raw.scalar_one() == datetime(2026, 10, 1, 9, 30, 0, 123456)
+            finally:
+                if dialect == "postgresql":
+                    await connection.execute(text("SET TIME ZONE 'UTC'"))
+                else:
+                    await connection.execute(text("SET time_zone = '+00:00'"))
     store = SqlAlchemyFlagStore(engine, create_tables=False)
     await store.start()  # ensure_tables accepts LaraFly's columns (no TIMESTAMP WITH TIME ZONE demanded)
     stored = await store.get("php-flag")
     assert stored is not None
     assert stored.definition == json.loads(PHP_DEFINITION) and stored.version == 3
-    assert stored.updated_at == datetime(2026, 10, 1, 9, 30, tzinfo=UTC) and stored.updated_by == "ops@example.com"
+    assert stored.updated_at == datetime(2026, 10, 1, 9, 30, 0, 123456, tzinfo=UTC)
+    assert stored.updated_by == "ops@example.com"
+    upper = await store.get("PHP-FLAG")
+    assert upper is not None and upper.definition == json.loads(PHP_LARGE_DEFINITION)
+    assert upper.updated_at == datetime(2026, 10, 1, 9, 30, 0, 654321, tzinfo=UTC)
+    assert (await store.get("Php-Flag")) is None
     revision = await store.revision()
     assert revision >= 1
     change = await store.put("php-flag", bool_flag("off"), actor="pyfly", expected_version=3)

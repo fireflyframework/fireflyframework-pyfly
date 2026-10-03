@@ -53,7 +53,10 @@ def test_the_package_imports_without_openfeature() -> None:
     code = BLOCK_OPENFEATURE + (
         "import pyfly.feature_flags, pyfly.feature_flags.definitions, pyfly.feature_flags.composition, "
         "pyfly.feature_flags.events, pyfly.feature_flags.slot, pyfly.feature_flags.registry, "
-        "pyfly.feature_flags.properties, pyfly.feature_flags.sources.config, pyfly.feature_flags.sources.file; "
+        "pyfly.feature_flags.properties, pyfly.feature_flags.sources.config, pyfly.feature_flags.sources.file, "
+        "pyfly.feature_flags.gating, pyfly.feature_flags.templates, pyfly.feature_flags.server, "
+        "pyfly.feature_flags.sources.store, pyfly.feature_flags.store.ports, pyfly.feature_flags.store.memory, "
+        "pyfly.feature_flags.store.writer, pyfly.testing.feature_flags; "
         "from pyfly.feature_flags import FeatureFlagsError, FeatureFlagsProperties, FlagRegistry, ConfigFlagSource; "
         "print('ok')"
     )

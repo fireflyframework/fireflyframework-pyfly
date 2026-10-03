@@ -42,14 +42,37 @@ if TYPE_CHECKING:
         validate_flag,
     )
     from pyfly.feature_flags.events import FeatureFlagEvaluated, FeatureFlagsChanged, FeatureFlagUpdated
+    from pyfly.feature_flags.gating import (
+        FeatureFlagDisabledException,
+        FeatureFlagForbiddenException,
+        FeatureFlagNotFoundException,
+        FeatureFlagUnavailableException,
+        feature_flag,
+        feature_flag_disabled,
+    )
     from pyfly.feature_flags.hooks import ExposureEventHook, MetricsHook
     from pyfly.feature_flags.properties import FeatureFlagsProperties
     from pyfly.feature_flags.provider import FireflyFlagProvider
     from pyfly.feature_flags.registry import FeatureFlagsError, FlagRegistry, SourceStatus
+    from pyfly.feature_flags.server import FlagSyncServer
     from pyfly.feature_flags.slot import install_feature_flags, installed_feature_flags, uninstall_feature_flags
     from pyfly.feature_flags.sources import FlagSource, FlagSourceError, SourceSnapshot
     from pyfly.feature_flags.sources.config import ConfigFlagSource
     from pyfly.feature_flags.sources.file import FileFlagSource
+    from pyfly.feature_flags.sources.http import HttpFlagSource
+    from pyfly.feature_flags.sources.store import StoreFlagSource
+    from pyfly.feature_flags.store.memory import MemoryFlagStore
+    from pyfly.feature_flags.store.ports import (
+        FlagChange,
+        FlagConflictError,
+        FlagNotStoredError,
+        FlagStore,
+        FlagStoreError,
+        StoredFlag,
+    )
+    from pyfly.feature_flags.store.sqlalchemy import SqlAlchemyFlagStore
+    from pyfly.feature_flags.store.writer import FlagStoreWriter
+    from pyfly.feature_flags.templates import FeatureFlagsTemplateContext
 
 # The module of each public name.
 _EXPORTS: dict[str, str] = {
@@ -73,6 +96,12 @@ _EXPORTS: dict[str, str] = {
     "FeatureFlagEvaluated": "pyfly.feature_flags.events",
     "FeatureFlagUpdated": "pyfly.feature_flags.events",
     "FeatureFlagsChanged": "pyfly.feature_flags.events",
+    "FeatureFlagDisabledException": "pyfly.feature_flags.gating",
+    "FeatureFlagForbiddenException": "pyfly.feature_flags.gating",
+    "FeatureFlagNotFoundException": "pyfly.feature_flags.gating",
+    "FeatureFlagUnavailableException": "pyfly.feature_flags.gating",
+    "feature_flag": "pyfly.feature_flags.gating",
+    "feature_flag_disabled": "pyfly.feature_flags.gating",
     "ExposureEventHook": "pyfly.feature_flags.hooks",
     "MetricsHook": "pyfly.feature_flags.hooks",
     "FeatureFlagsProperties": "pyfly.feature_flags.properties",
@@ -80,6 +109,7 @@ _EXPORTS: dict[str, str] = {
     "FeatureFlagsError": "pyfly.feature_flags.registry",
     "FlagRegistry": "pyfly.feature_flags.registry",
     "SourceStatus": "pyfly.feature_flags.registry",
+    "FlagSyncServer": "pyfly.feature_flags.server",
     "install_feature_flags": "pyfly.feature_flags.slot",
     "installed_feature_flags": "pyfly.feature_flags.slot",
     "uninstall_feature_flags": "pyfly.feature_flags.slot",
@@ -88,6 +118,18 @@ _EXPORTS: dict[str, str] = {
     "SourceSnapshot": "pyfly.feature_flags.sources",
     "ConfigFlagSource": "pyfly.feature_flags.sources.config",
     "FileFlagSource": "pyfly.feature_flags.sources.file",
+    "HttpFlagSource": "pyfly.feature_flags.sources.http",
+    "StoreFlagSource": "pyfly.feature_flags.sources.store",
+    "MemoryFlagStore": "pyfly.feature_flags.store.memory",
+    "FlagChange": "pyfly.feature_flags.store.ports",
+    "FlagConflictError": "pyfly.feature_flags.store.ports",
+    "FlagNotStoredError": "pyfly.feature_flags.store.ports",
+    "FlagStore": "pyfly.feature_flags.store.ports",
+    "FlagStoreError": "pyfly.feature_flags.store.ports",
+    "StoredFlag": "pyfly.feature_flags.store.ports",
+    "SqlAlchemyFlagStore": "pyfly.feature_flags.store.sqlalchemy",
+    "FlagStoreWriter": "pyfly.feature_flags.store.writer",
+    "FeatureFlagsTemplateContext": "pyfly.feature_flags.templates",
 }
 
 __all__ = [
@@ -98,28 +140,47 @@ __all__ = [
     "EvaluationContextContributor",
     "EvaluationContextResolver",
     "ExposureEventHook",
+    "FeatureFlagDisabledException",
     "FeatureFlagEvaluated",
+    "FeatureFlagForbiddenException",
+    "FeatureFlagNotFoundException",
+    "FeatureFlagUnavailableException",
     "FeatureFlagUpdated",
     "FeatureFlags",
     "FeatureFlagsChanged",
     "FeatureFlagsContextFilter",
     "FeatureFlagsError",
     "FeatureFlagsProperties",
+    "FeatureFlagsTemplateContext",
     "FileFlagSource",
     "FireflyFlagProvider",
+    "FlagChange",
+    "FlagConflictError",
     "FlagDefinitionError",
     "FlagDocument",
+    "FlagNotStoredError",
     "FlagRegistry",
     "FlagSource",
     "FlagSourceError",
+    "FlagStore",
+    "FlagStoreError",
+    "FlagStoreWriter",
+    "FlagSyncServer",
+    "HttpFlagSource",
     "Layer",
+    "MemoryFlagStore",
     "MetricsHook",
     "OpenFeatureBinding",
     "SecurityContextContributor",
     "SourceSnapshot",
     "SourceStatus",
+    "SqlAlchemyFlagStore",
+    "StoreFlagSource",
+    "StoredFlag",
     "TenantContextContributor",
     "compose",
+    "feature_flag",
+    "feature_flag_disabled",
     "install_feature_flags",
     "installed_feature_flags",
     "normalize_flags",

@@ -55,6 +55,7 @@ FLAGS: dict[str, Any] = {
     "banner": {"state": "ENABLED", "variants": {"plain": {"title": "Hi"}}, "defaultVariant": "plain"},
     "by-user": {**bool_flag("off"), "targeting": {"if": [{"==": [{"var": "targetingKey"}, "u-1"]}, "on", None]}},
     "by-caller": {**bool_flag("off"), "targeting": {"if": [{"==": [{"var": "targetingKey"}, "caller"]}, "on", None]}},
+    "rollout": {**bool_flag("off"), "targeting": {"fractional": [["on", 50], ["off", 50]]}},
 }
 
 
@@ -161,6 +162,21 @@ async def test_explicit_context_wins_over_the_ambient_one() -> None:
     assert flags.is_enabled("by-user", context={"targetingKey": "u-1"}) is True
     assert flags.evaluation_context(ambient=False).targeting_key is None
     await binding.stop()
+
+
+async def test_integer_targeting_key_uses_the_same_fractional_bucket_as_decimal_text() -> None:
+    flags, binding = await _bound()
+    try:
+        integer = flags.evaluation_context({"targetingKey": 42})
+        text = flags.evaluation_context({"targetingKey": "42"})
+        assert integer.targeting_key == text.targeting_key == "42"
+        assert flags.variant("rollout", context={"targetingKey": 42}) == flags.variant(
+            "rollout", context={"targetingKey": "42"}
+        )
+        assert flags.evaluation_context({"targetingKey": True}).targeting_key == "ambient-user"
+        assert flags.evaluation_context({"targetingKey": 42.0}).targeting_key == "ambient-user"
+    finally:
+        await binding.stop()
 
 
 async def test_variant_evaluates_with_the_flags_own_type() -> None:

@@ -205,6 +205,20 @@ def test_a_contributor_can_supply_the_targeting_key_of_anonymous_traffic() -> No
         assert resolver.resolve().targeting_key == "alice"
 
 
+def test_an_integer_contributor_key_is_decimal_text_but_bool_is_absent() -> None:
+    class KeyContributor:
+        key: object = 42
+
+        def contribute(self, attributes: dict[str, Any]) -> None:
+            attributes["targetingKey"] = self.key
+
+    contributor = KeyContributor()
+    resolver = EvaluationContextResolver(contributors=[contributor])
+    assert resolver.resolve().targeting_key == "42"
+    contributor.key = True
+    assert resolver.resolve().targeting_key is None
+
+
 def test_a_principal_with_an_empty_tenant_attribute_does_not_fall_back_to_the_header() -> None:
     blank = SecurityContext(user_id="carol", attributes={"tenant": ""})
     set_tenant_id("from-header")

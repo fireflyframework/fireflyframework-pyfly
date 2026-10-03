@@ -50,6 +50,7 @@ from openfeature.transaction_context import (
     set_transaction_context_propagator,
 )
 
+from pyfly.feature_flags.context import _targeting_key_text
 from pyfly.feature_flags.definitions import flag_type
 from pyfly.feature_flags.provider import FireflyFlagProvider
 from pyfly.feature_flags.registry import FEATURE_FLAGS_PHASE, FeatureFlagsError
@@ -186,8 +187,8 @@ class FeatureFlags:
             explicit = dict(context)
             explicit_key = explicit.pop("targetingKey", None)
             attributes.update(explicit)
-            if explicit_key is not None:
-                key = str(explicit_key)
+            if (normalized_key := _targeting_key_text(explicit_key)) is not None:
+                key = normalized_key
         if targeting_key is not None:
             key = targeting_key
         return EvaluationContext(targeting_key=key, attributes=attributes)

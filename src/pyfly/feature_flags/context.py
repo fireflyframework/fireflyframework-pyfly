@@ -54,6 +54,14 @@ _logger = logging.getLogger(__name__)
 TARGETING_KEY = "targetingKey"
 
 
+def _targeting_key_text(value: object) -> str | None:
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
 @runtime_checkable
 class EvaluationContextContributor(Protocol):
     """Adds (or overrides) attributes of the ambient evaluation context, in place."""
@@ -170,7 +178,7 @@ class EvaluationContextResolver:
         """The ambient context, with ``targetingKey`` moved into ``EvaluationContext.targeting_key``."""
         attributes = self.attributes()
         key = attributes.pop(TARGETING_KEY, None)
-        return EvaluationContext(targeting_key=str(key) if key not in (None, "") else None, attributes=attributes)
+        return EvaluationContext(targeting_key=_targeting_key_text(key), attributes=attributes)
 
     def process_attributes(self) -> dict[str, Any]:
         """The attributes of the process, not of the caller: the management preview evaluates with these."""
