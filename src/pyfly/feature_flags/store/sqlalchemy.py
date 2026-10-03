@@ -13,22 +13,24 @@
 # limitations under the License.
 """``SqlAlchemyFlagStore`` (``sources.store.driver=database``): the store on the tables shared with LaraFly.
 
-Each write runs in one unit of work (:func:`~pyfly.data.transaction.infrastructure_unit`): it reads the row, checks
+Each write runs in one transaction boundary: it reads the row, checks
 ``expected_version``, then updates the row with ``WHERE version = <read>`` (or inserts it) and appends the change,
 so a concurrent writer either loses the conditional update or the primary-key insert. Without an
-``expected_version`` the write retries such a race up to three times; with one it is a conflict. Reads never use a
-read-only unit: a replica could serve a revision older than the rows, or the reverse.
+``expected_version`` an owned write retries such a race up to three times; with one it is a conflict. A caller-owned
+write uses a savepoint and reports a race as a conflict: its transaction may retain an old snapshot. Reads never use
+a read-only unit: a replica could serve a revision older than the rows, or the reverse.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Table, delete, func, insert, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from pyfly.data.relational.framework_schema import (
     FEATURE_FLAG_CHANGES,
@@ -37,7 +39,13 @@ from pyfly.data.relational.framework_schema import (
     feature_flag_changes_table,
     feature_flags_table,
 )
-from pyfly.data.transaction import infrastructure_unit
+from pyfly.data.transaction import (
+    Propagation,
+    TransactionTemplate,
+    infrastructure_unit,
+    is_transaction_active,
+    resolve_manager,
+)
 from pyfly.feature_flags.definitions import parse_document
 from pyfly.feature_flags.store.ports import FlagChange, FlagConflictError, FlagNotStoredError, StoredFlag
 
@@ -48,6 +56,12 @@ _ATTEMPTS = 3
 
 class _Raced(Exception):
     """Another writer changed the row between this write's read and its write."""
+
+
+def _record_changed(error: OperationalError) -> bool:
+    """MariaDB reports a racing row as ER_CHECKREAD (1020), rather than a zero-row update."""
+    args: tuple[Any, ...] = getattr(error.orig, "args", ())
+    return bool(args) and args[0] == 1020
 
 
 def _dump(definition: Mapping[str, Any]) -> str:
@@ -113,6 +127,18 @@ class SqlAlchemyFlagStore:
         async with infrastructure_unit(self._target) as session:
             return int((await session.execute(statement)).scalar_one())
 
+    @asynccontextmanager
+    async def _write_session(self) -> AsyncIterator[Any]:
+        async with infrastructure_unit(self._target) as session:
+            connection = await session.connection()
+            if connection.dialect.name == "sqlite":
+                raw = await connection.get_raw_connection()
+                if not raw.driver_connection.in_transaction:
+                    # Bare aiosqlite engines defer BEGIN; a released savepoint would otherwise commit by itself.
+                    await connection.exec_driver_sql("BEGIN IMMEDIATE")
+            async with TransactionTemplate(self._target, propagation=Propagation.NESTED).transaction():
+                yield session
+
     async def put(
         self, key: str, definition: Mapping[str, Any], *, actor: str | None, expected_version: int | None = None
     ) -> FlagChange:
@@ -120,14 +146,18 @@ class SqlAlchemyFlagStore:
         for _ in range(_ATTEMPTS):
             try:
                 return await self._put_once(key, payload, actor, expected_version)
-            except _Raced:
+            except (_Raced, OperationalError) as raced:
+                if isinstance(raced, OperationalError) and not _record_changed(raced):
+                    raise
+                if expected_version is not None or is_transaction_active(resolve_manager(self._target).datasource):
+                    raise FlagConflictError(key, expected_version, None) from raced
                 continue
         raise FlagConflictError(key, expected_version, None)
 
     async def _put_once(self, key: str, payload: str, actor: str | None, expected: int | None) -> FlagChange:
         flags, changes = self._flags, self._changes
         now = self._clock()
-        async with infrastructure_unit(self._target) as session:
+        async with self._write_session() as session:
             current = (
                 await session.execute(select(flags.c.definition, flags.c.version).where(flags.c.flag_key == key))
             ).first()
@@ -165,14 +195,18 @@ class SqlAlchemyFlagStore:
         for _ in range(_ATTEMPTS):
             try:
                 return await self._delete_once(key, actor, expected_version)
-            except _Raced:
+            except (_Raced, OperationalError) as raced:
+                if isinstance(raced, OperationalError) and not _record_changed(raced):
+                    raise
+                if expected_version is not None or is_transaction_active(resolve_manager(self._target).datasource):
+                    raise FlagConflictError(key, expected_version, None) from raced
                 continue
         raise FlagConflictError(key, expected_version, None)
 
     async def _delete_once(self, key: str, actor: str | None, expected: int | None) -> FlagChange:
         flags, changes = self._flags, self._changes
         now = self._clock()
-        async with infrastructure_unit(self._target) as session:
+        async with self._write_session() as session:
             current = (
                 await session.execute(select(flags.c.definition, flags.c.version).where(flags.c.flag_key == key))
             ).first()

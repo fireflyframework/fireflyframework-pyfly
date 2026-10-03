@@ -18,6 +18,7 @@ The default run covers the sqlite-file lane; `pytest -m "integration and pg"` (m
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from pyfly.data.relational.framework_schema import (
@@ -37,6 +39,8 @@ from pyfly.data.relational.framework_schema import (
     feature_flags,
     framework_metadata,
 )
+from pyfly.data.transaction import infrastructure_unit
+from pyfly.feature_flags.store.ports import FlagConflictError
 from pyfly.feature_flags.store.sqlalchemy import SqlAlchemyFlagStore
 from tests.feature_flags.store_contract import FlagStoreContract
 from tests.feature_flags.support import bool_flag
@@ -213,4 +217,129 @@ async def test_failed_audit_insert_rolls_back_the_flag_row_and_revision(
     assert await store.get("a") == row_before
     assert await store.history("a") == history_before
     assert await store.revision() == revision_before
+    await store.stop()
+
+
+@pytest.mark.parametrize("action", ["put", "delete"])
+async def test_caught_audit_failure_rolls_back_only_its_write_in_a_caller_unit(
+    relational_backend: RelationalBackend, action: str
+) -> None:
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyFlagStore(engine)
+    await store.start()
+    await store.put("a", bool_flag("on"), actor="first")
+    row_before = await store.get("a")
+    history_before = await store.history("a")
+    revision_before = await store.revision()
+    mutated = False
+
+    def after_execute(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        nonlocal mutated
+        prefix = "UPDATE" if action == "put" else "DELETE FROM"
+        if statement.lstrip().upper().startswith(f"{prefix} FIREFLY_FEATURE_FLAGS"):
+            mutated = True
+
+    def fail_audit(
+        connection: object, cursor: object, statement: str, parameters: object, context: object, executemany: bool
+    ) -> None:
+        if statement.lstrip().upper().startswith("INSERT INTO FIREFLY_FEATURE_FLAG_CHANGES"):
+            assert mutated
+            raise RuntimeError("injected audit failure")
+
+    async with infrastructure_unit(engine):
+        await store.put("unrelated-before", bool_flag(), actor="outer")
+        event.listen(engine.sync_engine, "after_cursor_execute", after_execute)
+        event.listen(engine.sync_engine, "before_cursor_execute", fail_audit)
+        try:
+            with pytest.raises(RuntimeError, match="injected audit failure"):
+                if action == "put":
+                    await store.put("a", bool_flag("off"), actor="second")
+                else:
+                    await store.delete("a", actor="second")
+        finally:
+            event.remove(engine.sync_engine, "after_cursor_execute", after_execute)
+            event.remove(engine.sync_engine, "before_cursor_execute", fail_audit)
+        assert mutated
+        await store.put("unrelated-after", bool_flag(), actor="outer")
+
+    assert await store.get("a") == row_before
+    assert await store.history("a") == history_before
+    assert await store.revision() == revision_before + 2
+    assert await store.get("unrelated-before") is not None
+    assert await store.get("unrelated-after") is not None
+    await store.stop()
+
+
+async def test_successful_write_joins_a_caller_unit_that_later_rolls_back(
+    relational_backend: RelationalBackend,
+) -> None:
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyFlagStore(engine)
+    await store.start()
+    with pytest.raises(RuntimeError, match="outer failure"):
+        async with infrastructure_unit(engine):
+            await store.put("a", bool_flag(), actor="outer")
+            raise RuntimeError("outer failure")
+
+    assert await store.get("a") is None
+    assert await store.history("a") == []
+    assert await store.revision() == 0
+    await store.stop()
+
+
+@pytest.mark.backends("pg", "mysql", "mariadb")
+@pytest.mark.parametrize(("seed", "expected_version"), [(True, 1), (True, None), (False, 0), (False, None)])
+async def test_two_writers_keep_versions_and_history_consistent(
+    relational_backend: RelationalBackend, seed: bool, expected_version: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyFlagStore(engine)
+    await store.start()
+    if seed:
+        await store.put("a", bool_flag("on"), actor="first")
+    original_execute = AsyncSession.execute
+    both_read = asyncio.Event()
+    readers = 0
+
+    async def synchronize_reads(self: AsyncSession, statement: object, *args: object, **kwargs: object) -> object:
+        nonlocal readers
+        result = await original_execute(self, statement, *args, **kwargs)
+        if getattr(statement, "is_select", False) and store.tables[0] in statement.get_final_froms() and readers < 2:
+            readers += 1
+            if readers == 2:
+                both_read.set()
+            await asyncio.wait_for(both_read.wait(), timeout=5)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", synchronize_reads)
+    results = await asyncio.gather(
+        store.put("a", bool_flag("on"), actor="writer-one", expected_version=expected_version),
+        store.put("a", bool_flag("off"), actor="writer-two", expected_version=expected_version),
+        return_exceptions=True,
+    )
+    monkeypatch.setattr(AsyncSession, "execute", original_execute)
+
+    assert readers == 2
+    winners = [result for result in results if not isinstance(result, BaseException)]
+    conflicts = [result for result in results if isinstance(result, FlagConflictError)]
+    assert len(winners) == (1 if expected_version is not None else 2), results
+    assert len(conflicts) == (1 if expected_version is not None else 0), results
+    assert len([result for result in results if isinstance(result, BaseException)]) == len(conflicts), results
+    row = await store.get("a")
+    assert row is not None and row.version == int(seed) + len(winners)
+    history = await store.history("a")
+    assert len(history) == int(seed) + len(winners)
+    assert await store.revision() == history[0].id
+    assert {change.actor for change in history} == ({"first"} if seed else set()) | {winner.actor for winner in winners}
+    assert history[-1].previous is None
+    if seed:
+        assert history[-1].definition == bool_flag("on")
+    if len(winners) == 2:
+        assert history[0].previous == history[1].definition
+    elif seed:
+        assert history[0].previous == bool_flag("on")
+    else:
+        assert history[0].previous is None
     await store.stop()
