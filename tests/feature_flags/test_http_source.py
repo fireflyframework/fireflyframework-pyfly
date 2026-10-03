@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -177,6 +178,49 @@ async def test_provider_refusal_retries_the_same_http_revision_without_a_conditi
     assert registry.sources()[0].status == "UP"
     assert registry.provider.definition("a") == bool_flag("on")
     await registry.stop()
+
+
+async def test_older_http_load_cannot_restore_a_newer_refused_etag(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+    older_started = asyncio.Event()
+    release_older = asyncio.Event()
+
+    async def server(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, json={"flags": {"a": bool_flag("off")}}, headers={"ETag": '"v1"'})
+        if len(requests) == 2:
+            older_started.set()
+            await release_older.wait()
+        if request.headers.get("if-none-match") == '"v2"':
+            return httpx.Response(304)
+        return httpx.Response(200, json={"flags": {"a": bool_flag("on")}}, headers={"ETag": '"v2"'})
+
+    registry = FlagRegistry([HttpFlagSource(URL, transport=httpx.MockTransport(server))], FireflyFlagProvider())
+    await registry.start()
+    older = asyncio.create_task(registry.refresh("http"))
+    try:
+        await older_started.wait()
+
+        def refuse(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("provider refused")
+
+        update = registry.provider.update
+        monkeypatch.setattr(registry.provider, "update", refuse)
+        assert await registry.refresh("http") == []
+        assert registry.sources()[0].status == "STALE"
+        monkeypatch.setattr(registry.provider, "update", update)
+        release_older.set()
+        assert await older == []
+
+        assert await registry.refresh("http") == ["a"]
+        assert [request.headers.get("if-none-match") for request in requests] == [None, '"v1"', '"v1"', None]
+        assert registry.provider.definition("a") == bool_flag("on")
+        assert registry.sources()[0].status == "UP"
+    finally:
+        release_older.set()
+        await older
+        await registry.stop()
 
 
 def test_a_url_is_required() -> None:

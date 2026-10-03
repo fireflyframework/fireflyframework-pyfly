@@ -49,6 +49,8 @@ class HttpFlagSource:
         self.refresh_interval: float | None = refresh_interval
         self._client: httpx.AsyncClient | None = None
         self._etag: str | None = None
+        self._next_load = 0
+        self._completed_load = 0
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -56,22 +58,29 @@ class HttpFlagSource:
         return self._client
 
     async def load(self) -> SourceSnapshot | None:
+        self._next_load += 1
+        load = self._next_load
         headers = {"Accept": "application/json"}
         if self._etag is not None:
             headers["If-None-Match"] = self._etag
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
-        response = await self._http().get(self._url, headers=headers)
-        if response.status_code == 304:
-            return None
-        response.raise_for_status()
         try:
-            raw: Any = response.json()
-        except ValueError as error:
-            raise ValueError(f"{self._url} did not answer a JSON document") from error
-        document = parse_document(raw)
-        self._etag = response.headers.get("etag")
-        return SourceSnapshot(document, revision=self._etag)
+            response = await self._http().get(self._url, headers=headers)
+            if response.status_code == 304:
+                return None
+            response.raise_for_status()
+            try:
+                raw: Any = response.json()
+            except ValueError as error:
+                raise ValueError(f"{self._url} did not answer a JSON document") from error
+            document = parse_document(raw)
+            etag = response.headers.get("etag")
+            if load >= self._completed_load:
+                self._etag = etag
+            return SourceSnapshot(document, revision=etag)
+        finally:
+            self._completed_load = max(self._completed_load, load)
 
     def reject_snapshot(self, snapshot: SourceSnapshot) -> None:
         """Retry a parsed revision unconditionally if the provider refused it."""
