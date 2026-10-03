@@ -36,17 +36,27 @@ def effective_dict(config: Any) -> dict[str, Any]:
             # One literal flag variant can contain an unresolved ${...}; keep
             # that leaf visible without losing resolution of the other keys.
             raw = config.to_dict()
+            resolver = getattr(config, "_resolve_tree", None)
 
-            def resolve(value: Any, path: str = "") -> Any:
+            def resolve(value: Any) -> Any:
                 if isinstance(value, dict):
-                    return {key: resolve(item, f"{path}.{key}" if path else key) for key, item in value.items()}
+                    return {key: resolve(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [resolve(item) for item in value]
+                if not callable(resolver):
+                    return value
                 try:
-                    return config.get(path)
+                    return resolver(value)
                 except ValueError:
                     return value
 
             resolved = resolve(raw)
-            return resolved if isinstance(resolved, dict) else {}
+            if isinstance(resolved, dict):
+                overlay = getattr(config, "_apply_env_overrides", None)
+                if callable(overlay):
+                    overlay("", resolved)
+                return resolved
+            return {}
         if isinstance(result, dict):
             return result
     raw = config.to_dict() if hasattr(config, "to_dict") else {}
