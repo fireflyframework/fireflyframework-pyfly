@@ -82,7 +82,9 @@ class TestVendorIsolation:
                 # The statement counter is the SQL-engine test utility; it imports SQLAlchemy lazily.
                 "and '/testing/statement_counter' not in l "
                 # So does the rollback transaction of data tests (for type checking only).
-                "and '/testing/rollback' not in l]; "
+                "and '/testing/rollback' not in l "
+                # The feature-flag store is its SQL adapter, not the flag domain.
+                "and '/feature_flags/store/sqlalchemy.py:' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],
@@ -112,7 +114,9 @@ class TestVendorIsolation:
                 "and '/idp/adapters/' not in l "
                 "and '/cli/' not in l "
                 "and '/ecm/adapters/' not in l "
-                "and 'web/converters' not in l]; "
+                "and 'web/converters' not in l "
+                # The remote feature-flag source is its HTTP adapter, not the flag domain.
+                "and '/feature_flags/sources/http.py:' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],
