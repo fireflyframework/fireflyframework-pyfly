@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from openfeature.evaluation_context import EvaluationContext
@@ -54,11 +55,17 @@ _logger = logging.getLogger(__name__)
 TARGETING_KEY = "targetingKey"
 
 
-def _targeting_key_text(value: object) -> str | None:
+def _targeting_key_text(value: object, *, source: str) -> str | None:
     if isinstance(value, str):
         return value or None
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
+    if value is not None:
+        with suppress(Exception):  # diagnostics cannot affect evaluation
+            _logger.debug(
+                "feature_flag_targeting_key_refused",
+                extra={"source": source, "type": type(value).__name__[:64]},
+            )
     return None
 
 
@@ -178,7 +185,7 @@ class EvaluationContextResolver:
         """The ambient context, with ``targetingKey`` moved into ``EvaluationContext.targeting_key``."""
         attributes = self.attributes()
         key = attributes.pop(TARGETING_KEY, None)
-        return EvaluationContext(targeting_key=_targeting_key_text(key), attributes=attributes)
+        return EvaluationContext(targeting_key=_targeting_key_text(key, source="ambient"), attributes=attributes)
 
     def process_attributes(self) -> dict[str, Any]:
         """The attributes of the process, not of the caller: the management preview evaluates with these."""

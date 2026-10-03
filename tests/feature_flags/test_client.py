@@ -179,6 +179,38 @@ async def test_integer_targeting_key_uses_the_same_fractional_bucket_as_decimal_
         await binding.stop()
 
 
+async def test_explicit_targeting_keys_normalize_and_preserve_precedence(caplog: pytest.LogCaptureFixture) -> None:
+    flags, binding = await _bound()
+    try:
+        expected = flags.variant_details("rollout", targeting_key="42")
+        ambient = flags.variant_details("rollout")
+        with caplog.at_level(logging.DEBUG, logger="pyfly.feature_flags.context"):
+            for mode in ("context", "keyword"):
+                for value in (42, "42", True, 42.0, ""):
+                    kwargs = {"context": {"targetingKey": value}} if mode == "context" else {"targeting_key": value}
+                    sync = flags.variant_details("rollout", **kwargs)
+                    async_result = await flags.variant_details_async("rollout", **kwargs)
+                    reference = expected if type(value) in (int, str) and str(value) == "42" else ambient
+                    for result in (sync, async_result):
+                        assert (result.value, result.variant, result.reason, result.error_code) == (
+                            reference.value,
+                            reference.variant,
+                            reference.reason,
+                            reference.error_code,
+                        )
+            assert flags.evaluation_context({"targetingKey": "42"}, targeting_key=True).targeting_key == "42"
+            assert flags.evaluation_context({"targetingKey": "42"}, targeting_key="").targeting_key == "42"
+        refused = [record for record in caplog.records if record.getMessage() == "feature_flag_targeting_key_refused"]
+        assert {(record.source, record.type) for record in refused} == {
+            ("context", "bool"),
+            ("context", "float"),
+            ("keyword", "bool"),
+            ("keyword", "float"),
+        }
+    finally:
+        await binding.stop()
+
+
 async def test_variant_evaluates_with_the_flags_own_type() -> None:
     flags, binding = await _bound()
     assert flags.variant("page-size") == "large" == await flags.variant_async("page-size")

@@ -173,7 +173,7 @@ class FeatureFlags:
         return self._registry
 
     def evaluation_context(
-        self, context: Mapping[str, Any] | None = None, *, targeting_key: str | None = None, ambient: bool = True
+        self, context: Mapping[str, Any] | None = None, *, targeting_key: str | int | None = None, ambient: bool = True
     ) -> EvaluationContext:
         """The ambient context (or only the process attributes when not *ambient*), *context* on top."""
         if ambient:
@@ -187,10 +187,10 @@ class FeatureFlags:
             explicit = dict(context)
             explicit_key = explicit.pop("targetingKey", None)
             attributes.update(explicit)
-            if (normalized_key := _targeting_key_text(explicit_key)) is not None:
+            if (normalized_key := _targeting_key_text(explicit_key, source="context")) is not None:
                 key = normalized_key
-        if targeting_key is not None:
-            key = targeting_key
+        if (normalized_key := _targeting_key_text(targeting_key, source="keyword")) is not None:
+            key = normalized_key
         return EvaluationContext(targeting_key=key, attributes=attributes)
 
     # -- synchronous -----------------------------------------------------------------------------------------
@@ -202,7 +202,7 @@ class FeatureFlags:
         default: FlagValueType,
         *,
         context: Mapping[str, Any] | None,
-        targeting_key: str | None,
+        targeting_key: str | int | None,
         ambient: bool = True,
         preview: bool = False,
     ) -> FlagEvaluationDetails[Any]:
@@ -219,7 +219,7 @@ class FeatureFlags:
         default: FlagValueType,
         *,
         context: Mapping[str, Any] | None = None,
-        targeting_key: str | None = None,
+        targeting_key: str | int | None = None,
         ambient: bool = True,
         preview: bool = False,
     ) -> FlagEvaluationDetails[Any]:
@@ -244,25 +244,40 @@ class FeatureFlags:
         default: bool = False,
         *,
         context: Mapping[str, Any] | None = None,
-        targeting_key: str | None = None,
+        targeting_key: str | int | None = None,
     ) -> bool:
         details = self._evaluate(FlagType.BOOLEAN, key, bool(default), context=context, targeting_key=targeting_key)
         return bool(details.value)
 
     def get_string(
-        self, key: str, default: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self,
+        key: str,
+        default: str,
+        *,
+        context: Mapping[str, Any] | None = None,
+        targeting_key: str | int | None = None,
     ) -> str:
         details = self._evaluate(FlagType.STRING, key, str(default), context=context, targeting_key=targeting_key)
         return str(details.value)
 
     def get_int(
-        self, key: str, default: int, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self,
+        key: str,
+        default: int,
+        *,
+        context: Mapping[str, Any] | None = None,
+        targeting_key: str | int | None = None,
     ) -> int:
         details = self._evaluate(FlagType.INTEGER, key, int(default), context=context, targeting_key=targeting_key)
         return int(details.value)
 
     def get_float(
-        self, key: str, default: float, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self,
+        key: str,
+        default: float,
+        *,
+        context: Mapping[str, Any] | None = None,
+        targeting_key: str | int | None = None,
     ) -> float:
         details = self._evaluate(FlagType.FLOAT, key, float(default), context=context, targeting_key=targeting_key)
         return float(details.value)
@@ -273,7 +288,7 @@ class FeatureFlags:
         default: Mapping[str, FlagValueType] | Sequence[FlagValueType],
         *,
         context: Mapping[str, Any] | None = None,
-        targeting_key: str | None = None,
+        targeting_key: str | int | None = None,
     ) -> Any:
         return self._evaluate(FlagType.OBJECT, key, default, context=context, targeting_key=targeting_key).value
 
@@ -282,13 +297,13 @@ class FeatureFlags:
         return typed_default(flag.definition) if flag is not None else ""
 
     def variant_details(
-        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | int | None = None
     ) -> FlagEvaluationDetails[Any]:
         """Evaluate *key* with the flag's own type (Firefly's provider), or as a string (an external one)."""
         return self.details(key, self._variant_default(key), context=context, targeting_key=targeting_key)
 
     def variant(
-        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | int | None = None
     ) -> str | None:
         return self.variant_details(key, context=context, targeting_key=targeting_key).variant
 
@@ -301,7 +316,7 @@ class FeatureFlags:
         default: FlagValueType,
         *,
         context: Mapping[str, Any] | None,
-        targeting_key: str | None,
+        targeting_key: str | int | None,
         ambient: bool = True,
         preview: bool = False,
     ) -> FlagEvaluationDetails[Any]:
@@ -318,7 +333,7 @@ class FeatureFlags:
         default: FlagValueType,
         *,
         context: Mapping[str, Any] | None = None,
-        targeting_key: str | None = None,
+        targeting_key: str | int | None = None,
         ambient: bool = True,
         preview: bool = False,
     ) -> FlagEvaluationDetails[Any]:
@@ -339,7 +354,7 @@ class FeatureFlags:
         default: bool = False,
         *,
         context: Mapping[str, Any] | None = None,
-        targeting_key: str | None = None,
+        targeting_key: str | int | None = None,
     ) -> bool:
         details = await self._evaluate_async(
             FlagType.BOOLEAN, key, bool(default), context=context, targeting_key=targeting_key
@@ -347,7 +362,12 @@ class FeatureFlags:
         return bool(details.value)
 
     async def get_string_async(
-        self, key: str, default: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self,
+        key: str,
+        default: str,
+        *,
+        context: Mapping[str, Any] | None = None,
+        targeting_key: str | int | None = None,
     ) -> str:
         details = await self._evaluate_async(
             FlagType.STRING, key, str(default), context=context, targeting_key=targeting_key
@@ -355,7 +375,12 @@ class FeatureFlags:
         return str(details.value)
 
     async def get_int_async(
-        self, key: str, default: int, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self,
+        key: str,
+        default: int,
+        *,
+        context: Mapping[str, Any] | None = None,
+        targeting_key: str | int | None = None,
     ) -> int:
         details = await self._evaluate_async(
             FlagType.INTEGER, key, int(default), context=context, targeting_key=targeting_key
@@ -363,7 +388,12 @@ class FeatureFlags:
         return int(details.value)
 
     async def get_float_async(
-        self, key: str, default: float, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self,
+        key: str,
+        default: float,
+        *,
+        context: Mapping[str, Any] | None = None,
+        targeting_key: str | int | None = None,
     ) -> float:
         details = await self._evaluate_async(
             FlagType.FLOAT, key, float(default), context=context, targeting_key=targeting_key
@@ -376,7 +406,7 @@ class FeatureFlags:
         default: Mapping[str, FlagValueType] | Sequence[FlagValueType],
         *,
         context: Mapping[str, Any] | None = None,
-        targeting_key: str | None = None,
+        targeting_key: str | int | None = None,
     ) -> Any:
         details = await self._evaluate_async(
             FlagType.OBJECT, key, default, context=context, targeting_key=targeting_key
@@ -384,12 +414,12 @@ class FeatureFlags:
         return details.value
 
     async def variant_details_async(
-        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | int | None = None
     ) -> FlagEvaluationDetails[Any]:
         return await self.details_async(key, self._variant_default(key), context=context, targeting_key=targeting_key)
 
     async def variant_async(
-        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | None = None
+        self, key: str, *, context: Mapping[str, Any] | None = None, targeting_key: str | int | None = None
     ) -> str | None:
         return (await self.variant_details_async(key, context=context, targeting_key=targeting_key)).variant
 
