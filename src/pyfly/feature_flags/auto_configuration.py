@@ -71,6 +71,7 @@ from pyfly.feature_flags.sources.store import STORE_SOURCE, StoreFlagSource
 from pyfly.feature_flags.store.memory import MemoryFlagStore
 from pyfly.feature_flags.store.ports import FlagStore
 from pyfly.feature_flags.store.writer import FlagStoreWriter
+from pyfly.feature_flags.templates import FeatureFlagsTemplateContext
 from pyfly.observability.metrics import MetricsRegistry
 
 __all__ = ["FeatureFlagsAutoConfiguration"]
@@ -255,3 +256,9 @@ class FeatureFlagsAutoConfiguration:
             domain=properties.openfeature.domain or None,
             disabled_status=properties.web.disabled_status,
         )
+
+    @bean
+    @conditional_on_property("pyfly.web.templates.enabled", having_value="true")
+    def feature_flags_template_context(self, facade: FeatureFlags) -> FeatureFlagsTemplateContext:
+        """Add flag functions to every view rendered through the web layer."""
+        return FeatureFlagsTemplateContext(facade)
