@@ -51,8 +51,8 @@ def _items_from_manifest(cfg: dict, man: Path, *, contents_label: str) -> list[d
     # 1) front matter
     for fm in cfg.get("front", []):
         p = man / fm["file"]
-        if not p.exists():
-            continue
+        if not p.is_file():
+            raise FileNotFoundError(f"Configured manuscript file is missing: {p}")
         items.append({
             "kind": "front",
             "id": fm["id"],
@@ -66,7 +66,11 @@ def _items_from_manifest(cfg: dict, man: Path, *, contents_label: str) -> list[d
     for part in cfg.get("parts", []):
         ptitle_full = part["title"]
         eyebrow, ptitle = _split_part(ptitle_full)
-        chapters = [ch for ch in part["chapters"] if (man / ch["file"]).exists()]
+        chapters = part["chapters"]
+        for ch in chapters:
+            p = man / ch["file"]
+            if not p.is_file():
+                raise FileNotFoundError(f"Configured manuscript file is missing: {p}")
         if not chapters:
             continue
         # stable divider id from the eyebrow, e.g. "Part I" -> "part-i"

@@ -7,8 +7,12 @@ existing SQLAlchemy entities or Beanie documents.
 
 | Edition | PDF | EPUB |
 |---|---|---|
-| English | [PDF](dist/pyfly-by-example.pdf) | [EPUB](dist/pyfly-by-example.epub) |
-| Spanish | [PDF](dist/pyfly-by-example-es.pdf) | [EPUB](dist/pyfly-by-example-es.epub) |
+| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.epub) |
+| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.epub) |
+
+These links download the latest published release assets. For a specific version,
+open its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
+and download the books attached to that tag.
 
 ## Sources and examples
 

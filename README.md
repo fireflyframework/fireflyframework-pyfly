@@ -61,7 +61,7 @@
 
 It covers the whole stack: dependency injection, configuration & profiles, the web layer, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), DDD aggregates & `Money`, CQRS, domain events & event sourcing, messaging, HTTP clients, sagas, caching & resilience, security, observability, testing, scheduling, and going to production. Spring developers get a **Spring parity** callout at every turn.
 
-**📥 Download the book:** **[English PDF](book/dist/pyfly-by-example.pdf)** · **[English EPUB](book/dist/pyfly-by-example.epub)** · **[Spanish PDF](book/dist/pyfly-by-example-es.pdf)** · **[Spanish EPUB](book/dist/pyfly-by-example-es.epub)** — or build it from source with `bash book/build/run.sh`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
+**📥 Download the latest release books:** **[English PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.pdf)** · **[English EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.epub)** · **[Spanish PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.pdf)** · **[Spanish EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.epub)**. For a specific version, use its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases), or build from source with `bash book/build/run.sh --out-dir book/release-output`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
 
 ---
 

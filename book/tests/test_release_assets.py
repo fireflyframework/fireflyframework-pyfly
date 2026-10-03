@@ -7,6 +7,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import build as book_build  # noqa: E402
 from epub import Doc, EpubBuilder  # noqa: E402
@@ -74,6 +76,29 @@ def test_build_can_write_outside_tracked_dist(tmp_path, monkeypatch):
     assert (out / "fresh.pdf").read_bytes().startswith(b"%PDF-")
     assert sorted(p.name for p in tracked.iterdir()) == ["old.pdf"]
     assert (tracked / "old.pdf").read_bytes() == b"owner work"
+
+
+@pytest.mark.parametrize("missing_file", ["front.md", "chapter.md"])
+def test_build_rejects_missing_configured_manuscript_before_writing(tmp_path, monkeypatch, missing_file):
+    source = tmp_path / "source"
+    manuscript = source / "manuscript"
+    manuscript.mkdir(parents=True)
+    for name in ("front.md", "chapter.md"):
+        if name != missing_file:
+            (manuscript / name).write_text("# Present\n")
+    (source / "book.yaml").write_text(
+        "title: Book\nauthor: Author\nlanguage: en\nidentifier: urn:uuid:book\n"
+        "manuscript_dir: manuscript\ncover_png: missing.png\noutput_basename: fresh\n"
+        "front:\n  - {id: front, file: front.md, title: Front}\n"
+        "parts:\n  - title: Part I\n    chapters:\n"
+        "      - {id: chapter, file: chapter.md, num: 1, title: Hello}\n"
+    )
+    out = tmp_path / "release"
+    monkeypatch.setattr(book_build, "BOOK", source)
+
+    with pytest.raises(FileNotFoundError, match=missing_file):
+        book_build.main(["--out-dir", str(out)])
+    assert not out.exists()
 
 
 def test_manifest_records_exact_bytes_and_commit(tmp_path):
