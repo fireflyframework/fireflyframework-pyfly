@@ -83,7 +83,8 @@ class FlagSyncServer:
             )
         body, etag = self.body_and_etag()
         headers = {"ETag": etag, "Cache-Control": "no-cache"}
-        if etag in _etags(request.headers.get("if-none-match")):
+        conditions = _etags(request.headers.get("if-none-match"))
+        if etag in conditions or "*" in conditions:
             return Response(status_code=304, headers=headers)
         return Response(body, media_type="application/json", headers=headers)
 
