@@ -23,6 +23,8 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any
 
+from pyfly.feature_flags.properties import FeatureFlagsProperties
+
 if TYPE_CHECKING:
     from pyfly.context.application_context import ApplicationContext
 
@@ -101,7 +103,10 @@ class ConfigPropsEndpoint:
             if not prefix:
                 continue
             try:
-                bound: Any = config.bind(cls)
+                if cls is FeatureFlagsProperties:
+                    bound: Any = FeatureFlagsProperties.from_config(config)
+                else:
+                    bound = config.bind(cls)
             except Exception:  # noqa: BLE001 - skip classes that fail to bind
                 continue
             properties = _mask_tree(config, prefix, _kebab_keys(_to_plain(bound)))

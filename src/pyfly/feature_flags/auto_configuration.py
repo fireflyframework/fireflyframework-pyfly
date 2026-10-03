@@ -34,6 +34,8 @@ from :meth:`FlagRegistry.start <pyfly.feature_flags.registry.FlagRegistry.start>
 
 from __future__ import annotations
 
+import logging
+
 from openfeature.client import OpenFeatureClient
 from openfeature.hook import Hook
 from openfeature.provider import AbstractProvider
@@ -58,7 +60,9 @@ from pyfly.feature_flags.context import (
     SecurityContextContributor,
     TenantContextContributor,
 )
+from pyfly.feature_flags.health import FeatureFlagsHealthIndicator
 from pyfly.feature_flags.hooks import ExposureEventHook, MetricsHook
+from pyfly.feature_flags.management import FlagManagement
 from pyfly.feature_flags.properties import FeatureFlagsProperties
 from pyfly.feature_flags.provider import FireflyFlagProvider
 from pyfly.feature_flags.registry import FlagRegistry
@@ -75,6 +79,12 @@ from pyfly.feature_flags.templates import FeatureFlagsTemplateContext
 from pyfly.observability.metrics import MetricsRegistry
 
 __all__ = ["FeatureFlagsAutoConfiguration"]
+
+_logger = logging.getLogger(__name__)
+
+
+def _truthy(value: object) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
 
 
 def _metrics_registry(container: Container) -> MetricsRegistry | None:
@@ -262,3 +272,30 @@ class FeatureFlagsAutoConfiguration:
     def feature_flags_template_context(self, facade: FeatureFlags) -> FeatureFlagsTemplateContext:
         """Add flag functions to every view rendered through the web layer."""
         return FeatureFlagsTemplateContext(facade)
+
+    @bean
+    def flag_management(
+        self,
+        properties: FeatureFlagsProperties,
+        config: Config,
+        facade: FeatureFlags,
+        registry: FlagRegistry | None = None,
+        store: FlagStore | None = None,
+        writer: FlagStoreWriter | None = None,
+    ) -> FlagManagement:
+        writes = properties.management.writes
+        if writes and not _truthy(config.get("pyfly.management.security.enabled", False)):
+            _logger.warning(
+                "feature_flags_writes_without_management_security",
+                extra={
+                    "hint": "pyfly.feature-flags.management.writes is on while the management port carries none of "
+                    "the application's security filters; set pyfly.management.security.enabled=true or keep the "
+                    "actuator and admin unexposed"
+                },
+            )
+        return FlagManagement(facade, registry=registry, store=store, writer=writer, writes_enabled=writes)
+
+    @bean(name="featureFlags")
+    @conditional_on_property("pyfly.observability.health.enabled", having_value="true", match_if_missing=True)
+    def feature_flags_health_indicator(self, management: FlagManagement) -> FeatureFlagsHealthIndicator:
+        return FeatureFlagsHealthIndicator(management)

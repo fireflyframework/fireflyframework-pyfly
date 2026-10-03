@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         parse_document,
         validate_flag,
     )
+    from pyfly.feature_flags.endpoint import FlagsEndpoint
     from pyfly.feature_flags.events import FeatureFlagEvaluated, FeatureFlagsChanged, FeatureFlagUpdated
     from pyfly.feature_flags.gating import (
         FeatureFlagDisabledException,
@@ -50,7 +51,9 @@ if TYPE_CHECKING:
         feature_flag,
         feature_flag_disabled,
     )
+    from pyfly.feature_flags.health import FeatureFlagsHealthIndicator
     from pyfly.feature_flags.hooks import ExposureEventHook, MetricsHook
+    from pyfly.feature_flags.management import FlagManagement, FlagManagementError
     from pyfly.feature_flags.properties import FeatureFlagsProperties
     from pyfly.feature_flags.provider import FireflyFlagProvider
     from pyfly.feature_flags.registry import FeatureFlagsError, FlagRegistry, SourceStatus
@@ -130,6 +133,10 @@ _EXPORTS: dict[str, str] = {
     "SqlAlchemyFlagStore": "pyfly.feature_flags.store.sqlalchemy",
     "FlagStoreWriter": "pyfly.feature_flags.store.writer",
     "FeatureFlagsTemplateContext": "pyfly.feature_flags.templates",
+    "FeatureFlagsHealthIndicator": "pyfly.feature_flags.health",
+    "FlagManagement": "pyfly.feature_flags.management",
+    "FlagManagementError": "pyfly.feature_flags.management",
+    "FlagsEndpoint": "pyfly.feature_flags.endpoint",
 }
 
 __all__ = [
@@ -150,6 +157,7 @@ __all__ = [
     "FeatureFlagsChanged",
     "FeatureFlagsContextFilter",
     "FeatureFlagsError",
+    "FeatureFlagsHealthIndicator",
     "FeatureFlagsProperties",
     "FeatureFlagsTemplateContext",
     "FileFlagSource",
@@ -158,6 +166,8 @@ __all__ = [
     "FlagConflictError",
     "FlagDefinitionError",
     "FlagDocument",
+    "FlagManagement",
+    "FlagManagementError",
     "FlagNotStoredError",
     "FlagRegistry",
     "FlagSource",
@@ -166,6 +176,7 @@ __all__ = [
     "FlagStoreError",
     "FlagStoreWriter",
     "FlagSyncServer",
+    "FlagsEndpoint",
     "HttpFlagSource",
     "Layer",
     "MemoryFlagStore",
