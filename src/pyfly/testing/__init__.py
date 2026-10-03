@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pyfly.testing.assertions import assert_event_published, assert_no_events_published
     from pyfly.testing.client import PyFlyTestClient, TestResponse
     from pyfly.testing.containers import create_test_container
+    from pyfly.testing.feature_flags import FlagOverrides, override_flags
     from pyfly.testing.fixtures import PyFlyTestCase
     from pyfly.testing.mock import mock_bean
     from pyfly.testing.rollback import RollbackTransaction
@@ -56,6 +57,8 @@ _EXPORTS: dict[str, str] = {
     "PyFlyTestClient": "pyfly.testing.client",
     "TestResponse": "pyfly.testing.client",
     "create_test_container": "pyfly.testing.containers",
+    "FlagOverrides": "pyfly.testing.feature_flags",
+    "override_flags": "pyfly.testing.feature_flags",
     "PyFlyTestCase": "pyfly.testing.fixtures",
     "mock_bean": "pyfly.testing.mock",
     "RollbackTransaction": "pyfly.testing.rollback",
@@ -86,6 +89,7 @@ _EXPORTS: dict[str, str] = {
 
 __all__ = [
     "DataTest",
+    "FlagOverrides",
     "MongoDbReplicaSetContainer",
     "PyFlyTestCase",
     "PyFlyTestClient",
@@ -107,6 +111,7 @@ __all__ = [
     "mongodb_container",
     "mongodb_replica_set_container",
     "mysql_container",
+    "override_flags",
     "postgres_container",
     "pyfly_config",
     "pyfly_config_for",
