@@ -62,9 +62,15 @@ from pyfly.feature_flags.hooks import ExposureEventHook, MetricsHook
 from pyfly.feature_flags.properties import FeatureFlagsProperties
 from pyfly.feature_flags.provider import FireflyFlagProvider
 from pyfly.feature_flags.registry import FlagRegistry
+from pyfly.feature_flags.server import FlagSyncServer
 from pyfly.feature_flags.sources import FlagSource
 from pyfly.feature_flags.sources.config import ConfigFlagSource
 from pyfly.feature_flags.sources.file import FileFlagSource
+from pyfly.feature_flags.sources.http import HttpFlagSource
+from pyfly.feature_flags.sources.store import STORE_SOURCE, StoreFlagSource
+from pyfly.feature_flags.store.memory import MemoryFlagStore
+from pyfly.feature_flags.store.ports import FlagStore
+from pyfly.feature_flags.store.writer import FlagStoreWriter
 from pyfly.observability.metrics import MetricsRegistry
 
 __all__ = ["FeatureFlagsAutoConfiguration"]
@@ -97,14 +103,53 @@ class FeatureFlagsAutoConfiguration:
         return FireflyFlagProvider()
 
     @staticmethod
-    def sources(properties: FeatureFlagsProperties, config: Config) -> list[FlagSource]:
-        """The enabled sources, lowest precedence first."""
+    def sources(properties: FeatureFlagsProperties, config: Config, store: FlagStore | None = None) -> list[FlagSource]:
+        """The enabled sources, lowest precedence first: config, file, http, store."""
         sources: list[FlagSource] = [ConfigFlagSource.from_config(config)]
         file = properties.sources.file
         if file.enabled:
             interval = properties.seconds(file.refresh_interval, "sources.file.refresh-interval")
             sources.append(FileFlagSource(file.path, refresh_interval=interval))
+        http = properties.sources.http
+        if http.enabled:
+            sources.append(
+                HttpFlagSource(
+                    http.url,
+                    token=http.token,
+                    refresh_interval=properties.seconds(http.refresh_interval, "sources.http.refresh-interval"),
+                    timeout=properties.seconds(http.timeout, "sources.http.timeout"),
+                )
+            )
+        if properties.sources.store.enabled and store is not None:
+            interval = properties.seconds(properties.sources.store.refresh_interval, "sources.store.refresh-interval")
+            sources.append(StoreFlagSource(store, refresh_interval=interval))
         return sources
+
+    @bean
+    @conditional_on_missing_bean(FlagStore)
+    def flag_store(
+        self,
+        properties: FeatureFlagsProperties,
+        config: Config,
+        container: Container,
+        provider: FireflyFlagProvider | None = None,
+    ) -> FlagStore | None:
+        """Create the configured writable layer only for Firefly's provider."""
+        store = properties.sources.store
+        if not store.enabled or provider is None:
+            return None
+        if store.driver == "memory":
+            return MemoryFlagStore()
+        from pyfly.data.relational.framework_schema import (
+            context_datasource_registry,
+            creates_tables,
+            module_datasource,
+        )
+        from pyfly.feature_flags.store.sqlalchemy import SqlAlchemyFlagStore
+
+        registry = context_datasource_registry(config, container)
+        datasource = module_datasource(registry, config, "pyfly.feature-flags.sources.store", name="feature-flags")
+        return SqlAlchemyFlagStore(datasource, create_tables=creates_tables(registry.properties.ddl_auto))
 
     @bean
     def flag_registry(
@@ -113,10 +158,31 @@ class FeatureFlagsAutoConfiguration:
         config: Config,
         publisher: ApplicationEventPublisher,
         provider: FireflyFlagProvider | None = None,
+        store: FlagStore | None = None,
     ) -> FlagRegistry | None:
         if provider is None:  # the application declared its own OpenFeature provider
             return None
-        return FlagRegistry(self.sources(properties, config), provider, publisher=publisher, hold_events=True)
+        return FlagRegistry(self.sources(properties, config, store), provider, publisher=publisher, hold_events=True)
+
+    @bean
+    def flag_store_writer(
+        self,
+        publisher: ApplicationEventPublisher,
+        registry: FlagRegistry | None = None,
+        store: FlagStore | None = None,
+    ) -> FlagStoreWriter | None:
+        if registry is None or store is None or not registry.has_source(STORE_SOURCE):
+            return None
+        return FlagStoreWriter(store, registry, publisher=publisher)
+
+    @bean
+    def flag_sync_server(
+        self, properties: FeatureFlagsProperties, registry: FlagRegistry | None = None
+    ) -> FlagSyncServer | None:
+        server = properties.server
+        if not server.enabled or registry is None:
+            return None
+        return FlagSyncServer(registry, path=server.path, token=server.token, allow_anonymous=server.allow_anonymous)
 
     @bean
     def evaluation_context_resolver(

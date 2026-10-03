@@ -67,7 +67,7 @@ from pyfly.feature_flags._references import referenced_evaluator
 from pyfly.feature_flags.composition import ComposedFlag, Composition, Layer, compose
 from pyfly.feature_flags.definitions import FlagDocument, expired_keys, parse_document, utc_today
 from pyfly.feature_flags.events import FeatureFlagsChanged
-from pyfly.feature_flags.sources import FlagSource, FlagSourceError, SourceSnapshot
+from pyfly.feature_flags.sources import FlagSource, FlagSourceError, SourceLoadDeferred, SourceSnapshot
 
 if TYPE_CHECKING:
     from pyfly.context.events import ApplicationEventPublisher
@@ -274,6 +274,8 @@ class FlagRegistry:
             ticket = self._ticket(state)
             try:
                 snapshot = await state.source.load()
+            except SourceLoadDeferred:
+                continue
             except Exception as error:
                 if state.source.fail_fast:
                     raise FlagSourceError(state.source.name, error) from error
@@ -350,6 +352,8 @@ class FlagRegistry:
         ticket = self._ticket(state)
         try:
             snapshot = await state.source.load()
+        except SourceLoadDeferred:
+            return []
         except Exception as error:  # noqa: BLE001 — the last good document stays; status says why
             self._failed(state, ticket, error)
             return []
@@ -377,6 +381,10 @@ class FlagRegistry:
                     state.document, state.revision, state.last_refresh = last_good
                     state.error = state.refusal = str(refused)
                     self._layers_accepted = True
+                    if snapshot is not None:
+                        reject_snapshot = getattr(state.source, "reject_snapshot", None)
+                        if reject_snapshot is not None:
+                            reject_snapshot(snapshot)
                 return []
         finally:
             if state.applied == ticket:  # a load that finished after a newer one changed nothing

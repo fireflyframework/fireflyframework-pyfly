@@ -78,6 +78,8 @@ def test_kebab_case_keys_and_string_values_bind() -> None:
         ({"sources": {"store": {"enabled": True, "refresh-interval": "0s"}}}, "must be greater than 0"),
         ({"server": {"enabled": True}}, "server.token"),
         ({"server": {"enabled": True, "token": "t", "path": "flags.json"}}, "server.path must start with /"),
+        ({"server": {"enabled": True, "token": "t", "path": "/"}}, "server.path must not be the root"),
+        ({"server": {"enabled": True, "token": "t", "path": "/foo/../"}}, "server.path must not be the root"),
     ],
 )
 def test_invalid_settings_fail_with_the_key(section: dict[str, Any], message: str) -> None:

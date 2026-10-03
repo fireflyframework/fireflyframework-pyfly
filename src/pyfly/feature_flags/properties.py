@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pyfly.core.config import Config, config_properties
+from pyfly.feature_flags.server import _root_path
 
 __all__ = [
     "PREFIX",
@@ -203,3 +204,5 @@ class FeatureFlagsProperties:
                 )
             if not str(self.server.path).startswith("/"):
                 raise ValueError(f"{PREFIX}.server.path must start with /, got {self.server.path!r}")
+            if _root_path(self.server.path):
+                raise ValueError(f"{PREFIX}.server.path must not be the root, got {self.server.path!r}")

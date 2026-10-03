@@ -20,7 +20,7 @@ from typing import Protocol, runtime_checkable
 
 from pyfly.feature_flags.definitions import FlagDocument
 
-__all__ = ["FlagSource", "FlagSourceError", "SourceSnapshot"]
+__all__ = ["FlagSource", "FlagSourceError", "SourceLoadDeferred", "SourceSnapshot"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,10 @@ class SourceSnapshot:
 
     document: FlagDocument
     revision: str | None = None
+
+
+class SourceLoadDeferred(Exception):
+    """No load was attempted; preserve the source's prior document and health until a later refresh."""
 
 
 class FlagSourceError(RuntimeError):
@@ -44,7 +48,8 @@ class FlagSource(Protocol):
     """One layer of the composition.
 
     ``load()`` returns the source's current document, or ``None`` when nothing changed since its last successful
-    load; it raises on any failure (the registry keeps the last good document). ``refresh_interval`` is the
+    load. ``SourceLoadDeferred`` skips a load without changing document or health; other exceptions report
+    failure (the registry keeps the last good document). ``refresh_interval`` is the
     seconds between polls (``None``: loaded once, at startup).
     """
 
