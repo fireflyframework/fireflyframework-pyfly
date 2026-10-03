@@ -51,6 +51,7 @@ def build_admin_routes(
     from pyfly.admin.providers.config_provider import ConfigProvider
     from pyfly.admin.providers.cqrs_provider import CqrsProvider
     from pyfly.admin.providers.env_provider import EnvProvider
+    from pyfly.admin.providers.flags_provider import FlagsProvider
     from pyfly.admin.providers.health_provider import HealthProvider
     from pyfly.admin.providers.logfile_provider import LogfileProvider
     from pyfly.admin.providers.loggers_provider import LoggersProvider
@@ -135,6 +136,7 @@ def build_admin_routes(
         server=ServerProvider(context=context),
         observability=ObservabilityProvider(context=context),
         instance_registry=admin_instance_registry,
+        flags=FlagsProvider(context),
     )
     from pyfly.admin.data.wiring import build_data_routes
 
