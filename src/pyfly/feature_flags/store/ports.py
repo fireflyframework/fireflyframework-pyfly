@@ -106,7 +106,13 @@ class CommitAwareFlagStore(Protocol):
     """Optional seam for stores whose writes can join a caller-owned transaction.
 
     Invoke the callback only once the write is committed; discard it on rollback. Stores without this seam
-    must commit before their write returns.
+    must commit before their write returns. Sources defer reads while this store's transaction is active,
+    so the process-wide provider never receives uncommitted rows.
     """
+
+    @property
+    def transaction_active(self) -> bool:
+        """Whether reads in the current context would join this store's uncommitted transaction."""
+        ...
 
     async def after_commit(self, callback: Callable[[], Awaitable[None]]) -> None: ...

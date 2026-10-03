@@ -264,6 +264,10 @@ class SqlAlchemyFlagStore:
             change_id = int(inserted.inserted_primary_key[0])
         return FlagChange(change_id, key, "delete", None, _load(current.definition), actor, now)
 
+    @property
+    def transaction_active(self) -> bool:
+        return is_transaction_active(resolve_manager(self._target).datasource)
+
     async def after_commit(self, callback: Callable[[], Awaitable[None]]) -> None:
         """Run after this store's transaction commits, pruning writes undone by a caller savepoint."""
         datasource = resolve_manager(self._target).datasource

@@ -347,3 +347,114 @@ async def test_rolled_back_savepoint_callback_is_pruned_when_the_same_write_comm
     assert seen == [FeatureFlagUpdated("a", "put", None, None, bool_flag())]
     await registry.stop()
     await engine.dispose()
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+@pytest.mark.parametrize("action", ["put", "delete"])
+async def test_forced_source_refresh_defers_until_the_store_transaction_completes(
+    relational_backend: RelationalBackend, rollback: bool, action: str
+) -> None:
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyFlagStore(engine)
+    await store.start()
+    await store.put("a", bool_flag("off"), actor=None)
+    source = StoreFlagSource(store, refresh_interval=0)
+    publisher, seen = recording_publisher()
+    registry = FlagRegistry([source], FireflyFlagProvider(), publisher=publisher)
+    await registry.start()
+    seen.clear()
+    writer = FlagStoreWriter(store, registry, publisher=publisher)
+
+    class Abort(Exception):
+        pass
+
+    try:
+        async with infrastructure_unit(engine):
+            if action == "put":
+                await writer.put("a", bool_flag("on"), actor="ops")
+            else:
+                await writer.delete("a", actor="ops")
+            assert await source.load() is None
+            assert await registry.refresh(STORE_SOURCE) == []
+            assert registry.sources()[0].revision == "1"
+            assert registry.provider.definition("a") == bool_flag("off")
+            assert seen == []
+            if rollback:
+                raise Abort
+    except Abort:
+        pass
+    if rollback:
+        assert await source.load() is None
+        assert await registry.refresh(STORE_SOURCE) == []
+        assert registry.sources()[0].revision == "1"
+        assert registry.provider.definition("a") == bool_flag("off")
+        assert seen == []
+    else:
+        expected = bool_flag("on") if action == "put" else None
+        assert registry.provider.definition("a") == expected
+        assert registry.sources()[0].revision == str(await store.revision())
+        assert seen == [
+            FeatureFlagsChanged(("a",), STORE_SOURCE),
+            FeatureFlagUpdated("a", action, "ops", bool_flag("off"), expected),
+        ]
+    await registry.stop()
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+async def test_an_initial_source_load_in_a_transaction_stays_down_until_committed_data_can_be_loaded(
+    relational_backend: RelationalBackend, rollback: bool
+) -> None:
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyFlagStore(engine)
+    await store.start()
+    source = StoreFlagSource(store, refresh_interval=0)
+    publisher, seen = recording_publisher()
+    registry = FlagRegistry([source], FireflyFlagProvider(), publisher=publisher)
+
+    class Abort(Exception):
+        pass
+
+    try:
+        async with infrastructure_unit(engine):
+            await store.put("a", bool_flag(), actor=None)
+            assert await source.load() is None
+            await registry.start()
+            assert registry.sources()[0].status == "DOWN"
+            assert registry.sources()[0].revision is None
+            assert registry.provider.definition("a") is None
+            assert seen == []
+            if rollback:
+                raise Abort
+    except Abort:
+        pass
+    assert await registry.refresh(STORE_SOURCE) == ([] if rollback else ["a"])
+    assert registry.sources()[0].status == "UP"
+    assert registry.sources()[0].revision == str(await store.revision())
+    assert registry.provider.definition("a") == (None if rollback else bool_flag())
+    assert seen == ([] if rollback else [FeatureFlagsChanged(("a",), STORE_SOURCE)])
+    await registry.stop()
+
+
+@pytest.mark.parametrize("memory", [False, True])
+async def test_forced_refresh_during_an_unrelated_transaction_reads_committed_store_data(
+    tmp_path: Path, memory: bool
+) -> None:
+    other_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'other.db'}")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'flags.db'}")
+    store = MemoryFlagStore() if memory else SqlAlchemyFlagStore(engine)
+    await store.start()
+    publisher, seen = recording_publisher()
+    source = StoreFlagSource(store, refresh_interval=0)
+    registry = FlagRegistry([source], FireflyFlagProvider(), publisher=publisher)
+    await registry.start()
+    async with infrastructure_unit(
+        SqlAlchemyTransactionManager(sessionmaker=async_sessionmaker(other_engine), name="other")
+    ):
+        await store.put("a", bool_flag(), actor=None)
+        assert await registry.refresh(STORE_SOURCE) == ["a"]
+        assert registry.provider.definition("a") == bool_flag()
+        assert registry.sources()[0].revision == "1"
+        assert seen == [FeatureFlagsChanged(("a",), STORE_SOURCE)]
+    await registry.stop()
+    await engine.dispose()
+    await other_engine.dispose()

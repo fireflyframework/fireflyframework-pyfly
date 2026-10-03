@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from pyfly.feature_flags.definitions import parse_document
 from pyfly.feature_flags.sources import SourceSnapshot
+from pyfly.feature_flags.store.ports import CommitAwareFlagStore
 
 if TYPE_CHECKING:
     from pyfly.feature_flags.store.ports import FlagStore
@@ -32,7 +33,8 @@ class StoreFlagSource:
     """Polls the store's revision every ``refresh_interval`` and reloads every row only when it moved.
 
     The rows are validated as one document (another process, or LaraFly, may have written them); a broken row
-    rejects them all and the revision is not remembered, so the next poll validates again.
+    rejects them all and the revision is not remembered, so the next poll validates again. Loads inside this
+    store's transaction are deferred; the last committed document stays until a post-commit refresh or poll.
     """
 
     name = STORE_SOURCE
@@ -48,6 +50,8 @@ class StoreFlagSource:
         return self._store
 
     async def load(self) -> SourceSnapshot | None:
+        if isinstance(self._store, CommitAwareFlagStore) and self._store.transaction_active:
+            return None
         revision = await self._store.revision()
         if revision == self._revision:
             return None
