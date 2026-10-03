@@ -19,6 +19,7 @@ import inspect
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from functools import partialmethod
 from typing import Any
 
 import httpx
@@ -49,6 +50,7 @@ FLAGS: dict[str, Any] = {
     "on": True,
     "off": False,
     "paused": {**bool_flag("on"), "state": "DISABLED"},
+    "no-default": {"state": "ENABLED", "variants": {"on": True, "off": False}},
     "checkout": {"state": "ENABLED", "variants": {"control": "v1", "treatment": "v2"}, "defaultVariant": "treatment"},
 }
 
@@ -124,6 +126,25 @@ async def test_variant_gates_and_callable_fallbacks(flags: FeatureFlags) -> None
     assert control() == "fallback"
 
 
+async def test_variant_gates_use_caller_default_when_no_variant_is_resolved(flags: FeatureFlags) -> None:
+    @feature_flag("paused", variant="on", default=True)
+    def paused_sync() -> str:
+        return "open"
+
+    @feature_flag("no-default", variant="on", default=True)
+    async def no_default_async() -> str:
+        return "open"
+
+    @feature_flag("paused", variant="on")
+    async def paused_closed() -> str:
+        return "closed"
+
+    assert paused_sync() == "open"
+    assert await no_default_async() == "open"
+    with pytest.raises(FeatureFlagDisabledException):
+        await paused_closed()
+
+
 def test_without_a_running_application_every_gate_is_closed_or_default() -> None:
     with pytest.raises(FeatureFlagDisabledException):
         sync_on(1)
@@ -180,6 +201,101 @@ async def test_the_class_form_gates_every_public_method(flags: FeatureFlags) -> 
     with pytest.raises(FeatureFlagDisabledException):
         Beta.tool()
     assert beta._private() == "private"
+
+
+async def test_class_gate_covers_inherited_methods_without_changing_the_parent(flags: FeatureFlags) -> None:
+    class Parent:
+        def inherited(self) -> str:
+            return "parent"
+
+        async def inherited_async(self) -> str:
+            return "parent-async"
+
+        @staticmethod
+        def static() -> str:
+            return "static"
+
+        @classmethod
+        def class_method(cls) -> str:
+            return cls.__name__
+
+        def with_arg(self, value: str) -> str:
+            return value
+
+        partial = partialmethod(with_arg, "partial")
+
+        async def with_arg_async(self, value: str) -> str:
+            return value
+
+        partial_async = partialmethod(with_arg_async, "partial-async")
+
+    @feature_flag("off")
+    class Child(Parent):
+        def inherited(self) -> str:
+            return "child"
+
+    @feature_flag("on")
+    class OpenChild(Parent):
+        def inherited(self) -> str:
+            return "child"
+
+    child = Child()
+    for call in (child.inherited, child.static, Child.class_method):
+        with pytest.raises(FeatureFlagDisabledException):
+            call()
+    with pytest.raises(FeatureFlagDisabledException):
+        await child.inherited_async()
+    with pytest.raises(FeatureFlagDisabledException):
+        child.partial()
+    with pytest.raises(FeatureFlagDisabledException):
+        await child.partial_async()
+    assert Parent().inherited() == "parent"
+    assert await Parent().inherited_async() == "parent-async"
+    assert Parent.static() == "static"
+    assert Parent.class_method() == "Parent"
+    assert OpenChild().inherited() == "child"
+    assert await OpenChild().inherited_async() == "parent-async"
+    assert OpenChild.static() == "static"
+    assert OpenChild.class_method() == "OpenChild"
+    assert OpenChild().partial() == "partial"
+    assert await OpenChild().partial_async() == "partial-async"
+
+
+async def test_class_named_fallback_uses_the_original_public_method(flags: FeatureFlags) -> None:
+    @feature_flag("off", fallback="legacy")
+    class CheckoutWithFallback:
+        def pay(self, amount: int) -> str:
+            return f"new:{amount}"
+
+        async def pay_async(self, amount: int) -> str:
+            return f"new:{amount}"
+
+        async def legacy(self, amount: int) -> str:
+            return f"legacy:{amount}"
+
+    checkout = CheckoutWithFallback()
+    assert await checkout.pay_async(7) == "legacy:7"
+
+    @feature_flag("off", fallback="legacy")
+    class SyncCheckout:
+        def pay(self, amount: int) -> str:
+            return f"new:{amount}"
+
+        def legacy(self, amount: int) -> str:
+            return f"legacy:{amount}"
+
+    assert SyncCheckout().pay(5) == "legacy:5"
+
+    class LegacyBase:
+        def legacy(self, amount: int) -> str:
+            return f"inherited:{amount}"
+
+    @feature_flag("off", fallback="legacy")
+    class InheritedFallback(LegacyBase):
+        def pay(self, amount: int) -> str:
+            return f"new:{amount}"
+
+    assert InheritedFallback().pay(9) == "inherited:9"
 
 
 def test_the_wrapper_keeps_the_signature_and_the_kind() -> None:

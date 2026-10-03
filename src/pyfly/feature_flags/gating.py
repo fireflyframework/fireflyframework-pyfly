@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import functools
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -104,7 +104,11 @@ class _Gate:
         if self.variant is None:
             return installed.facade.is_enabled(self.key, default=self.default)
         details = installed.facade.variant_details(self.key)
-        return self.default if details.error_code is not None else details.variant == self.variant
+        return (
+            self.default
+            if details.error_code is not None or details.variant is None
+            else details.variant == self.variant
+        )
 
     async def is_open_async(self) -> bool:
         installed = installed_feature_flags()
@@ -113,14 +117,26 @@ class _Gate:
         if self.variant is None:
             return await installed.facade.is_enabled_async(self.key, default=self.default)
         details = await installed.facade.variant_details_async(self.key)
-        return self.default if details.error_code is not None else details.variant == self.variant
+        return (
+            self.default
+            if details.error_code is not None or details.variant is None
+            else details.variant == self.variant
+        )
 
-    def closed(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    def closed(self, args: tuple[Any, ...], kwargs: dict[str, Any], originals: Mapping[str, Any] | None = None) -> Any:
         """Call the fallback (its result, possibly awaitable) or raise the disabled exception."""
         if callable(self.fallback):
             return self.fallback(*args, **kwargs)
         if isinstance(self.fallback, str):
-            target = getattr(args[0], self.fallback, None) if args else None
+            target = None
+            if args:
+                receiver = args[0]
+                if originals is not None and self.fallback in originals:
+                    owner = receiver if isinstance(receiver, type) else type(receiver)
+                    original = originals[self.fallback]
+                    target = original.__get__(receiver, owner) if hasattr(original, "__get__") else original
+                else:
+                    target = getattr(receiver, self.fallback, None)
             if not callable(target):
                 raise TypeError(f"@feature_flag({self.key!r}) fallback {self.fallback!r} is not a method of the target")
             return target(*args[1:], **kwargs)
@@ -128,14 +144,14 @@ class _Gate:
         raise feature_flag_disabled(self.key, installed.disabled_status if installed is not None else 404)
 
 
-def _wrap(function: Callable[..., Any], gate: _Gate) -> Callable[..., Any]:
+def _wrap(function: Callable[..., Any], gate: _Gate, originals: Mapping[str, Any] | None = None) -> Callable[..., Any]:
     if inspect.iscoroutinefunction(function):
 
         @functools.wraps(function)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             if await gate.is_open_async():
                 return await function(*args, **kwargs)
-            result = gate.closed(args, kwargs)
+            result = gate.closed(args, kwargs, originals)
             return await result if inspect.isawaitable(result) else result
 
         async_wrapper.__pyfly_feature_flag__ = gate.key  # type: ignore[attr-defined]
@@ -145,20 +161,50 @@ def _wrap(function: Callable[..., Any], gate: _Gate) -> Callable[..., Any]:
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if gate.is_open():
             return function(*args, **kwargs)
-        return gate.closed(args, kwargs)
+        return gate.closed(args, kwargs, originals)
 
     wrapper.__pyfly_feature_flag__ = gate.key  # type: ignore[attr-defined]
     return wrapper
 
 
+def _partial_callable(cls: type, name: str, attribute: functools.partialmethod[Any]) -> Callable[..., Any]:
+    unbound = getattr(cls, name)
+    if inspect.iscoroutinefunction(attribute.func):
+
+        @functools.wraps(unbound)
+        async def async_call(receiver: Any, *args: Any, **kwargs: Any) -> Any:
+            owner = receiver if isinstance(receiver, type) else type(receiver)
+            return await attribute.__get__(receiver, owner)(*args, **kwargs)
+
+        return async_call
+
+    @functools.wraps(unbound)
+    def call(receiver: Any, *args: Any, **kwargs: Any) -> Any:
+        owner = receiver if isinstance(receiver, type) else type(receiver)
+        return attribute.__get__(receiver, owner)(*args, **kwargs)
+
+    return call
+
+
 def _wrap_class(cls: type, gate: _Gate) -> type:
-    for name, attribute in list(vars(cls).items()):
+    originals: dict[str, Any] = {}
+    for name in dir(cls):
         if name.startswith("_"):
             continue
+        attribute = inspect.getattr_static(cls, name)
+        if (
+            isinstance(attribute, staticmethod | classmethod)
+            or inspect.isfunction(attribute)
+            or inspect.ismethoddescriptor(attribute)
+        ):
+            originals[name] = attribute
+    for name, attribute in originals.items():
         if isinstance(attribute, staticmethod | classmethod):
-            setattr(cls, name, type(attribute)(_wrap(attribute.__func__, gate)))
-        elif inspect.isfunction(attribute):
-            setattr(cls, name, _wrap(attribute, gate))
+            setattr(cls, name, type(attribute)(_wrap(attribute.__func__, gate, originals)))
+        elif isinstance(attribute, functools.partialmethod):
+            setattr(cls, name, _wrap(_partial_callable(cls, name, attribute), gate, originals))
+        else:
+            setattr(cls, name, _wrap(attribute, gate, originals))
     return cls
 
 
