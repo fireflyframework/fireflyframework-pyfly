@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -36,7 +37,7 @@ from pyfly.feature_flags.store.memory import MemoryFlagStore
 from pyfly.feature_flags.store.ports import FlagStore, StoredFlag
 from pyfly.feature_flags.store.sqlalchemy import SqlAlchemyFlagStore
 from pyfly.feature_flags.store.writer import FlagStoreWriter
-from tests.feature_flags.support import StaticSource, bool_flag, recording_publisher
+from tests.feature_flags.support import CONFORMANCE, StaticSource, bool_flag, recording_publisher
 from tests.support.backend_matrix import RelationalBackend
 
 
@@ -123,6 +124,73 @@ async def test_a_failing_listener_never_turns_a_committed_write_into_an_error(ca
         change = await writer.put("a", bool_flag(), actor=None)
     assert change.id == 1 and (await store.get("a")) is not None
     assert any(record.getMessage() == "feature_flag_event_listener_failed" for record in caplog.records)
+    await registry.stop()
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads((CONFORMANCE / "observer-vectors.json").read_text(encoding="utf-8"))["cases"],
+    ids=lambda case: case["name"],
+)
+async def test_shared_postcommit_observer_vectors(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    faults = case["faults"]
+    store = MemoryFlagStore()
+    if case["action"] == "delete":
+        await store.put("a", bool_flag("on"), actor="seed")
+    attempts: list[str] = []
+    bus = ApplicationEventBus()
+
+    async def on_changed(event: FeatureFlagsChanged) -> None:
+        attempts.append("changed")
+        if "change_listener" in faults:
+            raise RuntimeError("changed listener failed")
+
+    async def on_updated(event: FeatureFlagUpdated) -> None:
+        attempts.append("updated")
+        if "update_listener" in faults:
+            raise RuntimeError("updated listener failed")
+
+    bus.subscribe(FeatureFlagsChanged, on_changed)
+    bus.subscribe(FeatureFlagUpdated, on_updated)
+    publisher = ApplicationEventPublisher(bus)
+    registry = await _registry(store, publisher)
+    attempts.clear()
+    writer = FlagStoreWriter(store, registry, publisher=publisher)
+    if "source_error" in faults or "logger" in faults:
+
+        async def fail_all() -> dict[str, StoredFlag]:
+            raise RuntimeError("source failed")
+
+        monkeypatch.setattr(store, "all", fail_all)
+    if "refresh_refused" in faults:
+
+        def refuse(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("provider refused")
+
+        monkeypatch.setattr(registry.provider, "update", refuse)
+    if "refresh_throw" in faults:
+
+        async def fail_refresh(name: str) -> list[str]:
+            raise RuntimeError("refresh failed")
+
+        monkeypatch.setattr(registry, "refresh", fail_refresh)
+    if "logger" in faults:
+
+        def fail_warning(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("logger failed")
+
+        monkeypatch.setattr("pyfly.feature_flags.store.writer._logger.warning", fail_warning)
+    change = (
+        await writer.put("a", bool_flag("on"), actor="ops")
+        if case["action"] == "put"
+        else await writer.delete("a", actor="ops")
+    )
+    assert case["expect"]["committed"] is True
+    assert change.action == case["action"]
+    assert await store.revision() == (1 if case["action"] == "put" else 2)
+    assert attempts.count("updated") == case["expect"]["updatedAttempts"]
+    expected_default = "on" if (case["action"] == "put") == (case["expect"]["visible"] == "current") else "off"
+    assert registry.provider.definition("a") == bool_flag(expected_default)
     await registry.stop()
 
 

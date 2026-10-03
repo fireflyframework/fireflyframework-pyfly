@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import logging
 from collections.abc import Mapping
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from pyfly.feature_flags.definitions import parse_document
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
 __all__ = ["FlagStoreWriter"]
 
 _logger = logging.getLogger(__name__)
+
+
+def _warn(message: str, **kwargs: Any) -> None:
+    with suppress(Exception):  # logging must not turn a committed write into a failure
+        _logger.warning(message, **kwargs)
 
 
 class FlagStoreWriter:
@@ -80,18 +86,16 @@ class FlagStoreWriter:
                 await self._registry.refresh(STORE_SOURCE)
                 status = next(source for source in self._registry.sources() if source.name == STORE_SOURCE)
                 if status.error is not None:
-                    _logger.warning(
-                        "feature_flag_store_refresh_failed", extra={"flag": change.key, "error": status.error}
-                    )
+                    _warn("feature_flag_store_refresh_failed", extra={"flag": change.key, "error": status.error})
             except Exception:  # noqa: BLE001 — the committed write and its event still stand
-                _logger.warning("feature_flag_store_refresh_failed", extra={"flag": change.key}, exc_info=True)
+                _warn("feature_flag_store_refresh_failed", extra={"flag": change.key}, exc_info=True)
         if self._publisher is None:
             return
         event = FeatureFlagUpdated(change.key, change.action, change.actor, change.previous, change.definition)
         try:
             await self._publisher.publish(event)
         except Exception:  # noqa: BLE001 — the write is committed; a listener never undoes it
-            _logger.warning(
+            _warn(
                 "feature_flag_event_listener_failed",
                 extra={"event": "FeatureFlagUpdated", "flag": change.key},
                 exc_info=True,
