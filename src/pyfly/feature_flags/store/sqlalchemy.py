@@ -24,13 +24,14 @@ a read-only unit: a replica could serve a revision older than the rows, or the r
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Table, delete, func, insert, select, update
+from sqlalchemy import Table, delete, event, func, insert, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, SessionTransaction
 
 from pyfly.data.relational.framework_schema import (
     FEATURE_FLAG_CHANGES,
@@ -42,10 +43,14 @@ from pyfly.data.relational.framework_schema import (
 from pyfly.data.transaction import (
     Propagation,
     TransactionTemplate,
+    after_commit,
+    current_unit_of_work,
     infrastructure_unit,
     is_transaction_active,
+    register_synchronization,
     resolve_manager,
 )
+from pyfly.data.transaction.synchronization import CompletionStatus, TransactionSynchronizationAdapter
 from pyfly.feature_flags.definitions import parse_document
 from pyfly.feature_flags.store.ports import FlagChange, FlagConflictError, FlagNotStoredError, StoredFlag
 
@@ -70,6 +75,32 @@ def _dump(definition: Mapping[str, Any]) -> str:
 
 def _load(text: str | None) -> dict[str, Any] | None:
     return json.loads(text) if text is not None else None
+
+
+class _SavepointCommitCallback(TransactionSynchronizationAdapter):
+    """A callback belongs to every savepoint surrounding its write, even after their release."""
+
+    def __init__(self, session: Session, callback: Callable[[], Awaitable[None]]) -> None:
+        self._session = session
+        self._callback = callback
+        self._rolled_back = False
+        self._ancestors: set[SessionTransaction] = set()
+        transaction = session.get_nested_transaction()
+        while transaction is not None:
+            self._ancestors.add(transaction)
+            transaction = transaction.parent
+        event.listen(session, "after_soft_rollback", self._rollback)
+
+    def _rollback(self, session: Session, transaction: SessionTransaction) -> None:
+        if transaction in self._ancestors:
+            self._rolled_back = True
+
+    async def after_commit(self) -> None:
+        if not self._rolled_back:
+            await self._callback()
+
+    async def after_completion(self, status: CompletionStatus) -> None:
+        event.remove(self._session, "after_soft_rollback", self._rollback)
 
 
 class SqlAlchemyFlagStore:
@@ -232,6 +263,16 @@ class SqlAlchemyFlagStore:
             )
             change_id = int(inserted.inserted_primary_key[0])
         return FlagChange(change_id, key, "delete", None, _load(current.definition), actor, now)
+
+    async def after_commit(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Run after this store's transaction commits, pruning writes undone by a caller savepoint."""
+        datasource = resolve_manager(self._target).datasource
+        unit = current_unit_of_work(datasource)
+        if unit is not None and unit.resource.sync_session.get_nested_transaction() is not None:
+            synchronization = _SavepointCommitCallback(unit.resource.sync_session, callback)
+            register_synchronization(synchronization, datasource=datasource)
+        else:
+            await after_commit(callback, datasource=datasource)
 
     async def history(self, key: str, limit: int = 50) -> list[FlagChange]:
         changes = self._changes

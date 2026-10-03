@@ -15,12 +15,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-__all__ = ["FlagChange", "FlagConflictError", "FlagNotStoredError", "FlagStore", "FlagStoreError", "StoredFlag"]
+__all__ = [
+    "CommitAwareFlagStore",
+    "FlagChange",
+    "FlagConflictError",
+    "FlagNotStoredError",
+    "FlagStore",
+    "FlagStoreError",
+    "StoredFlag",
+]
 
 
 @dataclass(frozen=True)
@@ -36,7 +44,7 @@ class StoredFlag:
 
 @dataclass(frozen=True)
 class FlagChange:
-    """A committed write; ``id`` is the revision it produced."""
+    """An atomic write; caller-owned transactions must still commit. ``id`` is its audit revision."""
 
     id: int
     key: str
@@ -91,3 +99,14 @@ class FlagStore(Protocol):
     async def delete(self, key: str, *, actor: str | None, expected_version: int | None = None) -> FlagChange: ...
 
     async def history(self, key: str, limit: int = 50) -> list[FlagChange]: ...
+
+
+@runtime_checkable
+class CommitAwareFlagStore(Protocol):
+    """Optional seam for stores whose writes can join a caller-owned transaction.
+
+    Invoke the callback only once the write is committed; discard it on rollback. Stores without this seam
+    must commit before their write returns.
+    """
+
+    async def after_commit(self, callback: Callable[[], Awaitable[None]]) -> None: ...
