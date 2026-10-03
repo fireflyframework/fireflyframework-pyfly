@@ -276,6 +276,12 @@ async def test_class_named_fallback_uses_the_original_public_method(flags: Featu
     checkout = CheckoutWithFallback()
     assert await checkout.pay_async(7) == "legacy:7"
 
+    class AsyncCustom(CheckoutWithFallback):
+        async def legacy(self, amount: int) -> str:
+            return f"custom-async:{amount}"
+
+    assert await AsyncCustom().pay_async(7) == "custom-async:7"
+
     @feature_flag("off", fallback="legacy")
     class SyncCheckout:
         def pay(self, amount: int) -> str:
@@ -285,6 +291,12 @@ async def test_class_named_fallback_uses_the_original_public_method(flags: Featu
             return f"legacy:{amount}"
 
     assert SyncCheckout().pay(5) == "legacy:5"
+
+    class SyncCustom(SyncCheckout):
+        def legacy(self, amount: int) -> str:
+            return f"custom:{amount}"
+
+    assert SyncCustom().pay(5) == "custom:5"
 
     class LegacyBase:
         def legacy(self, amount: int) -> str:

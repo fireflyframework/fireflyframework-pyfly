@@ -123,7 +123,9 @@ class _Gate:
             else details.variant == self.variant
         )
 
-    def closed(self, args: tuple[Any, ...], kwargs: dict[str, Any], originals: Mapping[str, Any] | None = None) -> Any:
+    def closed(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any], class_methods: Mapping[str, tuple[Any, Any]] | None = None
+    ) -> Any:
         """Call the fallback (its result, possibly awaitable) or raise the disabled exception."""
         if callable(self.fallback):
             return self.fallback(*args, **kwargs)
@@ -131,10 +133,13 @@ class _Gate:
             target = None
             if args:
                 receiver = args[0]
-                if originals is not None and self.fallback in originals:
-                    owner = receiver if isinstance(receiver, type) else type(receiver)
-                    original = originals[self.fallback]
-                    target = original.__get__(receiver, owner) if hasattr(original, "__get__") else original
+                owner = receiver if isinstance(receiver, type) else type(receiver)
+                if class_methods is not None and self.fallback in class_methods:
+                    original, wrapped = class_methods[self.fallback]
+                    if inspect.getattr_static(owner, self.fallback, None) is wrapped:
+                        target = original.__get__(receiver, owner) if hasattr(original, "__get__") else original
+                    else:
+                        target = getattr(receiver, self.fallback, None)
                 else:
                     target = getattr(receiver, self.fallback, None)
             if not callable(target):
@@ -144,14 +149,16 @@ class _Gate:
         raise feature_flag_disabled(self.key, installed.disabled_status if installed is not None else 404)
 
 
-def _wrap(function: Callable[..., Any], gate: _Gate, originals: Mapping[str, Any] | None = None) -> Callable[..., Any]:
+def _wrap(
+    function: Callable[..., Any], gate: _Gate, class_methods: Mapping[str, tuple[Any, Any]] | None = None
+) -> Callable[..., Any]:
     if inspect.iscoroutinefunction(function):
 
         @functools.wraps(function)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             if await gate.is_open_async():
                 return await function(*args, **kwargs)
-            result = gate.closed(args, kwargs, originals)
+            result = gate.closed(args, kwargs, class_methods)
             return await result if inspect.isawaitable(result) else result
 
         async_wrapper.__pyfly_feature_flag__ = gate.key  # type: ignore[attr-defined]
@@ -161,7 +168,7 @@ def _wrap(function: Callable[..., Any], gate: _Gate, originals: Mapping[str, Any
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if gate.is_open():
             return function(*args, **kwargs)
-        return gate.closed(args, kwargs, originals)
+        return gate.closed(args, kwargs, class_methods)
 
     wrapper.__pyfly_feature_flag__ = gate.key  # type: ignore[attr-defined]
     return wrapper
@@ -198,13 +205,17 @@ def _wrap_class(cls: type, gate: _Gate) -> type:
             or inspect.ismethoddescriptor(attribute)
         ):
             originals[name] = attribute
+    class_methods: dict[str, tuple[Any, Any]] = {}
     for name, attribute in originals.items():
+        wrapped: Any
         if isinstance(attribute, staticmethod | classmethod):
-            setattr(cls, name, type(attribute)(_wrap(attribute.__func__, gate, originals)))
+            wrapped = type(attribute)(_wrap(attribute.__func__, gate, class_methods))
         elif isinstance(attribute, functools.partialmethod):
-            setattr(cls, name, _wrap(_partial_callable(cls, name, attribute), gate, originals))
+            wrapped = _wrap(_partial_callable(cls, name, attribute), gate, class_methods)
         else:
-            setattr(cls, name, _wrap(attribute, gate, originals))
+            wrapped = _wrap(attribute, gate, class_methods)
+        setattr(cls, name, wrapped)
+        class_methods[name] = attribute, wrapped
     return cls
 
 
