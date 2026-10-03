@@ -130,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Manifest file under book/ (default: book.yaml).")
     ap.add_argument("--out", default=None,
                     help="Output basename (default: manifest 'output_basename' or 'pyfly-by-example').")
+    ap.add_argument("--out-dir", type=Path, default=DIST,
+                    help="Output directory (default: book/dist).")
     args = ap.parse_args(argv)
 
     cfg = yaml.safe_load((BOOK / args.config).read_text())
@@ -161,8 +163,8 @@ def main(argv: list[str] | None = None) -> int:
             epub.add_doc(Doc(id=it["id"], title=it["title"], xhtml_body=body,
                              in_nav=it.get("in_nav", True), kind=it["kind"],
                              part=it.get("part"), num=it.get("num")))
-    DIST.mkdir(exist_ok=True)
-    epub.build(DIST / f"{out_base}.epub")
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    epub.build(args.out_dir / f"{out_base}.epub")
 
     # ---- PDF (single concatenated document) ----
     parts_html: list[str] = []
@@ -183,11 +185,11 @@ def main(argv: list[str] | None = None) -> int:
     render_pdf(full, base_url=BOOK,
                css_paths=[THEME / "tokens.css", THEME / "pygments.css",
                           THEME / "book.css", THEME / "print.css"],
-               out=DIST / f"{out_base}.pdf")
+               out=args.out_dir / f"{out_base}.pdf")
     n = sum(1 for it in items if it["kind"] in ("front", "chapter"))
     print(f"[{cfg['language']}] Built {n} document(s) + TOC + "
           f"{sum(1 for it in items if it['kind']=='divider')} part divider(s) "
-          f"-> {out_base}.epub + {out_base}.pdf in {DIST}")
+          f"-> {out_base}.epub + {out_base}.pdf in {args.out_dir}")
     return 0
 
 

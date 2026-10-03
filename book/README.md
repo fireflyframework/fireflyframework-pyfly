@@ -32,15 +32,20 @@ uv pip install --python book/.venv/bin/python -r book/requirements.txt pytest
 book/.venv/bin/python book/build/verify_code.py book/manuscript
 book/.venv/bin/python book/build/verify_code.py book/manuscript-es
 book/.venv/bin/python -m pytest book/tests -q
-bash book/build/run.sh
-bash book/build/run.sh --config book.es.yaml
+bash book/build/run.sh --out-dir book/release-output
+bash book/build/run.sh --config book.es.yaml --out-dir book/release-output
+book/.venv/bin/python book/build/release_assets.py create --dir book/release-output --commit "$(git rev-parse HEAD)"
+book/.venv/bin/python book/build/release_assets.py verify --dir book/release-output --commit "$(git rev-parse HEAD)"
 ```
 
 WeasyPrint requires native Pango libraries. On macOS install the Homebrew `pango`
 package; the wrapper adds Homebrew's library directory to the process environment.
-On Linux use the distribution's Pango packages. The builder regenerates the four
-deliverables in `book/dist/`, including contents and navigation; it does not publish
-or create a release. Existing covers are reused when their sources have not changed.
+On Linux use the distribution's Pango packages. `--out-dir` directs the four
+deliverables to an isolated directory; omitting it keeps the interactive default
+of `book/dist/`. The release workflow builds both editions from the checked-out
+tag, validates their structure, and publishes them with a SHA256 manifest that
+records the source commit. Existing covers are reused when their sources have
+not changed.
 
 Listings use `::: listing path.py | Caption` and a closing `:::`. Figures use
 `::: figure art/name.svg | Caption`. Fenced code also works inside callouts. Python
