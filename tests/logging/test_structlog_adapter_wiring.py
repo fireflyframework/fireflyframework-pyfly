@@ -54,3 +54,33 @@ def test_structlog_event_redacted(capsys):
     out = cap.out + cap.err
     assert "<EMAIL>" in out
     assert "jane@acme.io" not in out
+
+
+def test_console_tracebacks_do_not_expand_local_graphs() -> None:
+    import subprocess
+    import sys
+
+    script = """
+import logging
+from pyfly.core.config import Config
+from pyfly.logging.structlog_adapter import StructlogAdapter
+StructlogAdapter().configure(Config({"pyfly": {"logging": {"redaction": {"engine": "regex"}}}}))
+value = ["private-local-value"]
+for _ in range(28):
+    value = [value, value]
+try:
+    raise RuntimeError("diagnostic test")
+except RuntimeError:
+    logging.getLogger("probe").exception("failure event")
+"""
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=5, check=False
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("console traceback expanded locals beyond five seconds", pytrace=False)
+    assert completed.returncode == 0, completed.stderr[-1000:]
+    assert "failure event" in completed.stdout
+    assert "RuntimeError: diagnostic test" in completed.stdout
+    assert "private-local-value" not in completed.stdout
+    assert len(completed.stdout) < 5000

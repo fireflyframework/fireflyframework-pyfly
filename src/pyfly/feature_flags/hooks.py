@@ -124,8 +124,14 @@ class MetricsHook(Hook):
             counter = self._current()
             if counter is not None:
                 counter.labels(flag=hook_context.flag_key, variant=_variant(details), reason=_reason(details)).inc()
-        except Exception:  # noqa: BLE001 - telemetry never changes an evaluation
-            _logger.debug("feature_flag_metric_failed", extra={"flag": hook_context.flag_key}, exc_info=True)
+        except Exception as failure:  # noqa: BLE001 - telemetry never changes an evaluation
+            _log_telemetry_failure(
+                "feature_flag_metric_failed", hook_context.flag_key, failure, "metric_recording_failed"
+            )
+
+
+class _ExposureBudgetExceeded(ValueError):
+    """The exposure value exceeds the shared occurrence budget."""
 
 
 def _check_exposure_budget(value: Any) -> None:
@@ -139,7 +145,7 @@ def _check_exposure_budget(value: Any) -> None:
             stack.pop()
             continue
         if remaining == 0:
-            raise ValueError("Exposure snapshot exceeds 10000 value occurrences")
+            raise _ExposureBudgetExceeded("Exposure snapshot exceeds 10000 value occurrences")
         remaining -= 1
         if isinstance(member, Mapping):
             stack.append(iter(member.values()))
@@ -147,9 +153,17 @@ def _check_exposure_budget(value: Any) -> None:
             stack.append(iter(member))
 
 
-def _log_exposure_failure(flag: str) -> None:
-    with suppress(Exception):  # logging is best effort too
-        _logger.debug("feature_flag_exposure_failed", extra={"flag": flag}, exc_info=True)
+def _log_telemetry_failure(event: str, flag: str, failure: Exception, reason: str) -> None:
+    # Traceback renderers inspect locals, including the rejected graph. Never hand them the exception or its text.
+    with suppress(Exception):
+        error_type = type(failure).__name__[:128]
+        _logger.debug(
+            "%s reason=%s error_type=%s",
+            event,
+            reason,
+            error_type,
+            extra={"event": event, "flag": flag[:128], "failure_reason": reason, "error_type": error_type},
+        )
 
 
 class ExposureEventHook(Hook):
@@ -184,8 +198,9 @@ class ExposureEventHook(Hook):
                 targeting_key=hook_context.evaluation_context.targeting_key,
             )
             self._dispatch(event)
-        except Exception:  # noqa: BLE001 - telemetry never changes an evaluation
-            _log_exposure_failure(hook_context.flag_key)
+        except Exception as failure:  # noqa: BLE001 - telemetry never changes an evaluation
+            reason = "snapshot_budget_exceeded" if isinstance(failure, _ExposureBudgetExceeded) else "snapshot_failed"
+            _log_telemetry_failure("feature_flag_exposure_failed", hook_context.flag_key, failure, reason)
 
     def _dispatch(self, event: FeatureFlagEvaluated) -> None:
         try:
@@ -219,8 +234,8 @@ class ExposureEventHook(Hook):
     async def _publish(self, event: FeatureFlagEvaluated) -> None:
         try:
             await self._publisher.publish(event)
-        except Exception:  # noqa: BLE001 - a listener never breaks an evaluation
-            _log_exposure_failure(event.key)
+        except Exception as failure:  # noqa: BLE001 - a listener never breaks an evaluation
+            _log_telemetry_failure("feature_flag_exposure_failed", event.key, failure, "publisher_failed")
 
     async def drain(self) -> None:
         """Await every publish scheduled so far (the binding calls it when the context stops).

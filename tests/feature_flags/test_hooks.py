@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -139,7 +141,7 @@ def _provider() -> FireflyFlagProvider:
 
 
 def _debug_records(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.name == HOOKS_LOGGER and r.getMessage() == event]
+    return [r for r in caplog.records if r.name == HOOKS_LOGGER and getattr(r, "event", r.getMessage()) == event]
 
 
 def test_the_metric_counts_flag_variant_and_reason() -> None:
@@ -174,7 +176,9 @@ def test_a_failing_recorder_never_changes_the_evaluation(caplog: pytest.LogCaptu
         details = client.get_boolean_details("a", False)
     assert details.value is True and details.error_code is None
     failures = _debug_records(caplog, "feature_flag_metric_failed")
-    assert len(failures) == 1 and failures[0].levelno == logging.DEBUG and failures[0].exc_info is not None
+    assert len(failures) == 1 and failures[0].levelno == logging.DEBUG and failures[0].exc_info is None
+    assert failures[0].error_type == "RuntimeError"
+    assert failures[0].failure_reason == "metric_recording_failed"
 
 
 def test_a_recorder_that_cannot_create_the_counter_never_changes_the_evaluation(
@@ -368,7 +372,10 @@ def test_a_publisher_that_raises_never_changes_the_evaluation_without_a_loop(cap
     assert details.value is True and details.variant == "on" and details.error_code is None
     assert publisher.attempts == 1
     failures = _debug_records(caplog, "feature_flag_exposure_failed")
-    assert len(failures) == 1 and failures[0].levelno == logging.DEBUG and failures[0].exc_info is not None
+    assert len(failures) == 1 and failures[0].levelno == logging.DEBUG and failures[0].exc_info is None
+
+    assert failures[0].error_type == "RuntimeError"
+    assert failures[0].failure_reason == "publisher_failed"
 
 
 async def test_a_publisher_that_raises_never_changes_the_evaluation_on_the_loop(
@@ -571,48 +578,6 @@ def test_shared_exposure_boundaries_preserve_evaluations_and_metrics(
     assert len(_debug_records(caplog, "feature_flag_exposure_failed")) == int(not case["expose"])
 
 
-@pytest.mark.parametrize("failed", [False, True])
-@pytest.mark.parametrize("shape", ["repeated", "cycle"])
-def test_runtime_graph_occurrences_are_bounded_before_copying(
-    failed: bool,
-    shape: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    value: Any = ["leaf"]
-    if shape == "cycle":
-        value.append(value)
-    else:
-        other: Any = ["leaf"]
-        for _ in range(28):
-            value = [value, value]
-            other = [other, other]
-        value = [value, other]
-
-    class Provider(NoOpProvider):
-        def resolve_object_details(self, flag_key: str, default_value: Any, evaluation_context: Any = None) -> Any:
-            if failed:
-                raise RuntimeError("provider down")
-            return super().resolve_object_details(flag_key, default_value, evaluation_context)
-
-    publisher, seen = recording_publisher()
-    recorder = FakeRecorder()
-    with (
-        caplog.at_level(logging.DEBUG, logger=HOOKS_LOGGER),
-        bound_client(
-            Provider(),
-            hooks=[ExposureEventHook(publisher), MetricsHook(recorder)],
-        ) as client,
-    ):
-        details = client.get_object_details("graph", value)
-    assert details.value is value
-    assert not seen
-    assert len(recorder.instrument.increments) == 1
-    assert recorder.instrument.increments[0]["reason"] == ("ERROR" if failed else "DEFAULT")
-    failures = _debug_records(caplog, "feature_flag_exposure_failed")
-    assert len(failures) == 1 and failures[0].exc_info is not None
-    assert "10000" in str(failures[0].exc_info[1])
-
-
 def test_exposure_budget_contains_a_throwing_debug_logger(monkeypatch: pytest.MonkeyPatch) -> None:
     def broken(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("logger down")
@@ -626,4 +591,107 @@ def test_exposure_budget_contains_a_throwing_debug_logger(monkeypatch: pytest.Mo
         FlagEvaluationDetails(flag_key="wide", value=value),
         {},
     )
+
+    def unavailable() -> FakeRecorder:
+        raise RuntimeError("recorder down")
+
+    MetricsHook(unavailable).finally_after(
+        HookContext("wide", FlagType.OBJECT, value, EvaluationContext()),
+        FlagEvaluationDetails(flag_key="wide", value=value),
+        {},
+    )
     assert not seen
+
+
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("sink", ["budget", "metric", "publisher"])
+@pytest.mark.parametrize("shape", ["repeated", "cycle"])
+def test_real_console_diagnostics_are_bounded(sink: str, failed: bool, shape: str) -> None:
+    script = r"""
+import logging
+import sys
+from pyfly.core.config import Config
+from pyfly.logging.structlog_adapter import StructlogAdapter
+from pyfly.feature_flags.hooks import ExposureEventHook, MetricsHook
+from openfeature.provider.no_op_provider import NoOpProvider
+from tests.feature_flags.support import bound_client, recording_publisher
+from tests.feature_flags.test_hooks import FakeRecorder
+
+sink, failed, shape = sys.argv[1], sys.argv[2] == "True", sys.argv[3]
+value = ["sensitive-payload"]
+if shape == "cycle":
+    value.append(value)
+else:
+    other = ["sensitive-payload"]
+    for _ in range(28):
+        value = [value, value]
+        other = [other, other]
+    value = [value, other]
+StructlogAdapter().configure(Config({"pyfly": {"logging": {
+    "format": "console", "level": {"root": "DEBUG"}, "redaction": {"enabled": False}
+}}}))
+records = []
+class Capture(logging.Handler):
+    def emit(self, record):
+        if record.name == "pyfly.feature_flags.hooks": records.append(record)
+logging.getLogger().addHandler(Capture())
+class Provider(NoOpProvider):
+    def resolve_object_details(self, flag_key, default_value, evaluation_context=None):
+        if failed: raise RuntimeError("provider down")
+        return super().resolve_object_details(flag_key, default_value, evaluation_context)
+class Broken(Exception):
+    def __str__(self): raise RuntimeError("exception string must not be read")
+class BrokenRecorder(FakeRecorder):
+    def counter(self, *args):
+        payload = value
+        raise Broken()
+class BrokenPublisher:
+    async def publish(self, event):
+        payload = value
+        raise Broken()
+publisher, seen = recording_publisher()
+recorder = FakeRecorder()
+if sink == "metric":
+    hooks = [MetricsHook(BrokenRecorder())]
+    default = value
+elif sink == "publisher":
+    hooks = [ExposureEventHook(BrokenPublisher()), MetricsHook(recorder)]
+    default = {"small": True}
+else:
+    hooks = [ExposureEventHook(publisher), MetricsHook(recorder)]
+    default = value
+with bound_client(Provider(), hooks=hooks) as client:
+    details = client.get_object_details("graph", default)
+assert details.value is default
+assert (details.error_code is not None) == failed
+assert str(details.reason) == ("ERROR" if failed else "DEFAULT")
+assert len(records) == 1
+record = records[0]
+assert record.levelno == logging.DEBUG and record.exc_info is None
+expected = {"budget": "snapshot_budget_exceeded", "metric": "metric_recording_failed", "publisher": "publisher_failed"}
+assert record.failure_reason == expected[sink]
+assert record.error_type == ("_ExposureBudgetExceeded" if sink == "budget" else "Broken")
+assert record.event == ("feature_flag_metric_failed" if sink == "metric" else "feature_flag_exposure_failed")
+if sink != "metric":
+    assert len(recorder.instrument.increments) == 1
+    assert recorder.instrument.increments[0]["reason"] == ("ERROR" if failed else "DEFAULT")
+assert not seen
+print("bounded-diagnostics-ok")
+"""
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script, sink, str(failed), shape],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"{sink} diagnostics exceeded five seconds", pytrace=False)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert "bounded-diagnostics-ok" in completed.stdout
+    assert {"budget": "snapshot_budget_exceeded", "metric": "metric_recording_failed", "publisher": "publisher_failed"}[
+        sink
+    ] in completed.stdout
+    assert "sensitive-payload" not in completed.stdout
+    assert len(completed.stdout) < 10000
