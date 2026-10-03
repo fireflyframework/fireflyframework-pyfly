@@ -24,7 +24,10 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from pyfly.feature_flags.slot import install_feature_flags, installed_feature_flags, uninstall_feature_flags
 
 if TYPE_CHECKING:
+    from openfeature.provider import FeatureProvider
+
     from pyfly.feature_flags.client import FeatureFlags
+    from pyfly.feature_flags.provider import FireflyFlagProvider
     from pyfly.feature_flags.registry import FlagRegistry
 
 __all__ = ["TEST_DOMAIN", "FlagOverrides", "override_flags"]
@@ -43,6 +46,8 @@ class override_flags(contextlib.ContextDecorator):  # noqa: N801 — reads as a 
         self._previous: dict[str, Any] = {}
         self._standalone: FeatureFlags | None = None
         self._replaced: tuple[FeatureFlags, int] | None = None
+        self._provider: FireflyFlagProvider | None = None
+        self._found_provider: FeatureProvider | None = None
 
     def __enter__(self) -> FeatureFlags:
         installed = installed_feature_flags()
@@ -57,7 +62,7 @@ class override_flags(contextlib.ContextDecorator):  # noqa: N801 — reads as a 
         from openfeature import api
         from openfeature.client import OpenFeatureClient
 
-        from pyfly.feature_flags.client import FeatureFlags
+        from pyfly.feature_flags.client import FeatureFlags, _bound_provider
         from pyfly.feature_flags.context import EvaluationContextResolver
         from pyfly.feature_flags.provider import FireflyFlagProvider
         from pyfly.feature_flags.registry import FlagRegistry
@@ -65,6 +70,8 @@ class override_flags(contextlib.ContextDecorator):  # noqa: N801 — reads as a 
         provider = FireflyFlagProvider()
         standalone = FlagRegistry([], provider)
         standalone.set_test_overrides(self._flags)
+        self._found_provider = _bound_provider(TEST_DOMAIN)
+        self._provider = provider
         api.set_provider_and_wait(provider, TEST_DOMAIN)
         facade = FeatureFlags(
             OpenFeatureClient(domain=TEST_DOMAIN, version=None), EvaluationContextResolver(), registry=standalone
@@ -84,14 +91,27 @@ class override_flags(contextlib.ContextDecorator):  # noqa: N801 — reads as a 
             self._registry = None
         elif self._standalone is not None:
             from openfeature import api
-            from openfeature.provider.no_op_provider import NoOpProvider
 
-            uninstall_feature_flags(self._standalone)
-            if self._replaced is not None:
-                install_feature_flags(self._replaced[0], disabled_status=self._replaced[1])
-            api.set_provider_and_wait(NoOpProvider(), TEST_DOMAIN)
+            from pyfly.feature_flags.client import _bound_provider, _supersede, _to_put_back, _unbind
+
+            installed = installed_feature_flags()
+            if installed is not None and installed.facade is self._standalone:
+                uninstall_feature_flags(self._standalone)
+                if self._replaced is not None:
+                    install_feature_flags(self._replaced[0], disabled_status=self._replaced[1])
+            provider, found = self._provider, self._found_provider
             self._standalone = None
             self._replaced = None
+            self._provider = self._found_provider = None
+            if provider is not None:
+                if _bound_provider(TEST_DOMAIN) is provider:
+                    previous = _to_put_back(found, provider)
+                    if previous is None:
+                        _unbind(TEST_DOMAIN, provider)
+                    else:
+                        api.set_provider_and_wait(previous, TEST_DOMAIN)
+                else:
+                    _supersede(provider, found)
 
     async def __aenter__(self) -> FeatureFlags:
         return self.__enter__()

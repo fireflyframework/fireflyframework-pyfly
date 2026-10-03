@@ -16,16 +16,21 @@
 from __future__ import annotations
 
 import pytest
+from openfeature import api
+from openfeature.client import OpenFeatureClient
+from openfeature.provider._registry import provider_registry
+from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 
 import pyfly.testing
 from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 from pyfly.feature_flags.client import FeatureFlags
+from pyfly.feature_flags.context import EvaluationContextResolver
 from pyfly.feature_flags.definitions import FlagDefinitionError
 from pyfly.feature_flags.gating import FeatureFlagDisabledException, feature_flag
 from pyfly.feature_flags.registry import FlagRegistry
-from pyfly.feature_flags.slot import installed_feature_flags
-from pyfly.testing.feature_flags import FlagOverrides, override_flags
+from pyfly.feature_flags.slot import install_feature_flags, installed_feature_flags
+from pyfly.testing.feature_flags import TEST_DOMAIN, FlagOverrides, override_flags
 
 
 @feature_flag("new-checkout")
@@ -70,6 +75,57 @@ def test_overrides_nest_and_unwind() -> None:
             assert inner.is_enabled("new-checkout") is True and inner.get_string("theme", "x") == "dark"
         assert outer.is_enabled("new-checkout") is True
         assert outer.get_string("theme", "x") == "x"
+
+
+def _application_provider() -> InMemoryProvider:
+    return InMemoryProvider({"existing": InMemoryFlag("on", {"on": True, "off": False})})
+
+
+def test_standalone_override_restores_a_provider_already_bound_to_its_domain() -> None:
+    previous = _application_provider()
+    api.set_provider_and_wait(previous, TEST_DOMAIN)
+    with override_flags({"new-checkout": True}):
+        assert provider_registry._providers[TEST_DOMAIN] is not previous  # noqa: SLF001 — exact binding
+    assert provider_registry._providers[TEST_DOMAIN] is previous  # noqa: SLF001 — exact binding
+    assert OpenFeatureClient(domain=TEST_DOMAIN, version=None).get_boolean_value("existing", False) is True
+
+
+def test_standalone_override_restores_an_unbound_domain_and_its_default_fallback() -> None:
+    default = _application_provider()
+    api.set_provider_and_wait(default)
+    assert TEST_DOMAIN not in provider_registry._providers  # noqa: SLF001 — exact binding
+    with override_flags({"new-checkout": True}):
+        assert TEST_DOMAIN in provider_registry._providers  # noqa: SLF001 — exact binding
+    assert TEST_DOMAIN not in provider_registry._providers  # noqa: SLF001 — exact binding
+    assert OpenFeatureClient(domain=TEST_DOMAIN, version=None).provider is default
+
+
+def test_standalone_override_does_not_replace_a_later_domain_provider() -> None:
+    replacement = _application_provider()
+    with override_flags({"new-checkout": True}):
+        api.set_provider_and_wait(replacement, TEST_DOMAIN)
+    assert provider_registry._providers[TEST_DOMAIN] is replacement  # noqa: SLF001 — exact binding
+    assert OpenFeatureClient(domain=TEST_DOMAIN, version=None).get_boolean_value("existing", False) is True
+
+
+def test_standalone_override_restores_an_external_facade_and_its_status() -> None:
+    old = FeatureFlags(OpenFeatureClient(domain="old", version=None), EvaluationContextResolver())
+    install_feature_flags(old, disabled_status=403)
+    with override_flags({"new-checkout": True}) as temporary:
+        installed = installed_feature_flags()
+        assert installed is not None and installed.facade is temporary and installed.disabled_status == 403
+    restored = installed_feature_flags()
+    assert restored is not None and restored.facade is old and restored.disabled_status == 403
+
+
+def test_standalone_override_does_not_replace_a_later_facade_or_status() -> None:
+    old = FeatureFlags(OpenFeatureClient(domain="old", version=None), EvaluationContextResolver())
+    newer = FeatureFlags(OpenFeatureClient(domain="newer", version=None), EvaluationContextResolver())
+    install_feature_flags(old, disabled_status=403)
+    with override_flags({"new-checkout": True}):
+        install_feature_flags(newer, disabled_status=503)
+    installed = installed_feature_flags()
+    assert installed is not None and installed.facade is newer and installed.disabled_status == 503
 
 
 async def test_with_a_running_application_the_overrides_are_its_highest_layer() -> None:
