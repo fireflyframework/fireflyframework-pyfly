@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import httpx
@@ -67,7 +68,7 @@ class HttpFlagSource:
             headers["Authorization"] = f"Bearer {self._token}"
         try:
             response = await self._http().get(self._url, headers=headers)
-            if response.status_code == 304:
+            if response.status_code == 304 and "If-None-Match" in headers:
                 return None
             response.raise_for_status()
             try:
@@ -75,7 +76,7 @@ class HttpFlagSource:
             except ValueError as error:
                 raise ValueError(f"{self._url} did not answer a JSON document") from error
             document = parse_document(raw)
-            etag = response.headers.get("etag")
+            etag = response.headers.get("etag") or f'"{hashlib.sha256(response.content).hexdigest()}"'
             if load >= self._completed_load:
                 self._etag = etag
             return SourceSnapshot(document, revision=etag)
