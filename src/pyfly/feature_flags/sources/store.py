@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pyfly.feature_flags.definitions import parse_document
-from pyfly.feature_flags.sources import SourceSnapshot
+from pyfly.feature_flags.sources import SourceLoadDeferred, SourceSnapshot
 from pyfly.feature_flags.store.ports import CommitAwareFlagStore
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ class StoreFlagSource:
 
     async def load(self) -> SourceSnapshot | None:
         if isinstance(self._store, CommitAwareFlagStore) and self._store.transaction_active:
-            return None
+            raise SourceLoadDeferred
         revision = await self._store.revision()
         if revision == self._revision:
             return None

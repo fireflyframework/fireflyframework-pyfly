@@ -30,6 +30,7 @@ from pyfly.feature_flags.definitions import FlagDefinitionError
 from pyfly.feature_flags.events import FeatureFlagsChanged, FeatureFlagUpdated
 from pyfly.feature_flags.provider import FireflyFlagProvider
 from pyfly.feature_flags.registry import FlagRegistry
+from pyfly.feature_flags.sources import SourceLoadDeferred
 from pyfly.feature_flags.sources.store import STORE_SOURCE, StoreFlagSource
 from pyfly.feature_flags.store.memory import MemoryFlagStore
 from pyfly.feature_flags.store.ports import FlagStore, StoredFlag
@@ -374,7 +375,8 @@ async def test_forced_source_refresh_defers_until_the_store_transaction_complete
                 await writer.put("a", bool_flag("on"), actor="ops")
             else:
                 await writer.delete("a", actor="ops")
-            assert await source.load() is None
+            with pytest.raises(SourceLoadDeferred):
+                await source.load()
             assert await registry.refresh(STORE_SOURCE) == []
             assert registry.sources()[0].revision == "1"
             assert registry.provider.definition("a") == bool_flag("off")
@@ -417,7 +419,8 @@ async def test_an_initial_source_load_in_a_transaction_stays_down_until_committe
     try:
         async with infrastructure_unit(engine):
             await store.put("a", bool_flag(), actor=None)
-            assert await source.load() is None
+            with pytest.raises(SourceLoadDeferred):
+                await source.load()
             await registry.start()
             assert registry.sources()[0].status == "DOWN"
             assert registry.sources()[0].revision is None
@@ -458,3 +461,68 @@ async def test_forced_refresh_during_an_unrelated_transaction_reads_committed_st
     await registry.stop()
     await engine.dispose()
     await other_engine.dispose()
+
+
+@pytest.mark.parametrize("state", ["initial", "healthy", "read-failure", "provider-refusal"])
+async def test_deferred_load_preserves_source_health_without_reporting_recovery_or_failure(
+    tmp_path: Path, state: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from datetime import UTC, datetime, timedelta
+    from itertools import count
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'health.db'}")
+    store = SqlAlchemyFlagStore(engine)
+    await store.start()
+    await store.put("a", bool_flag("off"), actor=None)
+    ticks = count()
+    source = StoreFlagSource(store, refresh_interval=0)
+    registry = FlagRegistry(
+        [source],
+        FireflyFlagProvider(),
+        clock=lambda: datetime(2026, 10, 3, tzinfo=UTC) + timedelta(seconds=next(ticks)),
+    )
+    revision = store.revision
+    update = registry.provider.update
+    if state != "initial":
+        await registry.start()
+    if state == "read-failure":
+
+        async def fail() -> int:
+            raise RuntimeError("store unavailable")
+
+        monkeypatch.setattr(store, "revision", fail)
+        await registry.refresh(STORE_SOURCE)
+    elif state == "provider-refusal":
+
+        def refuse(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("provider refused")
+
+        monkeypatch.setattr(registry.provider, "update", refuse)
+        await store.put("a", bool_flag("on"), actor=None)
+        await registry.refresh(STORE_SOURCE)
+    before = registry.sources()[0]
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="pyfly.feature_flags.registry"):
+        async with infrastructure_unit(engine):
+            if state == "initial":
+                await registry.start()
+            assert await registry.refresh(STORE_SOURCE) == []
+            assert registry.sources()[0] == before
+    reports = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage() in {"feature_flag_source_recovered", "feature_flag_source_failed"}
+    ]
+    assert reports == []
+    monkeypatch.setattr(store, "revision", revision)
+    monkeypatch.setattr(registry.provider, "update", update)
+    if state == "provider-refusal":
+        await store.put("a", bool_flag("on"), actor=None)
+    await registry.refresh(STORE_SOURCE)
+    recovered = registry.sources()[0]
+    assert recovered.status == "UP" and recovered.error is None
+    assert recovered.last_refresh is not None and recovered.last_refresh != before.last_refresh
+    assert recovered.revision == str(await store.revision())
+    assert registry.provider.definition("a") == bool_flag("on" if state == "provider-refusal" else "off")
+    await registry.stop()
+    await engine.dispose()

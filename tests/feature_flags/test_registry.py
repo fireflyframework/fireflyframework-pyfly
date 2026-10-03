@@ -36,7 +36,7 @@ from pyfly.feature_flags.definitions import FlagDefinitionError, FlagDocument, p
 from pyfly.feature_flags.events import FeatureFlagsChanged
 from pyfly.feature_flags.provider import FireflyFlagProvider
 from pyfly.feature_flags.registry import FEATURE_FLAGS_PHASE, TEST_OVERRIDES, FeatureFlagsError, FlagRegistry
-from pyfly.feature_flags.sources import FlagSourceError, SourceSnapshot
+from pyfly.feature_flags.sources import FlagSourceError, SourceLoadDeferred, SourceSnapshot
 from pyfly.kernel.lifecycle import DEFAULT_PHASE, lifecycle_phase
 from tests.feature_flags.support import (
     DocumentSource,
@@ -420,8 +420,11 @@ async def test_a_failing_listener_does_not_stop_the_registry(caplog: pytest.LogC
     await registry.stop()
 
 
-async def test_polling_sources_refresh_until_stopped() -> None:
-    file = ScriptedSource("file", {"a": False}, None, {"a": True}, refresh_interval=0.01)
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_polling_sources_refresh_until_stopped(deferred: bool, caplog: pytest.LogCaptureFixture) -> None:
+    file = ScriptedSource(
+        "file", {"a": False}, SourceLoadDeferred() if deferred else None, {"a": True}, refresh_interval=0.01
+    )
     registry = FlagRegistry([file], FireflyFlagProvider())
     await registry.start()
     polls = [task for task in asyncio.all_tasks() if task.get_name() == "pyfly-feature-flags-file"]
@@ -430,6 +433,7 @@ async def test_polling_sources_refresh_until_stopped() -> None:
     await registry.stop()
     assert all(task.done() and task.cancelled() for task in polls)  # the poll was cancelled, not left running
     assert not registry.started
+    assert _source_records(caplog) == []
 
 
 async def test_expired_flags_are_logged_once_at_startup(caplog: pytest.LogCaptureFixture) -> None:
