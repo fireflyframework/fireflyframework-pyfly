@@ -16,11 +16,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 
 from pyfly.feature_flags.store.memory import MemoryFlagStore
 from tests.feature_flags.store_contract import FlagStoreContract
+from tests.feature_flags.support import bool_flag
 
 
 class TestMemoryFlagStore(FlagStoreContract):
@@ -30,3 +32,23 @@ class TestMemoryFlagStore(FlagStoreContract):
         await store.start()
         yield store
         await store.stop()
+
+
+async def test_failed_delete_keeps_row_and_audit_history() -> None:
+    calls = 0
+
+    def clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("clock unavailable")
+        return datetime(2026, 10, 3, tzinfo=UTC)
+
+    store = MemoryFlagStore(clock=clock)
+    first = await store.put("a", bool_flag(), actor="ana")
+    with pytest.raises(RuntimeError, match="clock unavailable"):
+        await store.delete("a", actor="ops")
+    stored = await store.get("a")
+    assert stored is not None and stored.version == 1 and stored.definition == bool_flag()
+    assert await store.revision() == first.id
+    assert await store.history("a") == [first]

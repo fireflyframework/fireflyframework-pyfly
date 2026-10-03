@@ -55,7 +55,7 @@ class MemoryFlagStore:
     async def revision(self) -> int:
         return self._changes[-1].id if self._changes else 0
 
-    def _record(
+    def _prepare_change(
         self,
         key: str,
         action: str,
@@ -63,10 +63,9 @@ class MemoryFlagStore:
         previous: dict[str, Any] | None,
         actor: str | None,
         now: datetime,
-    ) -> FlagChange:
+    ) -> tuple[FlagChange, FlagChange]:
         change = FlagChange(len(self._changes) + 1, key, action, definition, previous, actor, now)
-        self._changes.append(change)
-        return copy.deepcopy(change)
+        return change, copy.deepcopy(change)
 
     async def put(
         self, key: str, definition: Mapping[str, Any], *, actor: str | None, expected_version: int | None = None
@@ -77,9 +76,11 @@ class MemoryFlagStore:
             raise FlagConflictError(key, expected_version, actual)
         canonical = parse_document({"flags": {key: definition}}).flags[key]
         now = self._clock()
-        self._rows[key] = StoredFlag(key, canonical, actual + 1, now, actor)
         previous = copy.deepcopy(current.definition) if current is not None else None
-        return self._record(key, "put", copy.deepcopy(canonical), previous, actor, now)
+        change, result = self._prepare_change(key, "put", copy.deepcopy(canonical), previous, actor, now)
+        self._rows[key] = StoredFlag(key, canonical, actual + 1, now, actor)
+        self._changes.append(change)
+        return result
 
     async def delete(self, key: str, *, actor: str | None, expected_version: int | None = None) -> FlagChange:
         current = self._rows.get(key)
@@ -87,8 +88,11 @@ class MemoryFlagStore:
             raise FlagNotStoredError(key)
         if expected_version is not None and expected_version != current.version:
             raise FlagConflictError(key, expected_version, current.version)
+        now = self._clock()
+        change, result = self._prepare_change(key, "delete", None, copy.deepcopy(current.definition), actor, now)
         del self._rows[key]
-        return self._record(key, "delete", None, copy.deepcopy(current.definition), actor, self._clock())
+        self._changes.append(change)
+        return result
 
     async def history(self, key: str, limit: int = 50) -> list[FlagChange]:
         return [copy.deepcopy(change) for change in reversed(self._changes) if change.key == key][:limit]
