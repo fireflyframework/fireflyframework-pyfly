@@ -65,6 +65,7 @@ from pyfly.feature_flags.registry import FlagRegistry
 from pyfly.feature_flags.sources import FlagSource
 from pyfly.feature_flags.sources.config import ConfigFlagSource
 from pyfly.feature_flags.sources.file import FileFlagSource
+from pyfly.feature_flags.templates import FeatureFlagsTemplateContext
 from pyfly.observability.metrics import MetricsRegistry
 
 __all__ = ["FeatureFlagsAutoConfiguration"]
@@ -189,3 +190,9 @@ class FeatureFlagsAutoConfiguration:
             domain=properties.openfeature.domain or None,
             disabled_status=properties.web.disabled_status,
         )
+
+    @bean
+    @conditional_on_property("pyfly.web.templates.enabled", having_value="true")
+    def feature_flags_template_context(self, facade: FeatureFlags) -> FeatureFlagsTemplateContext:
+        """Add flag functions to every view rendered through the web layer."""
+        return FeatureFlagsTemplateContext(facade)
