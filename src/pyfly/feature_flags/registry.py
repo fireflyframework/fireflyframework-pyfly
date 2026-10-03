@@ -381,6 +381,10 @@ class FlagRegistry:
                     state.document, state.revision, state.last_refresh = last_good
                     state.error = state.refusal = str(refused)
                     self._layers_accepted = True
+                    if snapshot is not None:
+                        reject_snapshot = getattr(state.source, "reject_snapshot", None)
+                        if reject_snapshot is not None:
+                            reject_snapshot(snapshot)
                 return []
         finally:
             if state.applied == ticket:  # a load that finished after a newer one changed nothing

@@ -143,6 +143,42 @@ async def test_registry_keeps_last_good_document_and_reports_stale_then_recovers
     await registry.stop()
 
 
+async def test_provider_refusal_retries_the_same_http_revision_without_a_conditional_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def server(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, json={"flags": {"a": bool_flag("off")}}, headers={"ETag": '"v1"'})
+        if request.headers.get("if-none-match") == '"v2"':
+            return httpx.Response(304)
+        return httpx.Response(200, json={"flags": {"a": bool_flag("on")}}, headers={"ETag": '"v2"'})
+
+    registry = FlagRegistry([HttpFlagSource(URL, transport=httpx.MockTransport(server))], FireflyFlagProvider())
+    await registry.start()
+    update = registry.provider.update
+    refused = False
+
+    def refuse_once(*args: Any, **kwargs: Any) -> None:
+        nonlocal refused
+        if not refused:
+            refused = True
+            raise RuntimeError("provider refused")
+        update(*args, **kwargs)
+
+    monkeypatch.setattr(registry.provider, "update", refuse_once)
+    assert await registry.refresh("http") == []
+    assert registry.sources()[0].status == "STALE"
+    assert registry.provider.definition("a") == bool_flag("off")
+    assert await registry.refresh("http") == ["a"]
+    assert "if-none-match" not in requests[2].headers
+    assert registry.sources()[0].status == "UP"
+    assert registry.provider.definition("a") == bool_flag("on")
+    await registry.stop()
+
+
 def test_a_url_is_required() -> None:
     with pytest.raises(ValueError, match="sources.http.url"):
         HttpFlagSource("")

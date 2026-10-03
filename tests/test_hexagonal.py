@@ -42,7 +42,9 @@ class TestVendorIsolation:
                 "if 'adapters/starlette' not in l and 'adapters/fastapi' not in l "
                 "and 'actuator/adapters' not in l "
                 "and '/security/' not in l and '/testing/' not in l "
-                "and '/admin/' not in l and '/cli/templates/' not in l]; "
+                "and '/admin/' not in l and '/cli/templates/' not in l "
+                # The sync route is the feature-flag server's Starlette adapter.
+                "and '/feature_flags/server.py:' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],

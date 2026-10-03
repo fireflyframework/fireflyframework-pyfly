@@ -11,11 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The ``http`` layer: a flagd document polled from another service's sync endpoint (spec 4.7).
-
-The ETag advances only after a full document validates. Any failed request or rejected document raises so the
-registry can retain the last accepted document and report the source as stale.
-"""
+"""The ``http`` layer: a flagd document polled from another service's sync endpoint (spec 4.7)."""
 
 from __future__ import annotations
 
@@ -76,6 +72,11 @@ class HttpFlagSource:
         document = parse_document(raw)
         self._etag = response.headers.get("etag")
         return SourceSnapshot(document, revision=self._etag)
+
+    def reject_snapshot(self, snapshot: SourceSnapshot) -> None:
+        """Retry a parsed revision unconditionally if the provider refused it."""
+        if self._etag == snapshot.revision:
+            self._etag = None
 
     async def close(self) -> None:
         client, self._client = self._client, None
