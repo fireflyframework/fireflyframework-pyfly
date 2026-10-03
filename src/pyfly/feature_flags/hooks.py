@@ -26,7 +26,9 @@ none is garbage-collected mid-flight, and :meth:`ExposureEventHook.drain` awaits
 
 Because the event is published later, an object value (a ``dict`` or a ``list``) is copied into it: the caller owns
 the value it was served and may adapt it, and the exposure record must still say what was served (the provider gives
-every evaluation a copy of its own, which the caller and the event would otherwise share).
+every evaluation a copy of its own, which the caller and the event would otherwise share). A preflight counts at
+most 10,000 value occurrences (containers and scalars, repeated references counted again); oversized values omit
+the exposure with best-effort DEBUG logging, leaving evaluation and metrics unchanged.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ import copy
 import logging
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
 
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagValueType, Reason
@@ -125,6 +128,30 @@ class MetricsHook(Hook):
             _logger.debug("feature_flag_metric_failed", extra={"flag": hook_context.flag_key}, exc_info=True)
 
 
+def _check_exposure_budget(value: Any) -> None:
+    """Inspect at most 10,000 value occurrences before copying; repeated references count again."""
+    remaining = 10_000
+    stack = [iter((value,))]
+    while stack:
+        try:
+            member = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        if remaining == 0:
+            raise ValueError("Exposure snapshot exceeds 10000 value occurrences")
+        remaining -= 1
+        if isinstance(member, Mapping):
+            stack.append(iter(member.values()))
+        elif isinstance(member, list | tuple):
+            stack.append(iter(member))
+
+
+def _log_exposure_failure(flag: str) -> None:
+    with suppress(Exception):  # logging is best effort too
+        _logger.debug("feature_flag_exposure_failed", extra={"flag": flag}, exc_info=True)
+
+
 class ExposureEventHook(Hook):
     """Publishes one ``FeatureFlagEvaluated`` per evaluation (see the module documentation)."""
 
@@ -145,6 +172,7 @@ class ExposureEventHook(Hook):
             return
         try:
             value = details.value
+            _check_exposure_budget(value)
             if isinstance(value, Mapping | list | tuple):  # the caller owns details.value: publish what was served
                 value = copy.deepcopy(value)
             event = FeatureFlagEvaluated(
@@ -157,7 +185,7 @@ class ExposureEventHook(Hook):
             )
             self._dispatch(event)
         except Exception:  # noqa: BLE001 - telemetry never changes an evaluation
-            _logger.debug("feature_flag_exposure_failed", extra={"flag": hook_context.flag_key}, exc_info=True)
+            _log_exposure_failure(hook_context.flag_key)
 
     def _dispatch(self, event: FeatureFlagEvaluated) -> None:
         try:
@@ -192,7 +220,7 @@ class ExposureEventHook(Hook):
         try:
             await self._publisher.publish(event)
         except Exception:  # noqa: BLE001 - a listener never breaks an evaluation
-            _logger.debug("feature_flag_exposure_failed", extra={"flag": event.key}, exc_info=True)
+            _log_exposure_failure(event.key)
 
     async def drain(self) -> None:
         """Await every publish scheduled so far (the binding calls it when the context stops).

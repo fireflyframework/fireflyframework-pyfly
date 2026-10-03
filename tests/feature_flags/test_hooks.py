@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ from openfeature.client import OpenFeatureClient
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.flag_evaluation import FlagEvaluationDetails, FlagEvaluationOptions, FlagType, Reason
 from openfeature.hook import HookContext
+from openfeature.provider.no_op_provider import NoOpProvider
 from prometheus_client import REGISTRY
 
 from pyfly.context.events import ApplicationEventBus, ApplicationEventPublisher
@@ -35,7 +37,7 @@ from pyfly.feature_flags.events import FeatureFlagEvaluated
 from pyfly.feature_flags.hooks import EVALUATIONS_METRIC, ExposureEventHook, MetricsHook
 from pyfly.feature_flags.provider import FireflyFlagProvider
 from pyfly.observability.metrics import MetricsRegistry
-from tests.feature_flags.support import bool_flag, bound_client, recording_publisher, wait_until
+from tests.feature_flags.support import CONFORMANCE, bool_flag, bound_client, recording_publisher, wait_until
 
 HOOKS_LOGGER = "pyfly.feature_flags.hooks"
 
@@ -522,3 +524,106 @@ async def test_a_caller_that_adapts_its_value_never_changes_the_exposed_value() 
         await hook.drain()
     exposed = {event.key: event.value for event in seen if isinstance(event, FeatureFlagEvaluated)}
     assert exposed == {"banner": {"title": "Hi", "tags": ["a"]}, "rows": [{"id": 1}]}
+
+
+@pytest.mark.parametrize(
+    "case", json.loads((CONFORMANCE / "exposure-vectors.json").read_text())["cases"], ids=lambda case: case["name"]
+)
+@pytest.mark.parametrize("failed", [False, True])
+def test_shared_exposure_boundaries_preserve_evaluations_and_metrics(
+    case: dict[str, Any],
+    failed: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Provider(NoOpProvider):
+        def resolve_object_details(self, flag_key: str, default_value: Any, evaluation_context: Any = None) -> Any:
+            if failed:
+                raise RuntimeError("provider down")
+            return super().resolve_object_details(flag_key, default_value, evaluation_context)
+
+        def resolve_boolean_details(self, flag_key: str, default_value: bool, evaluation_context: Any = None) -> Any:
+            if failed:
+                raise RuntimeError("provider down")
+            return super().resolve_boolean_details(flag_key, default_value, evaluation_context)
+
+    publisher, seen = recording_publisher()
+    recorder = FakeRecorder()
+    value = case["value"]
+    with (
+        caplog.at_level(logging.DEBUG, logger=HOOKS_LOGGER),
+        bound_client(
+            Provider(),
+            hooks=[ExposureEventHook(publisher), MetricsHook(recorder)],
+        ) as client,
+    ):
+        details = (
+            client.get_boolean_details("boundary", value)
+            if isinstance(value, bool)
+            else client.get_object_details("boundary", value)
+        )
+    assert details.value is value
+    assert len(seen) == int(case["expose"])
+    if case["expose"]:
+        assert isinstance(seen[0], FeatureFlagEvaluated)
+        assert seen[0].value == value
+    assert len(recorder.instrument.increments) == 1
+    assert recorder.instrument.increments[0]["reason"] == ("ERROR" if failed else "DEFAULT")
+    assert len(_debug_records(caplog, "feature_flag_exposure_failed")) == int(not case["expose"])
+
+
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("shape", ["repeated", "cycle"])
+def test_runtime_graph_occurrences_are_bounded_before_copying(
+    failed: bool,
+    shape: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    value: Any = ["leaf"]
+    if shape == "cycle":
+        value.append(value)
+    else:
+        other: Any = ["leaf"]
+        for _ in range(28):
+            value = [value, value]
+            other = [other, other]
+        value = [value, other]
+
+    class Provider(NoOpProvider):
+        def resolve_object_details(self, flag_key: str, default_value: Any, evaluation_context: Any = None) -> Any:
+            if failed:
+                raise RuntimeError("provider down")
+            return super().resolve_object_details(flag_key, default_value, evaluation_context)
+
+    publisher, seen = recording_publisher()
+    recorder = FakeRecorder()
+    with (
+        caplog.at_level(logging.DEBUG, logger=HOOKS_LOGGER),
+        bound_client(
+            Provider(),
+            hooks=[ExposureEventHook(publisher), MetricsHook(recorder)],
+        ) as client,
+    ):
+        details = client.get_object_details("graph", value)
+    assert details.value is value
+    assert not seen
+    assert len(recorder.instrument.increments) == 1
+    assert recorder.instrument.increments[0]["reason"] == ("ERROR" if failed else "DEFAULT")
+    failures = _debug_records(caplog, "feature_flag_exposure_failed")
+    assert len(failures) == 1 and failures[0].exc_info is not None
+    assert "10000" in str(failures[0].exc_info[1])
+
+
+def test_exposure_budget_contains_a_throwing_debug_logger(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("logger down")
+
+    monkeypatch.setattr("pyfly.feature_flags.hooks._logger.debug", broken)
+    publisher, seen = recording_publisher()
+    hook = ExposureEventHook(publisher)
+    value = [0] * 10000
+    hook.finally_after(
+        HookContext("wide", FlagType.OBJECT, value, EvaluationContext()),
+        FlagEvaluationDetails(flag_key="wide", value=value),
+        {},
+    )
+    assert not seen
