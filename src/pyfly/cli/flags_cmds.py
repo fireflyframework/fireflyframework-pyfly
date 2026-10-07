@@ -153,7 +153,13 @@ def default_variant_cmd(key: str, variant: str, expected_version: int | None, ur
 @_url_option
 def put_cmd(key: str, path: str, expected_version: int | None, url: str | None, as_json: bool) -> None:
     """Write a whole definition to the store."""
-    text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+    if path == "-":
+        text = sys.stdin.read()
+    else:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise click.ClickException(f"Cannot read definition file {path!r}: {error}") from None
     try:
         definition = json.loads(text)
     except ValueError as error:

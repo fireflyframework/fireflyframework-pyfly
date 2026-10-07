@@ -150,6 +150,12 @@ class ActuatorClient:
                 resp = client.get(url)
                 if not allow_error_body or resp.status_code >= 500:
                     resp.raise_for_status()
+                if allow_error_body:
+                    try:
+                        return resp.json()
+                    except ValueError:
+                        err_console.print(f"[error]✗[/error] {url} answered {resp.status_code} without JSON")
+                        raise SystemExit(1) from None
                 return resp.json()
         except httpx.HTTPError as exc:
             err_console.print(f"[error]✗[/error] Request to {url} failed: {exc}")
