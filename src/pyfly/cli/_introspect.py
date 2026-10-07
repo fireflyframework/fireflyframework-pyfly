@@ -21,6 +21,7 @@ import importlib
 import io
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pyfly.cli.console import err_console
@@ -97,25 +98,81 @@ def boot_context(*, app_class: type | None = None) -> Any:
     return app.context
 
 
+def run_in_context(operation: Callable[[Any], Awaitable[Any]], *, app_class: type | None = None) -> Any:
+    """Boot the application offline, run ``await operation(context)`` on the same event loop, then shut it down.
+
+    ``boot_context`` returns once its event loop has closed; a command that then talks to the context's stores or
+    pools needs them alive on one loop for the whole command.
+    """
+    from pyfly.core.application import PyFlyApplication
+
+    cls = app_class or _discover_app_class()
+
+    async def main() -> Any:
+        captured = io.StringIO()
+        try:
+            with _quiet_startup_env(), contextlib.redirect_stdout(captured):
+                app = PyFlyApplication(cls)
+                await app.startup()
+        except Exception:
+            sys.stdout.write(captured.getvalue())
+            raise
+        try:
+            return await operation(app.context)
+        finally:
+            with contextlib.redirect_stdout(io.StringIO()):
+                await app.shutdown()
+
+    return asyncio.run(main())
+
+
 class ActuatorClient:
     """Minimal sync client for a running app's ``/actuator/*`` endpoints."""
 
-    def __init__(self, base_url: str, *, timeout: float = 10.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = 10.0, transport: Any = None) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
+        self._transport = transport  # an httpx.BaseTransport (tests)
 
-    def get(self, endpoint: str) -> Any:
+    def _httpx(self) -> Any:
         try:
             import httpx
         except ImportError:
             err_console.print("[error]✗[/error] httpx is required for --url mode. Install pyfly[client].")
             raise SystemExit(1) from None
+        return httpx
+
+    def get(self, endpoint: str, *, allow_error_body: bool = False) -> Any:
+        httpx = self._httpx()
         url = f"{self._base}/actuator/{endpoint.lstrip('/')}"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.get(url)
-                resp.raise_for_status()
+                if not allow_error_body or resp.status_code >= 500:
+                    resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPError as exc:
             err_console.print(f"[error]✗[/error] Request to {url} failed: {exc}")
+            raise SystemExit(1) from None
+
+    def post(self, endpoint: str, body: dict[str, Any]) -> Any:
+        """POST *body*; returns the JSON answer of any status below 500 (an actuator error body included), ``None``
+        for 204, and exits on a transport failure or a server error."""
+        httpx = self._httpx()
+        url = f"{self._base}/actuator/{endpoint.lstrip('/')}"
+        try:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
+                resp = client.post(url, json=body)
+        except httpx.HTTPError as exc:
+            err_console.print(f"[error]✗[/error] Request to {url} failed: {exc}")
+            raise SystemExit(1) from None
+        if resp.status_code >= 500:
+            err_console.print(f"[error]✗[/error] {url} answered {resp.status_code}: {resp.text[:200]}")
+            raise SystemExit(1)
+        if resp.status_code == 204:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            err_console.print(f"[error]✗[/error] {url} answered {resp.status_code} without JSON")
             raise SystemExit(1) from None

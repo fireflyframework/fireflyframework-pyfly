@@ -79,6 +79,7 @@ from pyfly.cli.completion import completion_cmd, upgrade_cmd  # noqa: E402
 from pyfly.cli.db import db_group  # noqa: E402
 from pyfly.cli.doctor import doctor_command  # noqa: E402
 from pyfly.cli.features import add_cmd, features_cmd, remove_cmd  # noqa: E402
+from pyfly.cli.flags_cmds import flags_group  # noqa: E402
 from pyfly.cli.generate import generate_group  # noqa: E402
 from pyfly.cli.info import info_command  # noqa: E402
 from pyfly.cli.introspect_cmds import (  # noqa: E402
@@ -115,6 +116,7 @@ cli.add_command(health_cmd, name="health")
 cli.add_command(metrics_cmd, name="metrics")
 cli.add_command(conditions_cmd, name="conditions")
 cli.add_command(actuator_cmd, name="actuator")
+cli.add_command(flags_group, name="flags")
 cli.add_command(shell_cmd, name="shell")
 cli.add_command(openapi_cmd, name="openapi")
 cli.add_command(test_cmd, name="test")

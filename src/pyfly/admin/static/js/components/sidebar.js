@@ -22,6 +22,7 @@ export const ICONS = {
     activity: 'M22 12h-4l-3 9L9 3l-3 9H2',
     fileText: 'M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8',
     server: 'M2 4h20v6H2z M2 14h20v6H2z M6 8h.01 M6 18h.01',
+    toggle: 'M16 5H8a7 7 0 000 14h8a7 7 0 000-14z M16 15a3 3 0 100-6 3 3 0 000 6z',
 };
 
 /**
@@ -36,6 +37,7 @@ export const NAV_ITEMS = [
     { id: 'env',       label: 'Environment',    icon: 'globe' },
     { id: 'config',    label: 'Configuration',  icon: 'cog' },
     { id: 'loggers',   label: 'Loggers',        icon: 'list' },
+    { id: 'flags',     label: 'Feature flags',  icon: 'toggle' },
     { id: 'metrics',   label: 'Metrics',        icon: 'chart',    section: 'Monitoring' },
     { id: 'observability', label: 'Observability', icon: 'activity' },
     { id: 'scheduled', label: 'Scheduled',      icon: 'clock' },

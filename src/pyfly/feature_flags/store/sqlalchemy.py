@@ -177,6 +177,11 @@ class SqlAlchemyFlagStore:
         for _ in range(_ATTEMPTS):
             try:
                 return await self._put_once(key, payload, actor, expected_version)
+            except FlagConflictError as conflict:
+                if expected_version == 0 and conflict.actual is None:
+                    current = await self.get(key)
+                    raise FlagConflictError(key, expected_version, current.version if current else None) from conflict
+                raise
             except (_Raced, OperationalError) as raced:
                 if isinstance(raced, OperationalError) and not _record_changed(raced):
                     raise
@@ -189,9 +194,12 @@ class SqlAlchemyFlagStore:
         flags, changes = self._flags, self._changes
         now = self._clock()
         async with self._write_session() as session:
-            current = (
-                await session.execute(select(flags.c.definition, flags.c.version).where(flags.c.flag_key == key))
-            ).first()
+            # Create-only writes arbitrate absence through the primary key without establishing a read snapshot.
+            current = None
+            if expected != 0:
+                current = (
+                    await session.execute(select(flags.c.definition, flags.c.version).where(flags.c.flag_key == key))
+                ).first()
             actual = int(current.version) if current is not None else 0
             if expected is not None and expected != actual:
                 raise FlagConflictError(key, expected, actual)

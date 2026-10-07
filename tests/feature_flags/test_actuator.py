@@ -232,3 +232,14 @@ async def test_configprops_reports_bound_settings_with_literal_flag_placeholders
     properties = beans["FeatureFlagsProperties"]["properties"]
     assert properties["management"]["writes"] is True
     assert "flags" not in properties and "evaluators" not in properties
+
+
+async def test_selector_and_body_transport_errors_keep_portable_management_codes() -> None:
+    async with _client(_config(WRITABLE)) as (client, _):
+        missing = await client.get("/actuator/flags/missing")
+        assert missing.status_code == 404
+        assert missing.json()["error"] == "unknown-flag" and missing.json()["message"]
+        for raw in (b"not json", b"[]", b"null"):
+            malformed = await client.post("/actuator/flags/kill", content=raw)
+            assert malformed.status_code == 400
+            assert malformed.json()["error"] == "bad-request" and malformed.json()["message"]

@@ -22,6 +22,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import event, text
@@ -39,7 +40,7 @@ from pyfly.data.relational.framework_schema import (
     feature_flags,
     framework_metadata,
 )
-from pyfly.data.transaction import infrastructure_unit
+from pyfly.data.transaction import UnexpectedRollbackError, infrastructure_unit
 from pyfly.feature_flags.store.ports import FlagConflictError
 from pyfly.feature_flags.store.sqlalchemy import SqlAlchemyFlagStore
 from tests.feature_flags.store_contract import FlagStoreContract
@@ -336,8 +337,18 @@ async def test_two_writers_keep_versions_and_history_consistent(
 
     async def synchronize_reads(self: AsyncSession, statement: object, *args: object, **kwargs: object) -> object:
         nonlocal readers
+        if expected_version == 0 and getattr(statement, "is_insert", False) and statement.table is store.tables[0]:
+            readers += 1
+            if readers == 2:
+                both_read.set()
+            await asyncio.wait_for(both_read.wait(), timeout=5)
         result = await original_execute(self, statement, *args, **kwargs)
-        if getattr(statement, "is_select", False) and store.tables[0] in statement.get_final_froms() and readers < 2:
+        if (
+            expected_version != 0
+            and getattr(statement, "is_select", False)
+            and store.tables[0] in statement.get_final_froms()
+            and readers < 2
+        ):
             readers += 1
             if readers == 2:
                 both_read.set()
@@ -374,3 +385,99 @@ async def test_two_writers_keep_versions_and_history_consistent(
     else:
         assert history[0].previous is None
     await store.stop()
+
+
+@pytest.mark.backends("pg", "mysql", "mariadb")
+@pytest.mark.parametrize("ownership", ["root", "outer", "outer-snapshot"])
+@pytest.mark.parametrize("expected", [0, None])
+async def test_shared_native_concurrency_vectors(
+    relational_backend: RelationalBackend, ownership: str, expected: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vectors = json.loads((Path(__file__).parent / "conformance/store-concurrency-vectors.json").read_text())
+    backend = "postgresql" if relational_backend.lane == "pg" else relational_backend.lane
+    case = next(
+        case
+        for case in vectors["cases"]
+        if case["backend"] == backend and case["transaction"] == ownership and case["expectedVersion"] == expected
+    )
+    engine = relational_backend.create_engine()
+    store = SqlAlchemyFlagStore(engine)
+    await store.start()
+    async with engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE caller_markers (actor VARCHAR(20) PRIMARY KEY)"))
+        isolation = (
+            "SHOW transaction_isolation"
+            if backend == "postgresql"
+            else "SELECT @@tx_isolation"
+            if backend == "mariadb"
+            else "SELECT @@transaction_isolation"
+        )
+        assert str((await connection.execute(text(isolation))).scalar()).upper().replace("-", " ") == case["isolation"]
+        snapshot_isolation = (
+            bool((await connection.execute(text("SELECT @@innodb_snapshot_isolation"))).scalar())
+            if backend == "mariadb"
+            else False
+        )
+        assert snapshot_isolation == case["snapshotIsolation"]
+    original = AsyncSession.execute
+    barrier = asyncio.Barrier(2)
+    arrivals = 0
+
+    async def synchronize(self: AsyncSession, statement: object, *args: object, **kwargs: object) -> object:
+        nonlocal arrivals
+        if expected == 0 and getattr(statement, "is_insert", False) and statement.table is store.tables[0]:
+            arrivals += 1
+            await asyncio.wait_for(barrier.wait(), timeout=5)
+        result = await original(self, statement, *args, **kwargs)
+        if (
+            expected is None
+            and getattr(statement, "is_select", False)
+            and store.tables[0] in statement.get_final_froms()
+            and arrivals < 2
+        ):
+            arrivals += 1
+            await asyncio.wait_for(barrier.wait(), timeout=5)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", synchronize)
+
+    async def write(actor: str) -> str:
+        try:
+            await store.put(
+                "race", bool_flag("on" if actor == "one" else "off"), actor=actor, expected_version=expected
+            )
+            return "success"
+        except FlagConflictError:
+            return "conflict"
+
+    async def writer(actor: str) -> str:
+        if ownership == "root":
+            return await write(actor)
+        async with infrastructure_unit(engine) as session:
+            await session.execute(text("INSERT INTO caller_markers VALUES (:actor)"), {"actor": actor})
+            if ownership == "outer-snapshot":
+                await session.execute(text("SELECT * FROM caller_markers"))
+            outcome = await write(actor)
+        return outcome
+
+    results = await asyncio.gather(writer("one"), writer("two"), return_exceptions=True)
+    monkeypatch.setattr(AsyncSession, "execute", original)
+    assert arrivals == 2
+    outcome = case["expect"]["outcome"]
+    if outcome == "one-parent-abort":
+        assert results.count("success") == 1
+        assert sum(isinstance(result, UnexpectedRollbackError) for result in results) == 1, results
+    elif outcome == "two-writes":
+        assert results == ["success", "success"], results
+    else:
+        assert results.count("success") == 1 and results.count("conflict") == 1, results
+    async with engine.connect() as connection:
+        markers = (await connection.execute(text("SELECT actor FROM caller_markers"))).scalars().all()
+    assert len(markers) == case["expect"]["callerMarkers"]
+    row = await store.get("race")
+    assert row is not None and row.version == case["expect"]["version"]
+    history = await store.history("race")
+    assert len(history) == case["expect"]["auditRows"] and history[0].actor == row.updated_by
+    assert history[-1].previous is None
+    if len(history) == 2:
+        assert history[0].previous == history[1].definition
