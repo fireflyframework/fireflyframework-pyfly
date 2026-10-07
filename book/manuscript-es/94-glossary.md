@@ -105,3 +105,7 @@
 **Webhook** — Una llamada de retorno HTTP entrante que un proveedor externo (Stripe, Twilio, etc.) invoca para notificar a tu servicio de un evento asíncrono, como un cambio en el estado de un pago. El decorador `@webhook_listener` de PyFly verifica la firma HMAC-SHA256, deduplica las repeticiones mediante una caché de nonces y enruta la carga útil a un manejador tipado (Capítulo 17).
 
 **Flujo de trabajo (workflow)** — Una variante de larga duración del patrón saga en la que los pasos pueden pausarse durante minutos, horas o a la espera de aprobación humana antes de reanudarse. Los flujos de trabajo persisten su estado entre pasos para sobrevivir a los reinicios del proceso; los decoradores `@workflow` y `@workflow_step` de PyFly proporcionan esta capacidad sobre el mismo motor de sagas (Capítulo 12).
+
+**Feature flag** — Definición en tiempo de ejecución que elige un valor tipado o una variante según el contexto; el llamador aporta el valor por defecto si falta, está desactivada o falla (Apéndice F).
+
+**Clave de segmentación (targeting key)** — Identificador estable de usuario o entidad con el que el algoritmo fraccional compartido conserva el grupo de despliegue (Apéndice F).

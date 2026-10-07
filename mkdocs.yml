@@ -158,6 +158,9 @@ nav:
       - Business Logic:
           - Rule Engine: modules/rule-engine.md
           - Plugins: modules/plugins.md
+      - Feature Flags:
+          - Feature Flags: modules/feature-flags.md
+          - Feature Flags Contract: modules/feature-flags-contract.md
       - Security & Identity:
           - Security: modules/security.md
           - Standalone OAuth client: modules/oauth2-client.md

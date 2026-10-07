@@ -135,6 +135,43 @@ pyfly:
     enabled: false
     provider: "memory"
     ttl: 300
+  feature-flags:
+    # Feature flags on OpenFeature + flagd (docs/modules/feature-flags.md). Off until enabled.
+    enabled: false
+    flags: {}          # inline flagd definitions or the shorthand (key: true | false | "variant")
+    evaluators: {}     # shared $evaluators
+    openfeature:
+      domain: ""       # "" installs the provider as the OpenFeature default provider
+    sources:
+      file:
+        enabled: false
+        path: ""
+        refresh-interval: "5s"
+      http:
+        enabled: false
+        url: ""
+        token: ""
+        refresh-interval: "30s"
+        timeout: "2s"
+      store:
+        enabled: false
+        driver: "database"   # database | memory
+        refresh-interval: "5s"
+        datasource: ""       # "" = the primary datasource
+    context:
+      tenant-attribute: "tenant"
+      trust-tenant-header: false
+    web:
+      disabled-status: 404   # 404 | 403 | 503
+    events:
+      evaluations: false
+    management:
+      writes: false
+    server:
+      enabled: false
+      path: "/feature-flags/flagd.json"
+      token: ""
+      allow-anonymous: false
   messaging:
     provider: "memory"
   client:

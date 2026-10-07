@@ -26,6 +26,7 @@ const routes = {
     'scheduled':  () => import('./views/scheduled.js'),
     'mappings':   () => import('./views/mappings.js'),
     'caches':     () => import('./views/caches.js'),
+    'flags':      () => import('./views/flags.js'),
     'cqrs':       () => import('./views/cqrs.js'),
     'transactions': () => import('./views/transactions.js'),
     'traces':     () => import('./views/traces.js'),
@@ -227,9 +228,16 @@ let mobileOverlay;
 function setupMobileOverlay() {
     mobileOverlay = document.createElement('div');
     mobileOverlay.className = 'mobile-overlay';
-    mobileOverlay.addEventListener('click', () => {
+    const closeNavigation = () => {
         sidebar.classList.remove('open');
         mobileOverlay.classList.remove('open');
+    };
+    mobileOverlay.addEventListener('click', closeNavigation);
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && sidebar.classList.contains('open')) {
+            closeNavigation();
+            document.querySelector('.mobile-toggle')?.focus();
+        }
     });
     document.body.appendChild(mobileOverlay);
 }

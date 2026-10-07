@@ -27,6 +27,9 @@ You will move quickly. Every section picks one topic, shows the minimal working 
     **Run it** checkpoint that shows the exact command and the output you
     should see. Type the commands as you go — that is how the ideas stick.
 
+!!! note "Feature Flags in Lumen"
+    Appendix F covers flag stores, sync security, source health, optimistic conflicts and outer-transaction retries.
+
 ---
 
 ## Plugins and extension points

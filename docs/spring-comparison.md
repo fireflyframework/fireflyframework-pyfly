@@ -22,6 +22,7 @@ If you're coming from the Java/Spring Boot ecosystem, this guide shows you how e
 - [JSON Serialization and Content Negotiation](#json-serialization-and-content-negotiation)
 - [Data Access](#data-access)
 - [Caching](#caching)
+- [Feature Flags](#feature-flags)
 - [Scheduling](#scheduling)
 - [Aspect-Oriented Programming](#aspect-oriented-programming)
 - [Resilience Patterns](#resilience-patterns)
@@ -1021,6 +1022,12 @@ The decorator names and behavior map one-to-one. PyFly uses explicit `backend` i
 
 ---
 
+## Feature Flags
+
+Spring Boot applications wire an OpenFeature provider and client explicitly. PyFly configures its provider, sources and ambient context when `pyfly.feature-flags.enabled: true`. `FeatureFlags` evaluates typed values and `@feature_flag` gates methods and routes. See the [Feature Flags guide](modules/feature-flags.md).
+
+---
+
 ## Scheduling
 
 ### Spring Boot
@@ -1568,6 +1575,13 @@ class ShoppingCart: ...
 | Spring | PyFly | Notes |
 |--------|-------|-------|
 | `@Cacheable(condition=…, unless=…)` | `@cacheable(..., condition=…, unless=…)` | `condition` (over call args) bypasses the cache; `unless` (over the result) returns without storing. Keyword-only. See [Caching Guide](modules/caching.md#conditional-caching-condition-and-unless). |
+
+### Feature flags
+
+| Spring | PyFly | Notes |
+|--------|-------|-------|
+| OpenFeature client and provider wiring | `FeatureFlags` with `FeatureFlagsAutoConfiguration` | Typed evaluation with ambient context and layered sources. |
+| Custom feature aspect or Togglz gate | `@feature_flag(key, variant=, default=, fallback=)` | Gate a method, class or route; see the [Feature Flags guide](modules/feature-flags.md). |
 
 ### Resilience tuning
 

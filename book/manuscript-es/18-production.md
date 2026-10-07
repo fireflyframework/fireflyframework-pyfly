@@ -29,6 +29,9 @@ Avanzarás rápido. Cada sección escoge un tema, muestra la API mínima que fun
     comando exacto y la salida que deberías ver. Escribe los comandos a medida
     que avanzas: así es como las ideas se asientan.
 
+!!! note "Feature Flags en Lumen"
+    El Apéndice F trata almacenes de flags, seguridad de sincronización, salud de fuentes, conflictos optimistas y reintentos de transacciones externas.
+
 ---
 
 ## Plugins y puntos de extensión

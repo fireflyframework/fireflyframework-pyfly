@@ -28,6 +28,8 @@ pytest loads it with PyFly (the ``pyfly`` pytest11 entry point). It adds:
 
   By default it is a SQLite file in the test's ``tmp_path`` with the relational layer enabled;
 - the ``data_test`` marker.
+- the ``feature_flags`` fixture: ``feature_flags.set({"new-checkout": True})`` overrides feature flags for the test
+  (``pyfly.testing.feature_flags``), undone when it ends.
 
 The slice starts in an asynchronous fixture: run the tests with pytest-asyncio (``asyncio_mode = "auto"``, as
 the projects ``pyfly new`` generates do) or declare them ``@pytest.mark.asyncio``. ``data_context`` itself is
@@ -49,6 +51,7 @@ from pyfly.testing.slices import DataTestOptions, data_test_options
 if TYPE_CHECKING:
     from pyfly.context.application_context import ApplicationContext
     from pyfly.core.config import Config
+    from pyfly.testing.feature_flags import FlagOverrides
     from pyfly.testing.rollback import RollbackTransaction
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -143,3 +146,15 @@ def data_context(
         return
     with rollback.taking_part():
         yield context
+
+
+@pytest.fixture
+def feature_flags() -> Iterator[FlagOverrides]:
+    """Override feature flags for one test; each override is undone when it ends."""
+    from pyfly.testing.feature_flags import FlagOverrides
+
+    overrides = FlagOverrides()
+    try:
+        yield overrides
+    finally:
+        overrides.reset()

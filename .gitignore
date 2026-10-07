@@ -47,3 +47,4 @@ book/dist/**
 !book/dist/pyfly-by-example.epub
 !book/dist/pyfly-by-example-es.pdf
 !book/dist/pyfly-by-example-es.epub
+book/release-output/

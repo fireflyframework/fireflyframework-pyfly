@@ -325,10 +325,12 @@ def create_app(
                     _add(reg.instance.routes())
                     break
 
-        # Mount config-server routes once its ConfigServer bean exists (#83).
+        # Mount config-server and feature-flag sync routes once their beans exist (#83).
         from pyfly.config_server.wiring import build_config_server_routes
+        from pyfly.feature_flags.server import build_feature_flag_server_routes
 
         _add(build_config_server_routes(context))
+        _add(build_feature_flag_server_routes(context))
 
     _install_context_routes()
 

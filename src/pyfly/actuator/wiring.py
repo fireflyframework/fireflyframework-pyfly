@@ -93,6 +93,15 @@ def _health_show(config: Any, key: str) -> bool:
     return str(config.get(f"pyfly.management.endpoint.health.{key}", "when-authorized")).lower() != "never"
 
 
+def _feature_flags_endpoint(context: ApplicationContext) -> Any | None:
+    """The flags endpoint when feature flags are enabled and installed."""
+    try:
+        from pyfly.feature_flags.endpoint import flags_endpoint_for
+    except ImportError:
+        return None
+    return flags_endpoint_for(context)
+
+
 def build_actuator_routes(
     context: ApplicationContext | None,
     health_aggregator: HealthAggregator,
@@ -147,6 +156,9 @@ def build_actuator_routes(
         registry.register(ConditionsEndpoint(context))
         registry.register(CachesEndpoint(context))
         registry.register(RefreshEndpoint(context))
+        flags_endpoint = _feature_flags_endpoint(context)
+        if flags_endpoint is not None:
+            registry.register(flags_endpoint)
 
     # Prometheus scrape endpoint (only when prometheus_client is installed).
     try:

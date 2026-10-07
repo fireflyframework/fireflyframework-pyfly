@@ -12,6 +12,9 @@ Rich, Jinja2 y questionary.
 
 **Punto de entrada:** `pyfly` — registrado como script de consola en `pyproject.toml`.
 
+!!! note "Feature Flags en Lumen"
+    El Apéndice F describe el flujo de trabajo de `pyfly flags` y los recibos de escritura pendientes.
+
 ---
 
 ## Referencia de comandos
@@ -30,6 +33,28 @@ Rich, Jinja2 y questionary.
 | `pyfly sbom [--json]` | Tabla del Software Bill of Materials (inventario de software) |
 | `pyfly --version` | Imprime la versión instalada de PyFly |
 | `pyfly --help` | Imprime el banner y todos los comandos |
+
+---
+
+## pyfly flags
+
+Instala `pyfly[cli,feature-flags]`, activa los flags y expón el endpoint del actuador `flags` si usas `--url`. Las escrituras requieren `management.writes: true` y un almacén escribible. Define `wallet-offer` en configuración y usa un almacén de base de datos para conservar los cambios entre los comandos locales de esta secuencia. Sin `--url URL`, cada comando arranca la aplicación local; con esa opción consulta un servicio en ejecución. Todos aceptan `--json`; los de escritura admiten `--expected-version N` para detectar conflictos.
+
+```bash
+printf '%s\n' '{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"}' > wallet-offer.json
+pyfly flags list --json
+pyfly flags show wallet-offer --json
+pyfly flags enable wallet-offer --expected-version 0
+pyfly flags disable wallet-offer
+pyfly flags default-variant wallet-offer on
+pyfly flags put wallet-offer --file wallet-offer.json
+pyfly flags delete wallet-offer
+pyfly flags evaluate wallet-offer --context '{"plan":"pro"}' \
+  --targeting-key user-42 --json
+pyfly flags list --url http://localhost:9090 --json
+```
+
+El archivo de `put` contiene una definición flagd en JSON; `--file -` lee la entrada estándar. La vista previa no registra métricas ni exposición. Si se rechaza una operación, `--json` emite `{error, message}` y termina con código 1. Una escritura aceptada puede devolver `{key, refreshPending: true}` con código 0: consulta `show` hasta ver el valor efectivo. Las escrituras locales usan `cli:<os-user>` en la auditoría; las remotas usan el principal autenticado o `actuator`. El Apéndice F desarrolla el despliegue de Lumen; la [referencia CLI](https://github.com/fireflyframework/fireflyframework-pyfly/blob/v26.10.01/docs/cli.md#pyfly-flags) recoge la sintaxis completa.
 
 ---
 

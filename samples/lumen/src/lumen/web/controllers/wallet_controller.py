@@ -35,6 +35,7 @@ from lumen.interfaces.dtos.v1.wallet_dto import WalletDto
 from pyfly.container import rest_controller
 from pyfly.cqrs import DefaultCommandBus, DefaultQueryBus
 from pyfly.data import Pageable, Sort
+from pyfly.feature_flags import feature_flag
 from pyfly.kernel import ResourceNotFoundException
 from pyfly.web import (
     Body,
@@ -64,6 +65,14 @@ class WalletController:
     def __init__(self, commands: DefaultCommandBus, queries: DefaultQueryBus) -> None:
         self._commands = commands
         self._queries = queries
+
+    @get_mapping("/rollout/offer")
+    @feature_flag("wallet-offer", fallback="legacy_offer")
+    async def wallet_offer(self) -> dict[str, str]:
+        return {"offer": "new"}
+
+    async def legacy_offer(self) -> dict[str, str]:
+        return {"offer": "standard"}
 
     # --- commands --------------------------------------------------------
 

@@ -15,3 +15,24 @@ def test_release_version_matches_metadata_badges_and_downloads():
     assert f"pyfly-{version}-py3-none-any.whl" in readme
     assert f">v{__version__}</span>" in (root / "web/index.html").read_text()
     assert f"## v{__version__} " in (root / "CHANGELOG.md").read_text()
+
+
+def test_every_displayed_version_site_shows_the_release() -> None:
+    root = Path(__file__).resolve().parents[2]
+    display = f"v{__version__}"
+    sites = {
+        "install.sh": f'PYFLY_VERSION="{__version__}"',
+        "README.md": f"- **`{display}`** (",
+        "docs/versioning.md": f'print(pyfly.__version__)  # → "{__version__}"',
+        "docs/getting-started.md": f"PyFly {display} | Python",
+        "docs/installation.md": f"✓ pyfly {display}",
+        "docs/cli.md": f"✓ pyfly {display}",
+        "docs/modules/core.md": f":: PyFly Framework :: ({display})",
+    }
+    for path, expected in sites.items():
+        assert expected in (root / path).read_text(encoding="utf-8"), path
+    versioning = (root / "docs/versioning.md").read_text(encoding="utf-8")
+    assert f"| `{__version__}` |" in versioning
+    assert f"pyfly --version            # → {__version__}" in versioning
+    assert f":: PyFly Framework :: ({display}) (Python" in versioning
+    assert f":: PyFly :: ({display})" in (root / "docs/modules/core.md").read_text(encoding="utf-8")

@@ -13,8 +13,8 @@
 # limitations under the License.
 """The framework's own SQL tables, declared once as SQLAlchemy Core tables on one ``MetaData``.
 
-Every table PyFly keeps in an application's database (``pyfly_*``) is a :class:`~sqlalchemy.Table` on
-:data:`framework_metadata`, with column types that work on every backend:
+Every table PyFly keeps in an application's database (``pyfly_*`` and the shared ``firefly_*`` tables) is a
+:class:`~sqlalchemy.Table` on :data:`framework_metadata`, with column types that work on every backend:
 
 - bounded :func:`key_string` keys (MySQL and MariaDB cannot index an unbounded ``TEXT`` column), compared
   exactly on every backend (a binary collation on MySQL and MariaDB);
@@ -50,6 +50,8 @@ Table                             Used by
 ``pyfly_sessions``                ``SqlSessionStore`` (``pyfly.session.store=postgres``)
 ``pyfly_session_registrations``   ``PostgresSessionRegistry``: the sessions of each principal
 ``pyfly_session_principals``      ``PostgresSessionRegistry``: a row per principal, locked by a login
+``firefly_feature_flags``         ``SqlAlchemyFlagStore``: the writable feature-flag layer, shared with LaraFly
+``firefly_feature_flag_changes``  ``SqlAlchemyFlagStore``: one row per write; the highest ``id`` is the revision
 ================================  ============================================================================
 
 A store that is configured with another table name declares that table here too, through the table's
@@ -108,6 +110,8 @@ __all__ = [
     "CREATE_ATTEMPTS",
     "EVENT_STORE",
     "EVENT_STORE_HEAD",
+    "FEATURE_FLAG_CHANGES",
+    "FEATURE_FLAGS",
     "FRAMEWORK_TABLE_PREFIX",
     "LOCKS",
     "NAMING_CONVENTION",
@@ -127,6 +131,7 @@ __all__ = [
     "FrameworkSchemaError",
     "KeyString",
     "UtcTimestamp",
+    "ZonelessUtcTimestamp",
     "cache_entries",
     "cache_entries_table",
     "context_datasource_registry",
@@ -136,6 +141,10 @@ __all__ = [
     "event_store_head",
     "event_store_head_table",
     "event_store_table",
+    "feature_flag_changes",
+    "feature_flag_changes_table",
+    "feature_flags",
+    "feature_flags_table",
     "framework_engine",
     "framework_metadata",
     "key_string",
@@ -175,7 +184,8 @@ __all__ = [
 _logger = logging.getLogger(__name__)
 
 FRAMEWORK_TABLE_PREFIX = "pyfly_"
-"""The prefix of every table the framework declares under its default name."""
+"""The prefix of every table the framework declares under its default name, except the two feature-flag tables
+(``firefly_feature_flags``, ``firefly_feature_flag_changes``), whose names are shared with LaraFly."""
 
 NAMING_CONVENTION: dict[str, str] = {
     "ix": "ix_%(column_0_label)s",
@@ -189,7 +199,8 @@ deterministically). Primary keys keep the backend's own name (``<table>_pkey`` o
 created before this metadata have it; MySQL and MariaDB name every primary key ``PRIMARY``)."""
 
 framework_metadata = MetaData(naming_convention=NAMING_CONVENTION)
-"""The ``MetaData`` of every framework table (``pyfly_*``); list it in Alembic's ``target_metadata``."""
+"""The ``MetaData`` of framework tables (``pyfly_*`` and shared ``firefly_*``); list it in Alembic's
+``target_metadata``."""
 
 ORCHESTRATION_STATE = "pyfly_orchestration_state"
 CACHE_ENTRIES = "pyfly_cache_entries"
@@ -208,6 +219,8 @@ OAUTH2_TOKEN_FAMILIES = "pyfly_oauth2_token_families"
 SESSIONS = "pyfly_sessions"
 SESSION_REGISTRATIONS = "pyfly_session_registrations"
 SESSION_PRINCIPALS = "pyfly_session_principals"
+FEATURE_FLAGS = "firefly_feature_flags"
+FEATURE_FLAG_CHANGES = "firefly_feature_flag_changes"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -254,6 +267,31 @@ class UtcTimestamp(TypeDecorator[datetime]):
             raise TypeError(f"UtcTimestamp takes a datetime, got {type(value).__name__}")
         instant = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return instant.replace(tzinfo=None) if dialect.name in _NAIVE_TIMESTAMP_DIALECTS else instant
+
+    def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+class ZonelessUtcTimestamp(TypeDecorator[datetime]):
+    """A UTC instant stored without a time zone, compatible with LaraFly's feature-flag migration."""
+
+    impl = DateTime(timezone=False)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name in ("mysql", "mariadb"):
+            return dialect.type_descriptor(mysql.DATETIME(fsp=6))
+        return dialect.type_descriptor(DateTime(timezone=False))
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        if not isinstance(value, datetime):
+            raise TypeError(f"ZonelessUtcTimestamp takes a datetime, got {type(value).__name__}")
+        instant = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return instant.replace(tzinfo=None)
 
     def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
         if value is None:
@@ -695,6 +733,43 @@ def session_principals_table(name: str = SESSION_PRINCIPALS) -> Table:
     return _declare("session_principals", name, build)
 
 
+def feature_flags_table(name: str = FEATURE_FLAGS) -> Table:
+    """One writable flagd definition per key, with its version and latest writer."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("flag_key", key_string(128), primary_key=True),
+            Column("definition", long_text(), nullable=False),
+            Column("version", Integer(), nullable=False),
+            Column("updated_at", ZonelessUtcTimestamp(), nullable=False),
+            Column("updated_by", key_string(255), nullable=True),
+        )
+
+    return _declare("feature_flags", name, build)
+
+
+def feature_flag_changes_table(name: str = FEATURE_FLAG_CHANGES) -> Table:
+    """One audit row per write; the highest id is the store revision."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("id", BigInteger().with_variant(Integer(), "sqlite"), Identity(), primary_key=True),
+            Column("flag_key", key_string(128), nullable=False),
+            Column("action", key_string(16), nullable=False),
+            Column("definition", long_text(), nullable=True),
+            Column("previous", long_text(), nullable=True),
+            Column("actor", key_string(255), nullable=True),
+            Column("changed_at", ZonelessUtcTimestamp(), nullable=False),
+            Index(f"{table_name}_key", "flag_key", "id"),
+        )
+
+    return _declare("feature_flag_changes", name, build)
+
+
 orchestration_state = orchestration_state_table()
 """``pyfly_orchestration_state`` (:func:`orchestration_state_table`)."""
 
@@ -745,6 +820,12 @@ session_registrations = session_registrations_table()
 
 session_principals = session_principals_table()
 """``pyfly_session_principals`` (:func:`session_principals_table`)."""
+
+feature_flags = feature_flags_table()
+"""``firefly_feature_flags`` (:func:`feature_flags_table`)."""
+
+feature_flag_changes = feature_flag_changes_table()
+"""``firefly_feature_flag_changes`` (:func:`feature_flag_changes_table`)."""
 
 
 # ---------------------------------------------------------------------------------------------------------

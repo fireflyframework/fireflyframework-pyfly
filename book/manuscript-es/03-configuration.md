@@ -8,6 +8,9 @@ Lumen ya tiene servicios cableados: un `WalletService` respaldado por un reposit
 
 Este capítulo muestra cómo PyFly resuelve eso con un único `pyfly.yaml`, un sistema de precedencia de cuatro capas, ficheros de superposición específicos por entorno y clases de configuración fuertemente tipadas. Al terminar, Lumen tendrá una historia de configuración limpia que escala desde `pyfly run` en tu portátil hasta un despliegue de producción en contenedores, sin tocar una línea de lógica de negocio.
 
+!!! note "Feature Flags en Lumen"
+    El Apéndice F muestra las claves de feature flags de Lumen en `pyfly.yaml` y explica la precedencia independiente de sus fuentes.
+
 ---
 
 ## pyfly.yaml: tu única fuente de ajustes

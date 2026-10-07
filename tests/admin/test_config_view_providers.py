@@ -85,6 +85,45 @@ class TestConfigProvider:
         assert sec["jwt.secret"]["sensitive"] is True
 
 
+@pytest.mark.asyncio
+async def test_unresolved_placeholder_preserves_literal_dotted_keys_and_other_effective_values(monkeypatch):
+    monkeypatch.setenv("PYFLY_WEB_PORT", "9090")
+    ctx = ApplicationContext(
+        Config(
+            {
+                "pyfly": {
+                    "app": {"name": "${MISSING_NAME:resolved}"},
+                    "web": {"port": 8080},
+                    "security": {"jwt": {"secret": "supersecret"}},
+                    "custom": {"tool.alpha": {"enabled": True}},
+                    "feature-flags": {
+                        "flags": {
+                            "checkout.new": {
+                                "state": "ENABLED",
+                                "variants": {"on": "literal ${missing}"},
+                                "defaultVariant": "on",
+                            }
+                        }
+                    },
+                }
+            }
+        )
+    )
+    config = await ConfigProvider(ctx).get_config()
+    env = await EnvProvider(ctx).get_env()
+
+    flag = config["groups"]["pyfly.feature-flags"]
+    assert flag["flags.checkout.new.state"]["value"] == "ENABLED"
+    assert flag["flags.checkout.new.variants.on"]["value"] == "literal ${missing}"
+    assert flag["flags.checkout.new.defaultVariant"]["value"] == "on"
+    assert env["properties"]["pyfly.feature-flags.flags.checkout.new.state"] == "ENABLED"
+    assert env["properties"]["pyfly.feature-flags.flags.checkout.new.variants.on"] == "literal ${missing}"
+    assert config["groups"]["pyfly.app"]["name"]["value"] == "resolved"
+    assert config["groups"]["pyfly.custom"]["tool.alpha.enabled"]["value"] is True
+    assert env["properties"]["pyfly.web.port"] == 9090
+    assert env["properties"]["pyfly.security.jwt.secret"] == "******"
+
+
 class TestActuatorEnvEndpoint:
     @pytest.mark.asyncio
     async def test_env_propertysources_shape(self):

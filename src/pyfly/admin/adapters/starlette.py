@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from pyfly.admin.providers.config_provider import ConfigProvider
     from pyfly.admin.providers.cqrs_provider import CqrsProvider
     from pyfly.admin.providers.env_provider import EnvProvider
+    from pyfly.admin.providers.flags_provider import FlagsProvider
     from pyfly.admin.providers.health_provider import HealthProvider
     from pyfly.admin.providers.logfile_provider import LogfileProvider
     from pyfly.admin.providers.loggers_provider import LoggersProvider
@@ -95,6 +96,7 @@ class AdminRouteBuilder:
         server: ServerProvider | None = None,
         observability: ObservabilityProvider | None = None,
         instance_registry: InstanceRegistry | None = None,
+        flags: FlagsProvider | None = None,
     ) -> None:
         self._props = properties
         self._overview = overview
@@ -117,6 +119,7 @@ class AdminRouteBuilder:
         self._server = server
         self._observability = observability
         self._instance_registry = instance_registry
+        self._flags = flags
 
     def _auth_failure(self) -> JSONResponse | None:
         """Return a 401/403 response when require_auth is on and the caller lacks
@@ -218,6 +221,15 @@ class AdminRouteBuilder:
                     (f"{api}/instances", self._handle_instances_list, ["GET"]),
                     (f"{api}/instances", self._handle_instances_register, ["POST"]),
                     (f"{api}/instances/{{name}}", self._handle_instances_deregister, ["DELETE"]),
+                ]
+            )
+
+        if self._flags is not None:
+            guarded_specs.extend(
+                [
+                    (f"{api}/flags", self._handle_flags, ["GET"]),
+                    (f"{api}/flags/{{key}}", self._handle_flag_detail, ["GET"]),
+                    (f"{api}/flags/{{key}}", self._handle_flag_action, ["POST"]),
                 ]
             )
 
@@ -326,6 +338,30 @@ class AdminRouteBuilder:
         if "error" in result:
             return JSONResponse(result, status_code=400)
         return JSONResponse(result)
+
+    async def _handle_flags(self, request: Request) -> JSONResponse:
+        assert self._flags is not None
+        return JSONResponse(await self._flags.get_flags())
+
+    async def _handle_flag_detail(self, request: Request) -> JSONResponse:
+        assert self._flags is not None
+        key = request.path_params["key"]
+        detail = await self._flags.get_flag(key)
+        if detail is None:
+            return JSONResponse({"error": "unknown-flag", "message": f"no layer defines {key!r}"}, status_code=404)
+        return JSONResponse(detail)
+
+    async def _handle_flag_action(self, request: Request) -> JSONResponse:
+        assert self._flags is not None
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw else None
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "bad-request", "message": "the body must be a JSON object"}, status_code=400)
+        status, payload = await self._flags.execute(request.path_params["key"], body)
+        return JSONResponse(payload, status_code=status)
 
     async def _handle_cqrs(self, request: Request) -> JSONResponse:
         return JSONResponse(await self._cqrs.get_handlers())

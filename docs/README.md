@@ -122,6 +122,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | [ECM (Content Management)](modules/ecm.md) | Document storage, metadata, folders, e-signature ports + AWS S3 / Azure Blob / DocuSign / Logalty adapters |
 | [Plugins](modules/plugins.md) | `@plugin`, `@extension`, `@extension_point`, `PluginManager`, dependency resolution |
 | [Rule Engine](modules/rule-engine.md) | YAML DSL, AST evaluator, batch evaluation, repository |
+| [Feature Flags](modules/feature-flags.md) | OpenFeature and flagd definitions, gates, rollout, store, sync and management |
 
 ### Advanced
 

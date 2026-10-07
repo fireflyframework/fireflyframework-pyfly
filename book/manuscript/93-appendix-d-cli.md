@@ -11,6 +11,9 @@ Rich, Jinja2, and questionary.
 
 **Entry point:** `pyfly` — registered as a console script in `pyproject.toml`.
 
+!!! note "Feature Flags in Lumen"
+    Appendix F describes the `pyfly flags` operator workflow and pending write receipts.
+
 ---
 
 ## Command reference
@@ -29,6 +32,28 @@ Rich, Jinja2, and questionary.
 | `pyfly sbom [--json]` | Software Bill of Materials table |
 | `pyfly --version` | Print the installed PyFly version |
 | `pyfly --help` | Print the banner and all commands |
+
+---
+
+## pyfly flags
+
+Install `pyfly[cli,feature-flags]`, enable feature flags, and expose the `flags` actuator endpoint when using `--url`. Writes require `management.writes: true` and a writable store. Define `wallet-offer` in configuration and use a database store so the following sequence persists across local command boots. Each command boots the local application unless `--url URL` points at a running service. Every subcommand accepts `--json`; write commands accept `--expected-version N` for conflict detection.
+
+```bash
+printf '%s\n' '{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"}' > wallet-offer.json
+pyfly flags list --json
+pyfly flags show wallet-offer --json
+pyfly flags enable wallet-offer --expected-version 0
+pyfly flags disable wallet-offer
+pyfly flags default-variant wallet-offer on
+pyfly flags put wallet-offer --file wallet-offer.json
+pyfly flags delete wallet-offer
+pyfly flags evaluate wallet-offer --context '{"plan":"pro"}' \
+  --targeting-key user-42 --json
+pyfly flags list --url http://localhost:9090 --json
+```
+
+The `put` file contains one JSON flagd definition; `--file -` reads it from standard input. Preview records no metric or exposure event. A refused `--json` command emits `{error, message}` and exits 1. A successful write may return `{key, refreshPending: true}` and exit 0; poll `show` until the effective flag is visible. Local writes use `cli:<os-user>` as their audit actor, while remote writes use the authenticated principal or `actuator`. Appendix F shows the Lumen rollout, and the online [CLI reference](https://github.com/fireflyframework/fireflyframework-pyfly/blob/v26.10.01/docs/cli.md#pyfly-flags) lists the complete syntax.
 
 ---
 

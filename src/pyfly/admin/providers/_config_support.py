@@ -30,7 +30,33 @@ def effective_dict(config: Any) -> dict[str, Any]:
     """Resolved config tree (placeholders + env overrides), or raw fallback."""
     fn = getattr(config, "effective_dict", None)
     if callable(fn):
-        result = fn()
+        try:
+            result = fn()
+        except ValueError:
+            # One literal flag variant can contain an unresolved ${...}; keep
+            # that leaf visible without losing resolution of the other keys.
+            raw = config.to_dict()
+            resolver = getattr(config, "_resolve_tree", None)
+
+            def resolve(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {key: resolve(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [resolve(item) for item in value]
+                if not callable(resolver):
+                    return value
+                try:
+                    return resolver(value)
+                except ValueError:
+                    return value
+
+            resolved = resolve(raw)
+            if isinstance(resolved, dict):
+                overlay = getattr(config, "_apply_env_overrides", None)
+                if callable(overlay):
+                    overlay("", resolved)
+                return resolved
+            return {}
         if isinstance(result, dict):
             return result
     raw = config.to_dict() if hasattr(config, "to_dict") else {}

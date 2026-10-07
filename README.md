@@ -13,7 +13,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.09.15-brightgreen" alt="Version: 26.09.15"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.10.01-brightgreen" alt="Version: 26.10.01"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -61,7 +61,7 @@
 
 It covers the whole stack: dependency injection, configuration & profiles, the web layer, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), DDD aggregates & `Money`, CQRS, domain events & event sourcing, messaging, HTTP clients, sagas, caching & resilience, security, observability, testing, scheduling, and going to production. Spring developers get a **Spring parity** callout at every turn.
 
-**📥 Download the book:** **[English PDF](book/dist/pyfly-by-example.pdf)** · **[English EPUB](book/dist/pyfly-by-example.epub)** · **[Spanish PDF](book/dist/pyfly-by-example-es.pdf)** · **[Spanish EPUB](book/dist/pyfly-by-example-es.epub)** — or build it from source with `bash book/build/run.sh`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
+**📥 Download the latest release books:** **[English PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.pdf)** · **[English EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.epub)** · **[Spanish PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.pdf)** · **[Spanish EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.epub)**. For a specific version, use its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases), or build from source with `bash book/build/run.sh --out-dir book/release-output`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
 
 ---
 
@@ -755,6 +755,10 @@ decision = await rules.evaluate("credit_approval", {
 
 Audit trails (which rule fired, why), batch evaluation, hot-reload from `RuleSetRepository`. See [docs/modules/rule-engine.md](docs/modules/rule-engine.md).
 
+### Feature Flags — OpenFeature and flagd
+
+A shared [contract](docs/modules/feature-flags-contract.md) gives PyFly and LaraFly the same flag documents and targeting. Use config, file, HTTP or store sources for kill switches, rollouts, entitlements and experiments. See the [Feature Flags guide](docs/modules/feature-flags.md).
+
 ### Plugin SPI — `@plugin` / `@extension_point` / `@extension`
 
 Build extensible products: define extension points, let third-party packages contribute extensions.
@@ -850,13 +854,13 @@ See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD micros
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.15-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.1-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.15-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.1-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.9.15-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.1-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -1075,6 +1079,7 @@ PyFly ships with **39 fully-implemented modules** organized into five layers —
 | **Domain (DDD)** | `Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`, `Specification`, `DomainRepository`, `BusinessRuleViolation` | `fireflyframework-starter-domain` |
 | **Plugins** | `@plugin` / `@extension_point` / `@extension`, dependency-ordered lifecycle | `fireflyframework-plugins` |
 | **Rule Engine** | YAML DSL, AST evaluator, batch evaluation, rule-set repository | `fireflyframework-rule-engine` |
+| **Feature Flags** | OpenFeature provider, flagd evaluator, config/file/HTTP/store sources, gate and sync | OpenFeature Java SDK |
 | **Config Server** | Spring Cloud Config Server analogue + client | `fireflyframework-config-server` |
 
 ### Integration Layer
@@ -1131,6 +1136,7 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [Starters](docs/modules/starters.md) — Layered bundles (`@enable_core_stack`, `@enable_web_stack`, `@enable_application_stack`, `@enable_data_stack`, `@enable_domain_stack`) with one-line imperative APIs for .NET parity
 - [Plugins](docs/modules/plugins.md) — Plugin SPI, extension points, lifecycle
 - [Rule Engine](docs/modules/rule-engine.md) — YAML DSL, AST evaluator, batch evaluation
+- [Feature Flags](docs/modules/feature-flags.md) — shared flagd contract, rollout, store and sync
 - [Callbacks (outbound)](docs/modules/callbacks.md) — Dispatch domain events to external HTTP endpoints
 - [Webhooks (inbound)](docs/modules/webhooks.md) — Receive, verify, dedupe, dispatch
 - [Notifications](docs/modules/notifications.md) — Email / SMS / push abstractions
@@ -1184,6 +1190,7 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
+- **`v26.10.01`** (2026-10-06) — feature flags on OpenFeature and flagd, with layered sources, guarded management, HTTP sync, and a shared PyFly/LaraFly contract.
 - **`v26.09.15`** (2026-09-30) — public JWKS fetch injection and caller budgets, and bounded OAuth2 client-credentials acquisition.
 - **`v26.09.14`** (2026-09-30) — opt-in S256 PKCE for OAuth device authorization with proof retained per grant and sent automatically during polling.
 - **`v26.09.13`** (2026-09-30) — deterministic OpenAPI component references for constrained named aliases across independent processes.

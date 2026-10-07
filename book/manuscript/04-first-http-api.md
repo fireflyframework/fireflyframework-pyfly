@@ -11,6 +11,9 @@ domain into a clean, validated REST API — one with automatic OpenAPI
 documentation, structured error responses that clients can trust, and the
 framework-managed conventions you have come to expect from the rest of PyFly.
 
+!!! note "Feature Flags in Lumen"
+    Appendix F adds a gated wallet offer route and documents its fallback and HTTP status.
+
 ---
 
 !!! note "HTML applications and model administration"

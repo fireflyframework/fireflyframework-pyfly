@@ -105,3 +105,7 @@
 **Webhook** — An inbound HTTP callback that an external provider (Stripe, Twilio, etc.) calls to notify your service of an asynchronous event, such as a payment-status change. PyFly's `@webhook_listener` decorator verifies the HMAC-SHA256 signature, deduplicates replays via a nonce cache, and routes the payload to a typed handler (Chapter 17).
 
 **Workflow** — A long-running variant of the saga pattern where steps may pause for minutes, hours, or human approval before resuming. Workflows persist their state between steps so they survive process restarts; PyFly's `@workflow` and `@workflow_step` decorators provide this capability on top of the same saga engine (Chapter 12).
+
+**Feature flag** — A runtime definition that selects a typed value or variant using evaluation context; the caller supplies a default for missing, disabled or failed flags (Appendix F).
+
+**Targeting key** — A stable user or entity identifier used by the shared fractional algorithm to keep a subject in one rollout cohort (Appendix F).

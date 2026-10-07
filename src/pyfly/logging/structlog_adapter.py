@@ -77,7 +77,12 @@ class StructlogAdapter:
             if fmt == "json"
             else structlog.processors.KeyValueRenderer(key_order=["timestamp", "level", "logger", "event"])
             if fmt == "logfmt"
-            else structlog.dev.ConsoleRenderer(colors=False, sort_keys=False)
+            else structlog.dev.ConsoleRenderer(
+                colors=False,
+                sort_keys=False,
+                # Optional rich/better-exceptions renderers inspect locals and can expand compact runtime graphs.
+                exception_formatter=structlog.dev.plain_traceback,
+            )
         )
 
         # structlog -> stdlib bridge: ProcessorFormatter renders the final record.
