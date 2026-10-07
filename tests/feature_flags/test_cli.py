@@ -195,6 +195,38 @@ def test_remote_show_preserves_the_portable_error_code(monkeypatch: pytest.Monke
     assert json.loads(result.output) == {"error": "unknown-flag", "message": "absent"}
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_remote_show_reports_non_json_refusal_status(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    client = ActuatorClient(
+        "http://svc", transport=httpx.MockTransport(lambda request: httpx.Response(status, text="Access denied"))
+    )
+    monkeypatch.setattr(flags_cmds, "ActuatorClient", lambda url: client)
+    result = CliRunner().invoke(flags_group, ["show", "kill", "--url", "http://svc", "--json"])
+    assert result.exit_code == 1
+    assert str(status) in result.output and "without JSON" in result.output
+    assert "unknown-flag" not in result.output
+    assert not isinstance(result.exception, ValueError)
+
+
+def test_legacy_introspection_get_still_reports_http_status() -> None:
+    client = ActuatorClient(
+        "http://svc", transport=httpx.MockTransport(lambda request: httpx.Response(401, text="Access denied"))
+    )
+    with pytest.raises(SystemExit, match="1"):
+        client.get("health")
+
+
+@pytest.mark.parametrize("contents, cause", [(None, "No such file"), (b"\xff", "codec")])
+def test_put_reports_unreadable_definition_file(tmp_path: Path, contents: bytes | None, cause: str) -> None:
+    path = tmp_path / "definition.json"
+    if contents is not None:
+        path.write_bytes(contents)
+    result = CliRunner().invoke(flags_group, ["put", "kill", "--file", str(path), "--url", "http://svc"])
+    assert result.exit_code == 1
+    assert str(path) in result.output and cause in result.output
+    assert not isinstance(result.exception, (OSError, UnicodeError))
+
+
 def test_pending_receipts_remain_successful_and_explain_visibility(
     local_app: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
