@@ -30,7 +30,11 @@ def _contract_files() -> list[str]:
 
 
 def test_the_manifest_matches_every_conformance_file() -> None:
-    expected = (CONFORMANCE / "MANIFEST.sha256").read_text(encoding="utf-8")
+    manifest = CONFORMANCE / "MANIFEST.sha256"
+    assert hashlib.sha256(manifest.read_bytes()).hexdigest() == (
+        "069c33f3c8c1fcbda0881491d9895046c6a7bfe74deb1244b29a7534d8a5e321"
+    )
+    expected = manifest.read_text(encoding="utf-8")
     actual = "".join(
         f"{hashlib.sha256((CONFORMANCE / name).read_bytes()).hexdigest()}  {name}\n" for name in _contract_files()
     )

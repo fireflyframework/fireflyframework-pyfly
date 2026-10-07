@@ -78,6 +78,12 @@ error.
 Fields other than `state`, `variants`, `defaultVariant`, `targeting` and `metadata` are ignored: they are neither
 an error nor evaluated, so a stray `description` beside `state` does not reject the document.
 
+JSON member names are preserved exactly, including a leading U+0000 (written `\u0000` in JSON), wherever the
+rules above allow that name. Native object-property restrictions must not drop a member, change its name or make
+an otherwise valid document unreadable. This includes nested object values and flag/document metadata. Canonical
+fingerprints and store/sync round trips preserve these names; the flag-key pattern and reserved metadata rules
+still apply.
+
 A `{"$ref": "name"}` that names no evaluator is not a load error. The document loads, and evaluating that flag
 returns the caller's default with the error code `PARSE_ERROR`, as flagd does.
 
@@ -197,6 +203,10 @@ A source that fails keeps its last good document, and a document that fails vali
 startup an invalid definition in the configuration or in the file stops the application with the flag key and the
 reason; a remote or store failure never stops it. Each change to the effective set publishes a
 `FeatureFlagsChanged` event naming the changed keys.
+
+Loading includes serializing and adopting a source snapshot. A serialization or read-back failure is a source
+failure under the same startup/last-good rules; it must not publish an empty successful source or replace its
+previous accepted document.
 
 ## The store
 
