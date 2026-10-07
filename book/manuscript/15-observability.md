@@ -33,6 +33,9 @@ Finally, you will see how **Aspect-Oriented Programming** (AOP) applies logging 
 
 By the end of the chapter Lumen will produce structured JSON logs with correlation IDs and automatic PII masking, emit Prometheus metrics scraped by any standard collector, propagate OpenTelemetry trace spans across service boundaries, answer Kubernetes liveness and readiness probes, and display all of the above in a zero-configuration dashboard reachable at `/admin`.
 
+!!! note "Feature Flags in Lumen"
+    Appendix F connects flag metrics, exposure events, health and the flags actuator to Lumen.
+
 ---
 
 !!! note "HTML applications and model administration"

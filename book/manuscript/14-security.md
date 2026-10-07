@@ -27,6 +27,9 @@ This chapter is written as a guided tutorial. We build the security layer one pi
 
 ::: figure art/figures/14-security.svg | Figure 14.1 — Lumen's security layers. A JWT filter populates the SecurityContext; HttpSecurity enforces URL-level rules; @secure enforces handler-level rules; the IDP port delegates identity to an external provider.
 
+!!! note "Feature Flags in Lumen"
+    Appendix F explains trusted tenant context and the separate authentication boundary for flag management.
+
 ---
 
 ## Authentication with JWT

@@ -1,9 +1,9 @@
 # PyFly by Example
 
 The English and Spanish editions follow Lumen through 18 chapters and five parts.
-Appendix E adds the [native catalog webapp](../samples/webapp/README.md): HTML pages,
-forms, named-route/static helpers, custom errors, and administration of the same
-existing SQLAlchemy entities or Beanie documents.
+Appendix E adds the [native catalog webapp](../samples/webapp/README.md). Appendix F
+adds [feature flags in Lumen](manuscript/96-appendix-f-feature-flags.md): an optional
+wallet offer route, shared targeting fixture, runtime gates and operator workflow.
 
 | Edition | PDF | EPUB |
 |---|---|---|
@@ -19,12 +19,13 @@ and download the books attached to that tag.
 `book.yaml` and `book.es.yaml` define chapter order and navigation. Manuscripts
 live in `manuscript/` and `manuscript-es/`; `art/` and `theme/` supply shared artwork
 and typography. Keep both editions aligned when changing behavior or examples.
-The original Lumen chapters retain their historical version references; Appendix E
-describes the implementation in the accompanying source checkout.
+The original Lumen chapters retain their historical version references; Appendices E
+and F describe implementations in the accompanying source checkout.
 
 - [Lumen](../samples/lumen/README.md): wallet, ledger, domain commands, and events.
 - [Catalog](../samples/webapp/README.md): browser forms and administration sharing `Product`.
 - [Webapp reference](../docs/modules/webapps.md): APIs, configuration, security, and provider contracts.
+- [Feature Flags guide](../docs/modules/feature-flags.md): shared contract, APIs, configuration and troubleshooting.
 
 ## Rebuild both editions
 
@@ -61,7 +62,7 @@ Inspect regenerated PDF pages and EPUB navigation before distributing an edition
 ```bash
 uv pip install --python book/.venv/bin/python -r requirements-docs.txt
 book/.venv/bin/python scripts/build_site.py
-book/.venv/bin/python -m mkdocs build --strict -d /tmp/pyfly-docs-check
+book/.venv/bin/python -m mkdocs build --strict -d book/release-output/site-check
 book/.venv/bin/python -m http.server --directory _site 8000
 ```
 

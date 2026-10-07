@@ -42,8 +42,17 @@ def check_syntax(code: str) -> tuple[bool, str | None]:
     except SyntaxError as e:
         return False, f"SyntaxError: {e.msg} (line {e.lineno})"
 
+def check_sample_provenance(listing: Listing, root: Path) -> bool:
+    """The Lumen feature-flag listing must occur verbatim in its tested source file."""
+    if listing.label != "samples/lumen/tests/test_feature_flags.py":
+        return True
+    source = (root / listing.label).read_text(encoding="utf-8")
+    indented = "\n".join("    " + line for line in listing.code.strip().splitlines())
+    return listing.code.strip() in source or indented in source
+
 def main(root: str) -> int:
     files = sorted(Path(root).rglob("*.md"))
+    repository = Path(__file__).resolve().parents[2]
     failures = 0
     for f in files:
         for lst in extract_python_listings(f):
@@ -51,6 +60,9 @@ def main(root: str) -> int:
             if not ok:
                 failures += 1
                 print(f"FAIL {f}:{lst.line} [{lst.label}] {err}")
+            if not check_sample_provenance(lst, repository):
+                failures += 1
+                print(f"FAIL {f}:{lst.line} [{lst.label}] differs from the tested Lumen source")
     print(f"verify_code: {failures} failing listing(s) across {len(files)} file(s)")
     return 1 if failures else 0
 

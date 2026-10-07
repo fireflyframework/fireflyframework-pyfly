@@ -57,14 +57,17 @@ Deberías ver una hilera de puntos —uno por prueba— seguida de una línea de
 
 ```text
 ..s.s........................................                            [100%]
-43 passed, 2 skipped in 0.28s
+48 passed, 2 skipped in 1.26s
 ```
 
-Cuarenta y tres pruebas superadas, en menos de un tercio de segundo, sin Docker ni proceso
+Cuarenta y ocho pruebas superadas, en alrededor de un segundo en este checkout, sin Docker ni proceso
 externo alguno. (Las dos omitidas son las ejecuciones sobre PostgreSQL de la prueba de
 concurrencia del Capítulo 5; necesitan `LUMEN_TEST_POSTGRES_URL`.) Esa velocidad es el sentido entero de la pirámide: la base rápida atrapa la mayoría
 de las regresiones antes de que lleguen a ejecutarse las capas de integración más lentas. Si en cambio ves
 `No module named pytest`, es que olvidaste `--extra dev`; vuelve a ejecutarlo con esa opción.
+
+!!! note "Feature Flags en Lumen"
+    El Apéndice F usa pruebas ejecutables del despliegue de Lumen y muestra la restauración de sustituciones; la suite completa verifica las transacciones del almacén.
 
 ---
 
@@ -1364,19 +1367,19 @@ más para confirmar que la pirámide completa está en verde en conjunto:
 uv run --extra dev pytest -q
 ```
 
-Salida esperada: el mismo `43 passed` con el que empezaste, ahora con un modelo mental de
+Salida esperada: el mismo `48 passed` con el que empezaste, ahora con un modelo mental de
 exactamente lo que demuestra cada punto:
 
 ```text
 ..s.s........................................                            [100%]
-43 passed, 2 skipped in 0.28s
+48 passed, 2 skipped in 1.26s
 ```
 
 ---
 
 ## Lo que construiste {.recap}
 
-Los seis archivos de prueba que construyó este capítulo suman 26 pruebas superadas, ejercitando cada capa de la pirámide. Junto con las pruebas de la saga del Capítulo 12, las pruebas de event sourcing del Capítulo 9 y la prueba de concurrencia del Capítulo 5, la suite completa de Lumen son **43 pruebas superadas** (y dos casos de PostgreSQL que se omiten sin servidor): el recuento que viste cuando ejecutaste `uv run --extra dev pytest -q` al principio.
+Los seis archivos de prueba que construyó este capítulo suman 26 pruebas superadas, ejercitando cada capa de la pirámide. Junto con las pruebas de la saga del Capítulo 12, las pruebas de event sourcing del Capítulo 9, la prueba de concurrencia del Capítulo 5 y cinco pruebas de feature flags del Apéndice F, la suite completa de Lumen son **48 pruebas superadas** (y dos casos de PostgreSQL que se omiten sin servidor): el recuento que viste cuando ejecutaste `uv run --extra dev pytest -q` al principio.
 
 En la base, `test_money.py` y `test_wallet_aggregate.py` demuestran la aritmética, la inmutabilidad y las reglas de invariante del modelo de dominio. Todas las pruebas son funciones síncronas de Python puro, sin fixtures, sin inyección de dependencias, sin `async`. El atributo `BusinessRuleViolation.rule` hace que cada aserción sea específica del invariante exacto incumplido.
 

@@ -27,6 +27,9 @@ Este capítulo está escrito como un tutorial guiado. Construimos la capa de seg
 
 ::: figure art/figures/14-security.svg | Figura 14.1 — Las capas de seguridad de Lumen. Un filtro JWT rellena el SecurityContext; HttpSecurity impone reglas a nivel de URL; @secure impone reglas a nivel de manejador; el puerto IDP delega la identidad a un proveedor externo.
 
+!!! note "Feature Flags en Lumen"
+    El Apéndice F explica el contexto fiable de inquilino y la autenticación independiente de la administración de flags.
+
 ---
 
 ## Autenticación con JWT

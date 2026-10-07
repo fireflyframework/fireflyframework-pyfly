@@ -76,6 +76,27 @@ services import to call this one.
 | POST   | `/api/v1/wallets/{id}/withdraw`   | Withdraw funds (minor units)  |
 | GET    | `/api/v1/wallets/{id}`            | Fetch the full wallet         |
 | GET    | `/api/v1/wallets/{id}/balance`    | Fetch just the balance        |
+| GET    | `/api/v1/wallets/rollout/offer`    | Optional feature-flagged offer; standard fallback |
+
+## Optional wallet offer rollout
+
+The sample enables `pyfly.feature-flags` with `wallet-offer: false` in `pyfly.yaml`.
+The offer route uses `@feature_flag("wallet-offer", fallback="legacy_offer")`: it
+returns `{"offer":"standard"}` by default and `{"offer":"new"}` when enabled.
+This changes a presentation choice, not the wallet aggregate or ledger. Install
+the `feature-flags` extra declared in this sample's project file and run:
+
+```bash
+uv sync --extra dev
+uv run pytest tests/test_feature_flags.py -q
+```
+
+The focused tests drive the mapped route through ASGI, use the shared
+Python/PHP conformance fixture for a multivariate assignment, exercise a real
+SQLite flag store through commit, conflict and rollback, and distinguish
+management preview from recorded exposure. `override_flags` restores the prior
+definition when its context manager exits. See the [feature flags guide](../../docs/modules/feature-flags.md)
+and [book appendix](../../book/manuscript/96-appendix-f-feature-flags.md).
 
 Amounts are in **minor units** (cents): `1500` means €15.00 for an EUR
 wallet.

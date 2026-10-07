@@ -755,6 +755,10 @@ decision = await rules.evaluate("credit_approval", {
 
 Audit trails (which rule fired, why), batch evaluation, hot-reload from `RuleSetRepository`. See [docs/modules/rule-engine.md](docs/modules/rule-engine.md).
 
+### Feature Flags — OpenFeature and flagd
+
+A shared [contract](docs/modules/feature-flags-contract.md) gives PyFly and LaraFly the same flag documents and targeting. Use config, file, HTTP or store sources for kill switches, rollouts, entitlements and experiments. See the [Feature Flags guide](docs/modules/feature-flags.md).
+
 ### Plugin SPI — `@plugin` / `@extension_point` / `@extension`
 
 Build extensible products: define extension points, let third-party packages contribute extensions.
@@ -1075,6 +1079,7 @@ PyFly ships with **39 fully-implemented modules** organized into five layers —
 | **Domain (DDD)** | `Entity`, `ValueObject`, `AggregateRoot`, `DomainEvent`, `Specification`, `DomainRepository`, `BusinessRuleViolation` | `fireflyframework-starter-domain` |
 | **Plugins** | `@plugin` / `@extension_point` / `@extension`, dependency-ordered lifecycle | `fireflyframework-plugins` |
 | **Rule Engine** | YAML DSL, AST evaluator, batch evaluation, rule-set repository | `fireflyframework-rule-engine` |
+| **Feature Flags** | OpenFeature provider, flagd evaluator, config/file/HTTP/store sources, gate and sync | OpenFeature Java SDK |
 | **Config Server** | Spring Cloud Config Server analogue + client | `fireflyframework-config-server` |
 
 ### Integration Layer
@@ -1131,6 +1136,7 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [Starters](docs/modules/starters.md) — Layered bundles (`@enable_core_stack`, `@enable_web_stack`, `@enable_application_stack`, `@enable_data_stack`, `@enable_domain_stack`) with one-line imperative APIs for .NET parity
 - [Plugins](docs/modules/plugins.md) — Plugin SPI, extension points, lifecycle
 - [Rule Engine](docs/modules/rule-engine.md) — YAML DSL, AST evaluator, batch evaluation
+- [Feature Flags](docs/modules/feature-flags.md) — shared flagd contract, rollout, store and sync
 - [Callbacks (outbound)](docs/modules/callbacks.md) — Dispatch domain events to external HTTP endpoints
 - [Webhooks (inbound)](docs/modules/webhooks.md) — Receive, verify, dedupe, dispatch
 - [Notifications](docs/modules/notifications.md) — Email / SMS / push abstractions

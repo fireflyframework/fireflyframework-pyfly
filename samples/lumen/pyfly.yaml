@@ -22,6 +22,10 @@ pyfly:
     enabled: true
   cache:
     provider: in-memory
+  feature-flags:
+    enabled: true
+    flags:
+      wallet-offer: false
   # Event-Driven Architecture: the in-memory bus (no broker needed).
   # Setting the provider registers the EventPublisher bean that the
   # wallet command handlers publish domain events through and that the

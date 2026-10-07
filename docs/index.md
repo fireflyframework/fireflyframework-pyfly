@@ -306,6 +306,7 @@ PyFly is organized into four layers:
 | **Domain (DDD)** | Entity, ValueObject, AggregateRoot, DomainEvent, Specification, DomainRepository | [Domain (DDD)](modules/domain.md) |
 | **Plugins** | `@plugin` / `@extension_point` / `@extension`, dependency-ordered lifecycle | [Plugins](modules/plugins.md) |
 | **Rule Engine** | YAML DSL, AST evaluator, batch evaluation, rule-set repository | [Rule Engine](modules/rule-engine.md) |
+| **Feature Flags** | OpenFeature, flagd targeting, gates and runtime store | [Feature Flags](modules/feature-flags.md) |
 
 ### Integration Layer
 
@@ -380,6 +381,7 @@ PyFly is organized into four layers:
 - [Domain (DDD primitives)](modules/domain.md) — Entity, ValueObject, AggregateRoot, DomainEvent, Specification
 - [Plugins](modules/plugins.md) — Plugin SPI, extension points, lifecycle
 - [Rule Engine](modules/rule-engine.md) — YAML DSL, AST evaluator, batch evaluation
+- [Feature Flags](modules/feature-flags.md) — OpenFeature, flagd and the cross-framework contract
 - [Callbacks (outbound)](modules/callbacks.md) — Dispatch domain events to external HTTP endpoints
 - [Webhooks (inbound)](modules/webhooks.md) — Receive, verify, dedupe, dispatch
 - [Notifications](modules/notifications.md) — Email / SMS / push abstractions
