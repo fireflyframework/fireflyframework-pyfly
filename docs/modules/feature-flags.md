@@ -4,10 +4,10 @@ PyFly evaluates [flagd](https://flagd.dev) definitions through OpenFeature. The 
 
 ## Quick start
 
-Install the optional dependency and enable the subsystem:
+Install the optional dependency from the pinned GitHub Release wheel and enable the subsystem. PyFly is distributed through GitHub Releases:
 
 ```bash
-uv add 'pyfly[feature-flags]'
+uv add "pyfly[feature-flags] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.01/pyfly-26.10.1-py3-none-any.whl"
 ```
 
 ```yaml
@@ -92,13 +92,19 @@ The gate's `default=True` opens a missing, disabled or failed flag deliberately.
 
 The ambient context adds the authenticated principal's user ID as `targetingKey`, roles without `ROLE_`, a trusted tenant, application name and active profiles. Explicit `context=` overrides attributes; explicit `targeting_key=` wins over the context key. Nonempty string and decimal integer keys are accepted; other values are refused with a bounded DEBUG diagnostic, preserving a lower-precedence key. Preview uses only process attributes plus explicit context and removes the request's OpenFeature transaction context.
 
-Implement `EvaluationContextContributor.contribute(attributes)` as a bean to add plan or account attributes. Contributors execute during request setup and again on facade evaluations; keep them inexpensive, idempotent and free of side effects. A principal tenant attribute wins. `X-Tenant-Id` is consulted only when `context.trust-tenant-header: true` and should be trusted only behind a verified boundary.
+Implement `EvaluationContextContributor.contribute(attributes)` as a bean to add plan or account attributes. Contributors execute during request setup and again on facade evaluations; keep them inexpensive, idempotent and free of side effects. Discovery scans existing singleton instances once when the application context refreshes, including duck-typed beans implementing `contribute`. Late registrations and request-scoped instances are not automatically discovered. A principal tenant attribute wins. `X-Tenant-Id` is consulted only when `context.trust-tenant-header: true` and should be trusted only behind a verified boundary.
+
+Firefly’s provider converts native `date` and `datetime` attributes to epoch milliseconds without mutating caller input; naive values use UTC, dates use midnight UTC, and date-like strings stay strings. This conversion walks at most 10,000 values and 128 container levels; values beyond those limits remain unchanged. External providers do not receive this Firefly-specific conversion.
 
 ## Sources and precedence
 
 From low to high: configuration (`flags`, `evaluators`), watched `file`, polled `http`, polled `store`, and test overrides. A higher source replaces a flag's whole definition; `$evaluators` and document metadata merge by name. File changes are detected by mtime and size: replace a complete file atomically rather than writing it in place. A failed refresh keeps the last good document (`STALE`); a source that never loaded is `DOWN`. Invalid config or file definitions fail startup; HTTP and store failures leave the application running with the last good composition.
 
+YAML definitions are operator-trusted input. YAML alias expansion can amplify shared structures during processing; do not accept untrusted YAML merely because individual targeting expressions have expansion limits.
+
 An application-provided OpenFeature `AbstractProvider` bean supersedes Firefly's provider. The facade, gate and context still work; the Firefly registry, source composition, store, sync endpoint and definition views stand down. Do not assume Firefly-specific `variant()` type inference or management definitions are available with an external provider.
+
+OpenFeature provider and default-domain state are process-global. Configure distinct `openfeature.domain` values for applications sharing a process; overlapping lifecycles on one domain are unsupported. Shutdown restores prior bindings and unbinds a previously unused named domain when the SDK supports the guarded unbind operation; the compatibility fallback logs a warning and installs a no-op provider. External provider initialization through the synchronous SDK can block startup, and provider shutdown is SDK-managed. Serialize start/stop and avoid rapidly reusing the same external provider instance: asynchronous SDK shutdown can race with a fast restart.
 
 ## The store
 
@@ -128,19 +134,23 @@ A successful put may return `{key, refreshPending: true}` when a caller-owned tr
 
 Expose the `flags` actuator endpoint to list flags at `GET /actuator/flags`, inspect one at `GET /actuator/flags/{key}`, or run an action at `POST /actuator/flags/{key}`. For example, `{"action":"evaluate","context":{"plan":"pro"},"targetingKey":"user-42"}` previews an assignment. A missing GET selector returns 404/`unknown-flag`; malformed, empty or non-object POST bodies return 400/`bad-request`. Other actuator management refusals return 400 with their portable error code. The admin page at `/admin#flags` shows definitions, sources, history and preview, and offers state, variant and JSON-definition controls. Its API uses its own 403/404/409/422/400 refusal statuses. An unauthenticated HTTP caller cannot choose the trusted `admin` audit origin: writes use the authenticated principal or the surface's server-selected actor.
 
+For HTTP preview, omitted or null `context` means no explicit attributes; non-null context must be an object, never an array or scalar. CLI `--context`, when supplied, must contain JSON object text (including `{}`); empty, whitespace, malformed, null, array and scalar text is refused before either local or remote dispatch.
+
 The CLI supports local application boot or a running actuator with `--url`. It has `list`, `show`, `enable`, `disable`, `default-variant`, `put`, `delete` and `evaluate` commands. `--json` keeps refusals machine-readable and exits 1; an accepted pending write exits 0. Local writes record `cli:<os-user>`, while remote writes inherit the actuator actor. Management security is separate from application security; configure it before exposing writes. See the [CLI reference](../cli.md#pyfly-flags) for exact syntax and [Actuator](actuator.md) for endpoint exposure.
 
 ## Serving flags to other services
 
-Enable the flagd-compatible sync endpoint with `server.enabled: true`, a non-root `server.path` (default `/feature-flags/flagd.json`) and a token. The server returns the effective normalized document, excluding test overrides, with a quoted SHA-256 ETag and `Cache-Control: no-cache`. It authenticates before evaluating `If-None-Match`; strong, weak, listed and wildcard matches return 304. HTTP clients send the ETag, bearer token and timeout and reuse their last good document on 304 or a failed refresh. A 304 before any accepted document is an error. If a valid response lacks an ETag, the client computes a quoted SHA-256 of its exact body bytes for its next request. `server.allow-anonymous` defaults to `false`. A blank or root path is refused at startup. Treat bearer tokens as secrets from the environment, and configure positive refresh intervals.
+Enable the flagd-compatible sync endpoint with `server.enabled: true`, a non-root `server.path` (default `/feature-flags/flagd.json`) and a token. The sync route is served on the application port, including when actuator endpoints use a separate management port. The server returns the effective normalized document, excluding test overrides, with a quoted SHA-256 ETag and `Cache-Control: no-cache`. It authenticates before evaluating `If-None-Match`; strong, weak, listed and wildcard matches return 304. HTTP clients send the ETag, bearer token and timeout and reuse their last good document on 304 or a failed refresh. A 304 before any accepted document is an error. If a valid response lacks an ETag, the client computes a quoted SHA-256 of its exact body bytes for its next request. `server.allow-anonymous` defaults to `false`. A blank or root path is refused at startup. Treat bearer tokens as secrets from the environment, and configure positive refresh intervals.
 
 ## Observability
 
 `feature_flag_evaluations_total{flag,variant,reason}` counts non-preview evaluations; errors use variant `none`, reason `ERROR`. `FeatureFlagsChanged` reports effective set changes and `FeatureFlagUpdated` follows a committed store write. `events.evaluations: true` opts into `FeatureFlagEvaluated` exposure events. Preview suppresses exposures. Exposure snapshots inspect at most 10,000 value occurrences; above that, the exposure is omitted with a DEBUG diagnostic while evaluation and metrics continue. Health and the flags actuator surface source state and expired flag debt. `metadata.expires` is advisory and does not disable evaluation.
 
+Metric label cardinality grows with distinct flag keys, variants and reasons. Keep flag and variant names bounded and stable; do not encode user IDs or request values in them.
+
 ## Testing
 
-`override_flags({"new-checkout": True})` works as a context manager or decorator and restores the prior provider/registry state on exit. The `feature_flags` pytest fixture provides per-test overrides. For integration tests, boot the actual application, use an isolated datasource and exercise the mapped route through `httpx.AsyncClient` with `ASGITransport` in the same event loop. [Lumen's rollout tests](https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/samples/lumen/tests/test_feature_flags.py) cover the runnable example. Avoid assuming a preview represents a recorded exposure.
+`override_flags({"new-checkout": True})` works as a context manager or decorator and restores the prior provider/registry state on exit. The `feature_flags` pytest fixture provides per-test overrides. For integration tests, boot the actual application, use an isolated datasource and exercise the mapped route through `httpx.AsyncClient` with `ASGITransport` in the same event loop. [Lumen's rollout tests](https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/samples/lumen/tests/test_feature_flags.py) cover the runnable example. Avoid assuming a preview represents a recorded exposure. Overrides invoked from a worker thread update evaluations synchronously, but their change events are handed to the application event loop asynchronously; wait for the event when asserting observer effects.
 
 ## Configuration reference
 
@@ -151,16 +161,16 @@ All keys below live under `pyfly.feature-flags`:
 | `enabled` | `false` | Register the subsystem |
 | `openfeature.domain` | `""` | Use the default provider; set a domain to isolate applications sharing a process |
 | `flags`, `evaluators` | empty | Configuration definitions and shared rules |
-| `sources.file.enabled`, `.path`, `.refresh-interval` | disabled | Watched JSON/YAML document |
-| `sources.http.enabled`, `.url`, `.token`, `.timeout`, `.refresh-interval` | disabled | Remote sync document |
-| `sources.store.enabled`, `.driver`, `.datasource`, `.refresh-interval` | disabled | Memory or database writable layer |
+| `sources.file.enabled`, `.path`, `.refresh-interval` | `false`, `""`, `5s` | Watched JSON/YAML document |
+| `sources.http.enabled`, `.url`, `.token`, `.timeout`, `.refresh-interval` | `false`, `""`, `""`, `2s`, `30s` | Remote sync document |
+| `sources.store.enabled`, `.driver`, `.datasource`, `.refresh-interval` | `false`, `database`, `""`, `5s` | Memory or database writable layer |
 | `context.tenant-attribute`, `.trust-tenant-header` | `tenant`, `false` | Tenant context source |
 | `web.disabled-status` | `404` | Closed route HTTP status |
 | `events.evaluations` | `false` | Opt in to exposure events |
 | `management.writes` | `false` | Permit store mutations |
 | `server.enabled`, `.path`, `.token`, `.allow-anonymous` | disabled, `/feature-flags/flagd.json`, empty, `false` | Sync endpoint and access |
 
-Polling durations must be positive (for example `500ms`, `5s`, `1m`). The [contract](feature-flags-contract.md) governs portable definitions; property binding reports the full invalid key at startup.
+Polling durations must be positive. PyFly accepts plain seconds or unit forms such as `500ms`, `5s`, `1m` and `2h`; ISO-8601 durations such as `PT5S` are not supported. The [contract](feature-flags-contract.md) governs portable definitions; property binding reports the full invalid key at startup.
 
 ## Troubleshooting
 

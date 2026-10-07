@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 GUIDE = ROOT / "docs" / "modules" / "feature-flags.md"
 CONTRACT = ROOT / "docs" / "modules" / "feature-flags-contract.md"
-CONTRACT_SHA256 = "8167a90380cc4c270e4bb73dc21ab357e316a45bbca45a533e7eba01c6293be5"
+CONTRACT_SHA256 = "7c34a0bec7fa5e194264f23f494f6aa80d2a8bb71de85f64e5f8666d54426aaf"
 
 
 def test_guide_is_reachable_and_covers_the_public_workflow() -> None:

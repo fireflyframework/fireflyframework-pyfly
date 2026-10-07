@@ -297,3 +297,98 @@ def test_run_in_context_owns_one_loop_and_always_shuts_down(monkeypatch: pytest.
         assert _introspect.run_in_context(operation, app_class=FlagsApp) == 42
     assert [name for name, loop in seen] == ["start", "run", "stop"]
     assert len({loop for name, loop in seen}) == 1
+
+
+CLI_INPUT = json.loads((Path(__file__).parent / "conformance" / "cli-input-vectors.json").read_text())
+
+
+def _input_args(case: dict[str, Any]) -> list[str]:
+    args = [CLI_INPUT["action"], CLI_INPUT["key"], "--json"]
+    if "context" in case["options"]:
+        args.append("--context=" + case["options"]["context"])
+    return args
+
+
+def _assert_input_result(case: dict[str, Any], result: Any) -> None:
+    assert result.exit_code == case["expect"]["exit"], result.output
+    body = json.loads(result.output)
+    field = "error" if "error" in case["expect"] else "value"
+    assert body[field] == case["expect"][field]
+
+
+@pytest.mark.parametrize("case", CLI_INPUT["cases"], ids=lambda case: case["name"])
+def test_cli_input_vectors_locally(case: dict[str, Any], local_app: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    execute = flags_cmds._execute
+
+    def record(*args: Any) -> None:
+        calls.append(args)
+        execute(*args)
+
+    monkeypatch.setattr(flags_cmds, "_execute", record)
+    result = CliRunner().invoke(flags_group, _input_args(case))
+    _assert_input_result(case, result)
+    assert len(calls) == (0 if case["expect"]["exit"] else 1)
+
+
+async def test_cli_input_vectors_through_served_remote_dispatch() -> None:
+    import asyncio
+    import socket
+
+    import uvicorn
+
+    from pyfly.context.application_context import ApplicationContext
+    from pyfly.core.config import Config
+    from pyfly.web.adapters.starlette.app import create_app
+    from tests.feature_flags.support import wait_until
+
+    context = ApplicationContext(
+        Config(
+            {
+                "pyfly": {
+                    "feature-flags": {"enabled": True, "flags": CLI_INPUT["flags"]},
+                    "management": {"endpoints": {"web": {"exposure": {"include": "*"}}}},
+                }
+            }
+        )
+    )
+    await context.start()
+    app = create_app(context=context, actuator_enabled=True, docs_enabled=False)
+    requests = []
+
+    async def recorded(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            requests.append(scope["path"])
+        await app(scope, receive, send)
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    server = uvicorn.Server(uvicorn.Config(recorded, lifespan="off", log_config=None, access_log=False, ws="none"))
+    task = asyncio.create_task(server.serve(sockets=[sock]))
+    try:
+        await wait_until(lambda: server.started)
+        for case in CLI_INPUT["cases"]:
+            before = len(requests)
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "from pyfly.cli.main import cli; cli()",
+                "flags",
+                *_input_args(case),
+                "--url",
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+            assert process.returncode == case["expect"]["exit"], stderr.decode()
+            body = json.loads(stdout)
+            field = "error" if "error" in case["expect"] else "value"
+            assert body[field] == case["expect"][field], case["name"]
+            assert len(requests) - before == (0 if case["expect"]["exit"] else 1), case["name"]
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(task, timeout=5)
+        sock.close()
+        await context.stop()

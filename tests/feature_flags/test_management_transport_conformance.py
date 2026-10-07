@@ -62,6 +62,8 @@ async def test_management_transport_vector(case: dict[str, Any]) -> None:
             if "error" in case["expect"]:
                 assert body["error"] == case["expect"]["error"]
                 assert body["message"]
+            if "value" in case["expect"]:
+                assert body["value"] == case["expect"]["value"]
             if "actor" in case["expect"]:
                 detail = (await client.get("/actuator/flags/kill")).json()
                 assert detail["history"][0]["actor"] == case["expect"]["actor"]

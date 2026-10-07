@@ -200,9 +200,9 @@ def _wrap_class(cls: type, gate: _Gate) -> type:
             continue
         attribute = inspect.getattr_static(cls, name)
         if (
-            isinstance(attribute, staticmethod | classmethod)
+            isinstance(attribute, staticmethod | classmethod | functools.partialmethod)
             or inspect.isfunction(attribute)
-            or inspect.ismethoddescriptor(attribute)
+            or (inspect.ismethoddescriptor(attribute) and callable(attribute))
         ):
             originals[name] = attribute
     class_methods: dict[str, tuple[Any, Any]] = {}

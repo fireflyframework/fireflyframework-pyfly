@@ -184,11 +184,14 @@ def delete_cmd(key: str, expected_version: int | None, url: str | None, as_json:
 def evaluate_cmd(key: str, context_json: str | None, targeting_key: str | None, url: str | None, as_json: bool) -> None:
     """Preview an evaluation (no metric, no exposure event)."""
     body: dict[str, Any] = {"action": "evaluate"}
-    if context_json:
+    if context_json is not None:
         try:
-            body["context"] = json.loads(context_json)
+            context = json.loads(context_json)
         except ValueError as error:
             _fail("bad-request", f"--context is not JSON: {error}", as_json=as_json)
+        if not isinstance(context, dict):
+            _fail("bad-request", "--context must be a JSON object", as_json=as_json)
+        body["context"] = context
     if targeting_key:
         body["targetingKey"] = targeting_key
     _execute(key, body, url, as_json)

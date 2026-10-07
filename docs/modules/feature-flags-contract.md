@@ -347,6 +347,15 @@ unknown selectors still answer 404. Malformed JSON, an empty body, or a non-obje
 authenticated principal's name, or `actuator`, `cli:<os-user>` or `admin` when there is none. This fallback comes
 from the trusted calling channel: HTTP query parameters, headers and body fields cannot select the admin actor.
 
+For an HTTP `evaluate` request, an omitted or null `context` means no explicit attributes. A supplied non-null
+context must be a JSON object; arrays (including `[]`) and scalars are `bad-request`. This JSON boundary does not
+change either framework's native empty-map representation.
+
+The CLI `evaluate` option `--context`, when supplied, must contain the text of a JSON object. Empty text, whitespace,
+malformed JSON, JSON null, arrays and scalars are `bad-request` with exit 1; `--json` preserves the portable error
+body. Omitting the option or supplying `{}` provides no explicit attributes. This input check applies before local
+or remote dispatch and never performs an evaluation or write for invalid input.
+
 ## Telemetry and events
 
 - Counter `feature_flag_evaluations_total` with labels `flag`, `variant` (`none` when there is no variant) and

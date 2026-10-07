@@ -19,7 +19,7 @@ import inspect
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from functools import partialmethod
+from functools import cached_property, partialmethod
 from typing import Any
 
 import httpx
@@ -391,3 +391,42 @@ def test_the_gate_imports_without_openfeature() -> None:
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ran"
+
+
+@pytest.mark.parametrize("default", [False, True])
+def test_class_gate_preserves_data_descriptors_without_evaluating_them(default: bool) -> None:
+    reads = []
+
+    class Descriptor:
+        def __get__(self, instance: Any, owner: type | None = None) -> int:
+            reads.append(instance)
+            return 43
+
+    class Parent:
+        data = Descriptor()
+
+        @cached_property
+        def answer(self) -> int:
+            reads.append(self)
+            return 42
+
+    data = inspect.getattr_static(Parent, "data")
+    answer = inspect.getattr_static(Parent, "answer")
+
+    @feature_flag("missing", default=default)
+    class Child(Parent):
+        def run(self) -> str:
+            return "ran"
+
+    assert reads == []
+    assert inspect.getattr_static(Child, "data") is data
+    assert inspect.getattr_static(Child, "answer") is answer
+    child = Child()
+    assert child.answer == child.answer == 42
+    assert child.data == 43
+    assert reads == [child, child]
+    if default:
+        assert child.run() == "ran"
+    else:
+        with pytest.raises(FeatureFlagDisabledException):
+            child.run()
