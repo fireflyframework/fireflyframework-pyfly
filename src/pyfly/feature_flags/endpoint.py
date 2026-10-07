@@ -39,6 +39,8 @@ class FlagsEndpoint:
     """GET lists and inspects flags; POST runs management actions."""
 
     supports_selector = True
+    selector_not_found_error = "unknown-flag"
+    invalid_body_error = "bad-request"
 
     def __init__(self, context: ApplicationContext) -> None:
         self._context = context

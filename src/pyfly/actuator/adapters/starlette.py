@@ -168,11 +168,19 @@ def _make_refresh_routes(ep: RefreshEndpoint, bp: str) -> list[Route]:
     return [Route(f"{bp}/refresh", post_handler, methods=["POST"])]
 
 
+def _endpoint_error(ep: object, attribute: str, message: str) -> dict[str, str]:
+    """Endpoints may opt into stable transport error codes without changing other endpoint responses."""
+    code = getattr(ep, attribute, None)
+    return {"error": code, "message": message} if isinstance(code, str) and code else {"error": message}
+
+
 def _make_generic_routes(eid: str, ep: object, bp: str) -> list[Route]:
     """Generic endpoint — ``GET /actuator/{id}`` plus an optional
     ``GET /actuator/{id}/{selector}`` drill-down when the endpoint opts in via
     ``supports_selector = True``, and ``POST`` on the same paths when the endpoint
-    declares a ``@write_operation`` (see :func:`pyfly.actuator.ports.write_operation`)."""
+    declares a ``@write_operation`` (see :func:`pyfly.actuator.ports.write_operation`).
+    Optional ``selector_not_found_error`` and ``invalid_body_error`` strings select
+    portable codes for those transport errors; the diagnostic text becomes ``message``."""
 
     async def handler(request: Request) -> JSONResponse:
         data = await ep.handle({"query": dict(request.query_params)})  # type: ignore[attr-defined]
@@ -189,7 +197,9 @@ def _make_generic_routes(eid: str, ep: object, bp: str) -> list[Route]:
                 {"selector": selector, "query": dict(request.query_params)}
             )
             if data is None:
-                return JSONResponse({"error": f"No such {eid}: {selector}"}, status_code=404)
+                return JSONResponse(
+                    _endpoint_error(ep, "selector_not_found_error", f"No such {eid}: {selector}"), status_code=404
+                )
             return JSONResponse(data)
 
         routes.append(Route(f"{bp}/{eid}/{{selector:path}}", selector_handler, methods=["GET"]))
@@ -207,7 +217,9 @@ def _make_generic_routes(eid: str, ep: object, bp: str) -> list[Route]:
             except ValueError:
                 body = None
             if not isinstance(body, dict):
-                return JSONResponse({"error": "request body is not a JSON object"}, status_code=400)
+                return JSONResponse(
+                    _endpoint_error(ep, "invalid_body_error", "request body is not a JSON object"), status_code=400
+                )
             context = {"query": dict(request.query_params), "selector": request.path_params.get("selector")}
             result = await write(body, context)
             if result is None:
