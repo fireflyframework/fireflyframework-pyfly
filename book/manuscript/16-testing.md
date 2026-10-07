@@ -57,14 +57,17 @@ You should see a row of dots — one per test — followed by a summary line:
 
 ```text
 ..s.s........................................                            [100%]
-43 passed, 2 skipped in 0.28s
+48 passed, 2 skipped in 1.26s
 ```
 
-Forty-three passing tests, under a third of a second, no Docker and no external
+Forty-eight passing tests, about a second on this checkout, no Docker and no external
 process. (The two skipped ones are the PostgreSQL runs of the concurrency test from
 Chapter 5; they need `LUMEN_TEST_POSTGRES_URL`.) That speed is the whole point of the pyramid: the fast base catches most
 regressions before the slower integration layers ever run. If you instead see
 `No module named pytest`, you forgot `--extra dev` — re-run with it.
+
+!!! note "Feature Flags in Lumen"
+    Appendix F uses Lumen's executable rollout tests and shows override restoration; the complete suite also verifies store transactions.
 
 ---
 
@@ -1365,19 +1368,19 @@ time to confirm the full pyramid is green together:
 uv run --extra dev pytest -q
 ```
 
-Expected output — the same `43 passed` you started with, now with a mental model of
+Expected output — the same `48 passed` you started with, now with a mental model of
 exactly what each dot proves:
 
 ```text
 ..s.s........................................                            [100%]
-43 passed, 2 skipped in 0.28s
+48 passed, 2 skipped in 1.26s
 ```
 
 ---
 
 ## What you built {.recap}
 
-The six test files this chapter built add up to 26 passing tests, exercising every layer of the pyramid. Together with the saga tests from Chapter 12, the event-sourcing tests from Chapter 9, and the concurrency test from Chapter 5, Lumen's full suite is **43 passing tests** (and two PostgreSQL cases that skip without a server) — the count you saw when you ran `uv run --extra dev pytest -q` at the start.
+The six test files this chapter built add up to 26 passing tests, exercising every layer of the pyramid. Together with the saga tests from Chapter 12, the event-sourcing tests from Chapter 9, the concurrency test from Chapter 5, and five feature-flag tests from Appendix F, Lumen's full suite is **48 passing tests** (and two PostgreSQL cases that skip without a server) — the count you saw when you ran `uv run --extra dev pytest -q` at the start.
 
 At the base, `test_money.py` and `test_wallet_aggregate.py` prove the domain model's arithmetic, immutability, and invariant rules. All tests are synchronous, pure Python functions — no fixtures, no DI, no `async`. The `BusinessRuleViolation.rule` attribute makes each assertion specific to the exact violated invariant.
 

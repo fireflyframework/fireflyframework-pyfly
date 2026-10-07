@@ -12,6 +12,9 @@ validada: una con documentación OpenAPI automática, respuestas de error
 estructuradas en las que los clientes pueden confiar y las convenciones
 gestionadas por el framework que ya esperas del resto de PyFly.
 
+!!! note "Feature Flags en Lumen"
+    El Apéndice F añade una ruta opcional de ofertas y explica su alternativa y estado HTTP.
+
 ---
 
 !!! note "Aplicaciones HTML y administración de modelos"

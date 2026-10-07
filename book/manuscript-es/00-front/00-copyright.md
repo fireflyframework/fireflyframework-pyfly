@@ -11,3 +11,5 @@ Salvo que lo exija la legislación aplicable o se acuerde por escrito, el softwa
 Los capítulos originales de Lumen corresponden a PyFly 26.6.x. El Apéndice E documenta la implementación de aplicaciones web y administración de modelos del checkout 26.9.5 que acompaña al libro; ejecuta su catálogo desde ese checkout.
 
 Publicado por la Firefly Software Foundation.
+
+El Apéndice F documenta la implementación de feature flags del checkout adjunto y el despliegue probado en Lumen.

@@ -41,6 +41,7 @@ The PyFly CLI provides command-line tools for project scaffolding, application m
   - [pyfly metrics](#pyfly-metrics)
   - [pyfly conditions](#pyfly-conditions)
   - [pyfly actuator](#pyfly-actuator)
+- [pyfly flags](#pyfly-flags)
 - [pyfly shell](#pyfly-shell)
 - [pyfly openapi](#pyfly-openapi)
 - [Development Workflow](#typical-development-workflow)
@@ -1310,6 +1311,28 @@ pyfly actuator loggers --url http://prod:8080 --json | jq '.loggers | keys'
 # Inspect thread dump
 pyfly actuator threaddump --url http://localhost:8080
 ```
+
+---
+
+### pyfly flags
+
+Inspect, preview and change feature flags. Install the `feature-flags` extra and set `pyfly.feature-flags.enabled: true`. Without `--url`, each command boots the local application; with `--url`, it calls the running application's `/actuator/flags` endpoint. The endpoint must be exposed and its management authentication configured. Writes also require `pyfly.feature-flags.management.writes: true` and an enabled writable store. For the sequence below, define `wallet-offer` in configuration and use a database store so writes persist between local command boots.
+
+```bash
+printf '%s\n' '{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"}' > wallet-offer.json
+pyfly flags list --json
+pyfly flags show wallet-offer --json
+pyfly flags enable wallet-offer --expected-version 0
+pyfly flags disable wallet-offer
+pyfly flags default-variant wallet-offer on
+pyfly flags put wallet-offer --file wallet-offer.json
+pyfly flags delete wallet-offer
+pyfly flags evaluate wallet-offer --context '{"plan":"pro"}' \
+  --targeting-key user-42 --json
+pyfly flags list --url http://localhost:9090 --json
+```
+
+Each subcommand accepts `--url URL` and `--json`; write commands also accept `--expected-version N`. `put --file -` reads a JSON definition from standard input. `evaluate` is a preview with explicit context and optional targeting key; it records no metric or exposure event. `--json` prints a portable management error body and exits 1 on a refusal. A successful write may return `{"key":"wallet-offer","refreshPending":true}` when the local effective definition is not yet visible; poll `show` or GET `/actuator/flags/wallet-offer`. Local writes record `cli:<os-user>` as actor; remote writes record the authenticated principal or `actuator`. See the [Feature Flags guide](modules/feature-flags.md#managing-flags-at-runtime) for source precedence and write semantics.
 
 ---
 

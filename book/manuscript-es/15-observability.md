@@ -34,6 +34,9 @@ Por último, verás cómo la **programación orientada a aspectos** (AOP) aplica
 
 Al final del capítulo Lumen producirá logs JSON estructurados con identificadores de correlación y enmascaramiento automático de PII, emitirá métricas Prometheus recolectadas por cualquier colector estándar, propagará spans de trazas OpenTelemetry a través de las fronteras entre servicios, responderá a las sondas de liveness y readiness de Kubernetes y mostrará todo lo anterior en un panel de configuración cero accesible en `/admin`.
 
+!!! note "Feature Flags en Lumen"
+    El Apéndice F conecta métricas, eventos de exposición, salud y el actuador de flags con Lumen.
+
 ---
 
 !!! note "Aplicaciones HTML y administración de modelos"

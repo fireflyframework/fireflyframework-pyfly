@@ -129,6 +129,7 @@ Bridge to the rest of your stack — outbound webhooks, inbound webhooks, identi
 | [ECM (Content Management)](ecm.md) | Document storage, metadata, folders, e-signature ports + adapters |
 | [Plugins](plugins.md) | `@plugin`, `@extension`, `@extension_point`, `PluginManager`, dependency resolution |
 | [Rule Engine](rule-engine.md) | YAML DSL, AST, batch evaluation, repository |
+| [Feature Flags](feature-flags.md) | OpenFeature and flagd, sources, targeting, gates, store, sync and [shared contract](feature-flags-contract.md) |
 
 ---
 
