@@ -15,7 +15,7 @@ class Doc:
     title: str
     xhtml_body: str
     in_nav: bool = True
-    kind: str = "chapter"        # front | toc | divider | chapter
+    kind: str = "chapter"        # front | toc | divider | chapter | cover
     part: str | None = None      # part label (e.g. "Part I — Foundations") for grouping
     num: int | str | None = None # chapter number, when kind == "chapter"
 
@@ -51,7 +51,7 @@ class EpubBuilder:
     def _xhtml(self, d: Doc) -> str:
         links = "\n".join(f'<link rel="stylesheet" href="style{i}.css"/>'
                           for i in range(len(self.css)))
-        sec_class = {"toc": "toc", "divider": "part-divider"}.get(d.kind, "chapter")
+        sec_class = {"toc": "toc", "divider": "part-divider", "cover": "cover-page"}.get(d.kind, "chapter")
         return (f'<?xml version="1.0" encoding="utf-8"?>\n'
                 f'<html xmlns="http://www.w3.org/1999/xhtml" '
                 f'xmlns:epub="http://www.idpf.org/2007/ops" lang="{self.language}">\n'
@@ -87,11 +87,12 @@ class EpubBuilder:
         if cur_part is not None:
             out.append("</ol></li>")
         items = "\n".join(out)
+        label = escape(next((d.title for d in self.docs if d.kind == "toc"), "Contents"))
         return ('<?xml version="1.0" encoding="utf-8"?>\n'
                 '<html xmlns="http://www.w3.org/1999/xhtml" '
-                'xmlns:epub="http://www.idpf.org/2007/ops"><head><meta charset="utf-8"/>'
-                '<title>Contents</title></head><body>'
-                f'<nav epub:type="toc" id="toc"><h1>Contents</h1><ol>{items}</ol></nav>'
+                f'xmlns:epub="http://www.idpf.org/2007/ops" lang="{self.language}"><head><meta charset="utf-8"/>'
+                f'<title>{label}</title></head><body>'
+                f'<nav epub:type="toc" id="toc"><h1>{label}</h1><ol>{items}</ol></nav>'
                 '</body></html>')
 
     def _opf(self) -> str:

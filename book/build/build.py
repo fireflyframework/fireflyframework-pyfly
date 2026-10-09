@@ -1,4 +1,4 @@
-"""Build *PyFly by Example* into EPUB + PDF from a book manifest.
+"""Build *pyfly by example* into EPUB + PDF from a book manifest.
 
 Defaults to ``book.yaml`` (English). Pass ``--config book.es.yaml`` to build the
 Spanish edition; each manifest names its own ``manuscript_dir``, ``language``,
@@ -12,7 +12,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 import yaml  # PyYAML ships with the framework env; ensure installed in book/.venv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -128,8 +128,40 @@ def _divider_html(eyebrow: str, ptitle: str) -> str:
             f'<h1 class="part-title">{escape(ptitle)}</h1></div>')
 
 
+def _cover_items(cfg: dict) -> dict[str, dict]:
+    """Resolve configured artwork before writing any edition output."""
+    covers = {}
+    labels = cfg.get("labels", {})
+    for cid, key, label in (("cover", "cover", "Front cover"),
+                            ("back-cover", "back_cover", "Back cover")):
+        filename = cfg.get(f"{key}_png")
+        if not filename:
+            continue
+        path = BOOK / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Configured cover artwork is missing: {path}")
+        title = labels.get(key, label)
+        covers[cid] = {"id": cid, "path": path, "filename": filename, "title": title,
+                       "alt": cfg.get(f"{key}_alt", f"{title}: {cfg['title']}")}
+    return covers
+
+
+def _add_epub_cover(epub: EpubBuilder, cover: dict) -> None:
+    cid = cover["id"]
+    href = f"art/{cid}.png"
+    epub.add_file(cover["path"], href, f"{cid}-img",
+                  properties="cover-image" if cid == "cover" else "")
+    epub.add_doc(Doc(id=cid, title=cover["title"], kind="cover",
+                     xhtml_body=f'<img src={quoteattr(href)} alt={quoteattr(cover["alt"])}/>'))
+
+
+def _pdf_cover(cover: dict) -> str:
+    return (f'<section class="cover-page" id="{cover["id"]}">'
+            f'<img src={quoteattr(cover["filename"])} alt={quoteattr(cover["alt"])}/></section>')
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Build PyFly by Example (EPUB + PDF).")
+    ap = argparse.ArgumentParser(description="Build pyfly by example (EPUB + PDF).")
     ap.add_argument("--config", default="book.yaml",
                     help="Manifest file under book/ (default: book.yaml).")
     ap.add_argument("--out", default=None,
@@ -146,13 +178,13 @@ def main(argv: list[str] | None = None) -> int:
     css_text = [(THEME / "book.css").read_text(), (THEME / "tokens.css").read_text(),
                 (THEME / "pygments.css").read_text()]
     items = _items_from_manifest(cfg, man, contents_label=contents_label)
+    covers = _cover_items(cfg)
 
     # ---- EPUB ----
     epub = EpubBuilder(title=cfg["title"], author=cfg["author"], language=cfg["language"],
                        identifier=cfg["identifier"], css=css_text)
-    cover_png = BOOK / cfg["cover_png"]
-    if cover_png.exists():
-        epub.add_file(cover_png, "art/cover.png", "cover-img", properties="cover-image")
+    if "cover" in covers:
+        _add_epub_cover(epub, covers["cover"])
     for it in items:
         if it["kind"] == "toc":
             body = _toc_html(items, href_fmt="{cid}.xhtml", label=contents_label)
@@ -167,13 +199,15 @@ def main(argv: list[str] | None = None) -> int:
             epub.add_doc(Doc(id=it["id"], title=it["title"], xhtml_body=body,
                              in_nav=it.get("in_nav", True), kind=it["kind"],
                              part=it.get("part"), num=it.get("num")))
+    if "back-cover" in covers:
+        _add_epub_cover(epub, covers["back-cover"])
     args.out_dir.mkdir(parents=True, exist_ok=True)
     epub.build(args.out_dir / f"{out_base}.epub")
 
     # ---- PDF (single concatenated document) ----
     parts_html: list[str] = []
-    if cover_png.exists():
-        parts_html.append(f'<div class="cover-page"><img src="{cfg["cover_png"]}"/></div>')
+    if "cover" in covers:
+        parts_html.append(_pdf_cover(covers["cover"]))
     for it in items:
         if it["kind"] == "toc":
             body = _toc_html(items, href_fmt="#{cid}", label=contents_label)
@@ -184,7 +218,12 @@ def main(argv: list[str] | None = None) -> int:
         else:  # front | chapter
             body = render_markdown(Path(it["path"]).read_text(encoding="utf-8"), BOOK)
             parts_html.append(f'<section class="chapter" id="{it["id"]}">{body}</section>')
-    full = ("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+    if "back-cover" in covers:
+        parts_html.append(_pdf_cover(covers["back-cover"]))
+    full = (f'<!DOCTYPE html><html lang={quoteattr(cfg["language"])}><head><meta charset="utf-8">'
+            f'<title>{escape(cfg["title"])}</title>'
+            f'<meta name="author" content={quoteattr(cfg["author"])}>'
+            f'<meta name="description" content={quoteattr(cfg.get("subtitle", ""))}></head><body>'
             + "\n".join(parts_html) + "</body></html>")
     render_pdf(full, base_url=BOOK,
                css_paths=[THEME / "tokens.css", THEME / "pygments.css",
