@@ -1,49 +1,49 @@
 /* ============================================================
-   PyFly docs theme — MkDocs Material, cosmic-green identity.
+   pyfly docs theme — shared Firefly ink, warm neutrals and amber identity.
    Mirrors the brand palette in assets/ (banner.svg, diagrams).
    ============================================================ */
 
-/* ---- custom primary (deep green header in both schemes) ---- */
+/* ---- custom primary (ink header in both schemes) ---- */
 [data-md-color-primary="custom"] {
-  --md-primary-fg-color: #1f5e16;
-  --md-primary-fg-color--light: #2c8a1c;
-  --md-primary-fg-color--dark: #143f0f;
-  --md-primary-bg-color: #f4f9ee;
-  --md-primary-bg-color--light: #f4f9eeb3;
+  --md-primary-fg-color: #10110f;
+  --md-primary-fg-color--light: #8a5714;
+  --md-primary-fg-color--dark: #090a08;
+  --md-primary-bg-color: #f3f1eb;
+  --md-primary-bg-color--light: #f3f1ebb3;
 }
 
 [data-md-color-accent="custom"] {
-  --md-accent-fg-color: #4cbb2f;
-  --md-accent-fg-color--transparent: #4cbb2f1f;
+  --md-accent-fg-color: #8a5714;
+  --md-accent-fg-color--transparent: #8a57141f;
   --md-accent-bg-color: #ffffff;
   --md-accent-bg-color--light: #ffffffb3;
 }
 
 /* ---- light scheme ---- */
 [data-md-color-scheme="default"] {
-  --md-typeset-a-color: #2c8a1c;
-  --md-footer-bg-color: #0a1410;
-  --md-footer-bg-color--dark: #07110b;
+  --md-typeset-a-color: #8a5714;
+  --md-footer-bg-color: #10110f;
+  --md-footer-bg-color--dark: #090a08;
 }
 
-/* ---- dark scheme: cosmic green-tinted ---- */
+/* ---- dark scheme: warm neutral ---- */
 [data-md-color-scheme="slate"] {
-  --md-hue: 145;
-  --md-default-bg-color: #0b150e;
-  --md-default-bg-color--light: #0e1812;
-  --md-default-fg-color: #e9f2e2;
-  --md-default-fg-color--light: #bacbb0;
-  --md-default-fg-color--lighter: #85957e;
-  --md-default-fg-color--lightest: #3a4a33;
-  --md-code-bg-color: #07110b;
-  --md-code-fg-color: #cdddc2;
-  --md-typeset-a-color: #7ed321;
-  --md-accent-fg-color: #c2e85f;
-  --md-footer-bg-color: #07110b;
-  --md-footer-bg-color--dark: #060d08;
+  --md-hue: 70;
+  --md-default-bg-color: #171813;
+  --md-default-bg-color--light: #1e2019;
+  --md-default-fg-color: #f3f1eb;
+  --md-default-fg-color--light: #bfb8ab;
+  --md-default-fg-color--lighter: #a6a295;
+  --md-default-fg-color--lightest: #46483f;
+  --md-code-bg-color: #090a08;
+  --md-code-fg-color: #dedbd2;
+  --md-typeset-a-color: #ffb34a;
+  --md-accent-fg-color: #ffd69a;
+  --md-footer-bg-color: #090a08;
+  --md-footer-bg-color--dark: #090a08;
 }
 
-/* ---- Maven Pro for headings & chrome (matches the wordmark) ---- */
+/* ---- System sans for headings; the canonical wordmark is outlined ---- */
 .md-typeset h1,
 .md-typeset h2,
 .md-typeset h3,
@@ -52,12 +52,12 @@
 .md-nav__title,
 .md-tabs__link,
 .md-ellipsis {
-  font-family: "Maven Pro", system-ui, sans-serif;
+  font-family: system-ui, sans-serif;
 }
 .md-typeset h1,
 .md-typeset h2 { letter-spacing: -0.01em; font-weight: 700; }
 
-/* green title rule under H2 — a brand motif from the README/book */
+/* amber title rule under H2 — a brand motif from the README/book */
 .md-typeset h2 {
   border-bottom: 1px solid var(--md-default-fg-color--lightest);
   padding-bottom: 0.35em;
@@ -70,25 +70,29 @@
   margin-right: 0.45em;
   vertical-align: -1px;
   border-radius: 50%;
-  background: radial-gradient(circle, #dff58a 0%, #7ed321 45%, rgba(76, 187, 47, 0) 72%);
+  background: radial-gradient(circle, #ffd69a 0%, #ffb34a 45%, rgba(255, 179, 74, 0) 72%);
 }
 
-/* logo: give the firefly mark a soft glow on the header */
+/* Keep the official family wordmark proportional on the dark header. */
+.md-header__button.md-logo { padding-top: 0; padding-bottom: 0; }
 .md-header__button.md-logo img {
-  filter: drop-shadow(0 0 6px rgba(194, 232, 95, 0.5));
+  width: auto;
+  height: 2rem;
+  max-width: 8rem;
+  filter: none;
 }
 
 /* hero/landing back-link affordance in the header title */
 .md-header__title { font-weight: 700; }
 
-/* code copy + admonition accents stay green via accent var; nudge inline code */
+/* code copy + admonition accents follow the theme via accent var; nudge inline code */
 [data-md-color-scheme="slate"] .md-typeset code {
-  background-color: rgba(126, 211, 33, 0.1);
+  background-color: rgba(255, 179, 74, 0.1);
 }
 
-/* search highlight + active nav in brand green */
+/* search highlight + active nav in brand amber */
 .md-nav__link--active,
 .md-nav__item .md-nav__link--active { color: var(--md-typeset-a-color); }
 
 /* tables: subtle brand border */
-.md-typeset table:not([class]) th { background: rgba(126, 211, 33, 0.08); }
+.md-typeset table:not([class]) th { background: rgba(255, 179, 74, 0.08); }

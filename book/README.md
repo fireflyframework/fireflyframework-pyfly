@@ -1,4 +1,4 @@
-# PyFly by Example
+# pyfly by example
 
 The English and Spanish editions follow Lumen through 18 chapters and five parts.
 Appendix E adds the [native catalog webapp](../samples/webapp/README.md). Appendix F
@@ -7,11 +7,11 @@ wallet offer route, shared targeting fixture, runtime gates and operator workflo
 
 | Edition | PDF | EPUB |
 |---|---|---|
-| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.epub) |
-| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.epub) |
+| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example.epub) |
+| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example-es.epub) |
 
-These links download the latest published release assets. For a specific version,
-open its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
+These links download the 2026-10-08 book edition, published independently of the
+framework package. For other editions, open the [tagged releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
 and download the books attached to that tag.
 
 ## Sources and examples
@@ -49,8 +49,8 @@ On Linux use the distribution's Pango packages. `--out-dir` directs the four
 deliverables to an isolated directory; omitting it keeps the interactive default
 of `book/dist/`. The release workflow builds both editions from the checked-out
 tag, validates their structure, and publishes them with a SHA256 manifest that
-records the source commit. Existing covers are reused when their sources have
-not changed.
+records the source commit. Builds use the checked-in localized artwork; validate it with
+`book/build/gen_cover.py` before publishing.
 
 Listings use `::: listing path.py | Caption` and a closing `:::`. Figures use
 `::: figure art/name.svg | Caption`. Fenced code also works inside callouts. Python
@@ -69,3 +69,24 @@ book/.venv/bin/python -m http.server --directory _site 8000
 The local website is served at `http://localhost:8000/`; its reference documentation
 is under `/docs/`. The site build copies the existing landing page and brand assets.
 Book PDFs/EPUBs are separate deliverables linked from the repository and release pages.
+
+## Branded front and back covers
+
+The English and Spanish manifests select their own front/back SVG and PNG files
+under `art/`. See [artwork provenance](art/PROVENANCE.md) for the canonical brand
+kit source and delivered asset hashes. The SVG typography is outlined; the build
+needs no author-machine fonts for the covers.
+
+```bash
+book/.venv/bin/python book/build/gen_cover.py
+```
+
+This validates all four SVG/PNG pairs without modifying them. Use an explicit
+`--render` only to rasterize the checked-in SVGs again. The book build fails if a
+configured PNG is missing. Covers fill the PDF trim without running text; EPUB
+editions include accessible front/back documents and localized navigation.
+
+Book-only editions can be published separately under `books-*` tags and must not
+be marked as the latest framework release. Keep the book source commit and asset
+checksums with the edition. A book-only edition does not change framework package
+versions or replace the assets attached to an existing framework version.

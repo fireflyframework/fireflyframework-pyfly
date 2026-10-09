@@ -1,134 +1,134 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 460"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 522.4"
      role="img" aria-label="Event sourcing: a TransferFunds command appends events to an append-only event store (WalletOpened, FundsDeposited, FundsWithdrawn); replaying the immutable stream rebuilds the Wallet aggregate state, an optional snapshot accelerates replay, and a projection builds a read model"
-     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" data-original-view-box="0 0 800 460">
   <defs>
     <linearGradient id="es-head" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#4cbb2f"/>
-      <stop offset="1" stop-color="#3a9e23"/>
+      <stop offset="0" stop-color="#10110f"/>
+      <stop offset="1" stop-color="#10110f"/>
     </linearGradient>
     <linearGradient id="es-head-slate" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#5b7a9d"/>
       <stop offset="1" stop-color="#3f5b7a"/>
     </linearGradient>
     <marker id="es-fwd" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
-      <path d="M0 0L7 3.2L0 6.4Z" fill="#3a9e23"/>
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#10110f"/>
     </marker>
     <marker id="es-read" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
       <path d="M0 0L7 3.2L0 6.4Z" fill="#5b7a9d"/>
     </marker>
     <marker id="es-amber" markerWidth="9" markerHeight="9" refX="6.5" refY="3.2" orient="auto">
-      <path d="M0 0L7 3.2L0 6.4Z" fill="#ffc24b"/>
+      <path d="M0 0L7 3.2L0 6.4Z" fill="#ffb34a"/>
     </marker>
     <filter id="es-sh" x="-20%" y="-20%" width="140%" height="160%">
-      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f5e16" flood-opacity="0.18"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#10110f" flood-opacity="0.18"/>
     </filter>
   </defs>
 
   <!-- outer card -->
-  <rect x="6" y="6" width="788" height="448" rx="16" fill="#ffffff" stroke="#e0e8d6" stroke-width="1.5"/>
+  <rect x="6" y="6" width="788" height="448" rx="16" fill="#ffffff" stroke="#dedbd2" stroke-width="1.5"/>
 
   <!-- ===================== row 1: command -> append ===================== -->
-  <text x="34" y="48" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">WRITE</text>
-  <path d="M84 43 L98 43 M93 39.5 L98 43 L93 46.5" fill="none" stroke="#2c8a1c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="34" y="48" fill="#8a5714" font-size="11" font-weight="700" letter-spacing="0.08em">WRITE</text>
+  <path d="M84 43 L98 43 M93 39.5 L98 43 L93 46.5" fill="none" stroke="#8a5714" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- node 1: TransferFunds command -->
   <g filter="url(#es-sh)">
-    <rect x="34" y="62" width="148" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
-    <path d="M34 73a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v17H34Z" fill="url(#es-head)"/>
+    <rect x="34" y="62" width="148" height="78" rx="11" fill="#ffffff" stroke="#10110f" stroke-width="2"/>
+    <path d="M34 73a11 11 0 0 1 11-11h126a11 11 0 0 1 11 11v17H34Z" fill="#10110f"/>
     <text x="108" y="79" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">TransferFunds</text>
   </g>
-  <text x="108" y="112" text-anchor="middle" fill="#33402e" font-size="10.5">command</text>
-  <text x="108" y="128" text-anchor="middle" fill="#7a8472" font-size="9.5">applies new events</text>
-  <circle cx="46" cy="74" r="11" fill="#1f5e16"/>
+  <text x="108" y="112" text-anchor="middle" fill="#62645b" font-size="10.5">command</text>
+  <text x="108" y="128" text-anchor="middle" fill="#62645b" font-size="9.5">applies new events</text>
+  <circle cx="46" cy="74" r="11" fill="#10110f"/>
   <text x="46" y="78.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">1</text>
 
   <!-- command -> event store -->
-  <line x1="184" y1="101" x2="218" y2="101" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#es-fwd)"/>
-  <text x="201" y="92" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">append</text>
+  <line x1="184" y1="101" x2="218" y2="101" stroke="#10110f" stroke-width="2.4" marker-end="url(#es-fwd)"/>
+  <text x="201" y="92" text-anchor="middle" fill="#8a5714" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">append</text>
 
   <!-- ===================== event store (append-only log) ===================== -->
   <g filter="url(#es-sh)">
-    <rect x="224" y="46" width="416" height="110" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
-    <path d="M224 57a11 11 0 0 1 11-11h394a11 11 0 0 1 11 11v17H224Z" fill="url(#es-head)"/>
+    <rect x="224" y="46" width="416" height="110" rx="11" fill="#ffffff" stroke="#10110f" stroke-width="2"/>
+    <path d="M224 57a11 11 0 0 1 11-11h394a11 11 0 0 1 11 11v17H224Z" fill="#10110f"/>
     <text x="432" y="63" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">EventStore  -  append-only log</text>
   </g>
-  <circle cx="236" cy="58" r="11" fill="#1f5e16"/>
+  <circle cx="236" cy="58" r="11" fill="#10110f"/>
   <text x="236" y="62.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">2</text>
 
   <!-- event chip 1: WalletOpened -->
-  <rect x="240" y="90" width="120" height="50" rx="8" fill="#ffffff" stroke="#43b02a" stroke-width="1.6"/>
-  <text x="300" y="109" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="700">WalletOpened</text>
-  <text x="300" y="125" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 1 &#183; owner_id</text>
+  <rect x="240" y="90" width="120" height="50" rx="8" fill="#ffffff" stroke="#8a5714" stroke-width="1.6"/>
+  <text x="300" y="109" text-anchor="middle" fill="#8a5714" font-size="10.5" font-weight="700">WalletOpened</text>
+  <text x="300" y="125" text-anchor="middle" fill="#62645b" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 1 &#183; owner_id</text>
 
-  <line x1="362" y1="115" x2="376" y2="115" stroke="#3a9e23" stroke-width="2" marker-end="url(#es-fwd)"/>
+  <line x1="362" y1="115" x2="376" y2="115" stroke="#10110f" stroke-width="2" marker-end="url(#es-fwd)"/>
 
   <!-- event chip 2: FundsDeposited -->
-  <rect x="378" y="90" width="124" height="50" rx="8" fill="#ffffff" stroke="#43b02a" stroke-width="1.6"/>
-  <text x="440" y="109" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="700">FundsDeposited</text>
-  <text x="440" y="125" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 2 &#183; amount</text>
+  <rect x="378" y="90" width="124" height="50" rx="8" fill="#ffffff" stroke="#8a5714" stroke-width="1.6"/>
+  <text x="440" y="109" text-anchor="middle" fill="#8a5714" font-size="10.5" font-weight="700">FundsDeposited</text>
+  <text x="440" y="125" text-anchor="middle" fill="#62645b" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 2 &#183; amount</text>
 
-  <line x1="504" y1="115" x2="518" y2="115" stroke="#3a9e23" stroke-width="2" marker-end="url(#es-fwd)"/>
+  <line x1="504" y1="115" x2="518" y2="115" stroke="#10110f" stroke-width="2" marker-end="url(#es-fwd)"/>
 
   <!-- event chip 3: FundsWithdrawn -->
-  <rect x="520" y="90" width="116" height="50" rx="8" fill="#ffffff" stroke="#43b02a" stroke-width="1.6"/>
-  <text x="578" y="109" text-anchor="middle" fill="#2c8a1c" font-size="10.5" font-weight="700">FundsWithdrawn</text>
-  <text x="578" y="125" text-anchor="middle" fill="#7a8472" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 3 &#183; amount</text>
+  <rect x="520" y="90" width="116" height="50" rx="8" fill="#ffffff" stroke="#8a5714" stroke-width="1.6"/>
+  <text x="578" y="109" text-anchor="middle" fill="#8a5714" font-size="10.5" font-weight="700">FundsWithdrawn</text>
+  <text x="578" y="125" text-anchor="middle" fill="#62645b" font-size="9" font-family="ui-monospace,Menlo,monospace">seq 3 &#183; amount</text>
 
   <!-- immutable badge -->
-  <rect x="650" y="62" width="116" height="28" rx="14" fill="#ffd86b" stroke="#ffc24b" stroke-width="1.5"/>
-  <path d="M664 76 L669 81 L678 70" fill="none" stroke="#1f5e16" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="722" y="80" text-anchor="middle" fill="#1c2420" font-size="10" font-weight="700">immutable</text>
+  <rect x="650" y="62" width="116" height="28" rx="14" fill="#ffd69a" stroke="#ffb34a" stroke-width="1.5"/>
+  <path d="M664 76 L669 81 L678 70" fill="none" stroke="#10110f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="722" y="80" text-anchor="middle" fill="#10110f" font-size="10" font-weight="700">immutable</text>
 
   <!-- ===================== row 2: replay -> rebuild state ===================== -->
   <!-- replay rail from event store down to replay row -->
-  <path d="M432 156 L432 196 L300 196 L300 222" fill="none" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#es-fwd)"/>
-  <text x="318" y="190" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">replay()</text>
+  <path d="M432 156 L432 196 L300 196 L300 222" fill="none" stroke="#10110f" stroke-width="2.4" marker-end="url(#es-fwd)"/>
+  <text x="318" y="190" text-anchor="middle" fill="#8a5714" font-size="9.5" font-weight="600" font-family="ui-monospace,Menlo,monospace">replay()</text>
 
-  <text x="34" y="232" fill="#2c8a1c" font-size="11" font-weight="700" letter-spacing="0.08em">REBUILD STATE</text>
-  <circle cx="160" cy="227" r="11" fill="#1f5e16"/>
+  <text x="34" y="232" fill="#8a5714" font-size="11" font-weight="700" letter-spacing="0.08em">REBUILD STATE</text>
+  <circle cx="160" cy="227" r="11" fill="#10110f"/>
   <text x="160" y="231.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">3</text>
 
   <!-- fold caption -->
-  <text x="300" y="255" text-anchor="middle" fill="#7a8472" font-size="9.5">fold the stream, event by event</text>
+  <text x="300" y="255" text-anchor="middle" fill="#62645b" font-size="9.5">fold the stream, event by event</text>
 
   <!-- replay chips -->
-  <rect x="222" y="262" width="118" height="26" rx="6" fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
-  <text x="281" y="278" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600">WalletOpened</text>
-  <line x1="342" y1="275" x2="356" y2="275" stroke="#3a9e23" stroke-width="1.8" marker-end="url(#es-fwd)"/>
+  <rect x="222" y="262" width="118" height="26" rx="6" fill="#ffffff" stroke="#8a5714" stroke-width="1.5"/>
+  <text x="281" y="278" text-anchor="middle" fill="#8a5714" font-size="9.5" font-weight="600">WalletOpened</text>
+  <line x1="342" y1="275" x2="356" y2="275" stroke="#10110f" stroke-width="1.8" marker-end="url(#es-fwd)"/>
 
-  <rect x="358" y="262" width="120" height="26" rx="6" fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
-  <text x="418" y="278" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600">FundsDeposited</text>
-  <line x1="480" y1="275" x2="494" y2="275" stroke="#3a9e23" stroke-width="1.8" marker-end="url(#es-fwd)"/>
+  <rect x="358" y="262" width="120" height="26" rx="6" fill="#ffffff" stroke="#8a5714" stroke-width="1.5"/>
+  <text x="418" y="278" text-anchor="middle" fill="#8a5714" font-size="9.5" font-weight="600">FundsDeposited</text>
+  <line x1="480" y1="275" x2="494" y2="275" stroke="#10110f" stroke-width="1.8" marker-end="url(#es-fwd)"/>
 
-  <rect x="496" y="262" width="118" height="26" rx="6" fill="#ffffff" stroke="#43b02a" stroke-width="1.5"/>
-  <text x="555" y="278" text-anchor="middle" fill="#2c8a1c" font-size="9.5" font-weight="600">FundsWithdrawn</text>
+  <rect x="496" y="262" width="118" height="26" rx="6" fill="#ffffff" stroke="#8a5714" stroke-width="1.5"/>
+  <text x="555" y="278" text-anchor="middle" fill="#8a5714" font-size="9.5" font-weight="600">FundsWithdrawn</text>
 
   <!-- chips -> Wallet aggregate -->
-  <line x1="616" y1="275" x2="644" y2="289" stroke="#3a9e23" stroke-width="2.4" marker-end="url(#es-fwd)"/>
+  <line x1="616" y1="275" x2="644" y2="289" stroke="#10110f" stroke-width="2.4" marker-end="url(#es-fwd)"/>
 
   <!-- Wallet aggregate -->
   <g filter="url(#es-sh)">
-    <rect x="648" y="252" width="118" height="78" rx="11" fill="#ffffff" stroke="#3a9e23" stroke-width="2"/>
-    <path d="M648 263a11 11 0 0 1 11-11h96a11 11 0 0 1 11 11v17H648Z" fill="url(#es-head)"/>
+    <rect x="648" y="252" width="118" height="78" rx="11" fill="#ffffff" stroke="#10110f" stroke-width="2"/>
+    <path d="M648 263a11 11 0 0 1 11-11h96a11 11 0 0 1 11 11v17H648Z" fill="#10110f"/>
     <text x="707" y="269" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="700">Wallet</text>
   </g>
-  <text x="707" y="302" text-anchor="middle" fill="#33402e" font-size="10.5">rebuilt state</text>
-  <text x="707" y="318" text-anchor="middle" fill="#7a8472" font-size="10" font-family="ui-monospace,Menlo,monospace">balance: 750</text>
+  <text x="707" y="302" text-anchor="middle" fill="#62645b" font-size="10.5">rebuilt state</text>
+  <text x="707" y="318" text-anchor="middle" fill="#62645b" font-size="10" font-family="ui-monospace,Menlo,monospace">balance: 750</text>
 
   <!-- snapshot (optional) -->
-  <rect x="222" y="306" width="200" height="36" rx="11" fill="#fff7e6" stroke="#ffc24b" stroke-width="1.6"/>
-  <text x="240" y="321" fill="#1c2420" font-size="10" font-weight="700">snapshot every N events</text>
-  <text x="240" y="335" fill="#7a8472" font-size="9">optional - skips early replay</text>
+  <rect x="222" y="306" width="200" height="36" rx="11" fill="#fff7e6" stroke="#ffb34a" stroke-width="1.6"/>
+  <text x="240" y="321" fill="#10110f" font-size="10" font-weight="700">snapshot every N events</text>
+  <text x="240" y="335" fill="#62645b" font-size="9">optional - skips early replay</text>
   <!-- snapshot fast-path arrow into Wallet -->
-  <path d="M422 322 L520 322 L520 295 L644 295" fill="none" stroke="#ffc24b" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#es-amber)"/>
+  <path d="M422 322 L520 322 L520 295 L644 295" fill="none" stroke="#ffb34a" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#es-amber)"/>
 
   <!-- ===================== divider ===================== -->
-  <line x1="34" y1="362" x2="766" y2="362" stroke="#e7ece1" stroke-width="1.5" stroke-dasharray="6,5"/>
+  <line x1="34" y1="362" x2="766" y2="362" stroke="#dedbd2" stroke-width="1.5" stroke-dasharray="6,5"/>
 
   <!-- ===================== row 3: projection -> read model ===================== -->
   <text x="34" y="394" fill="#3f5b7a" font-size="11" font-weight="700" letter-spacing="0.08em">READ</text>
   <path d="M70 389 L84 389 M79 385.5 L84 389 L79 392.5" fill="none" stroke="#3f5b7a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="160" cy="389" r="11" fill="#1f5e16"/>
+  <circle cx="160" cy="389" r="11" fill="#10110f"/>
   <text x="160" y="393.5" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">4</text>
 
   <!-- event store -> projection (read path, dashed slate) -->
@@ -141,7 +141,7 @@
     <path d="M298 395a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v15H298Z" fill="url(#es-head-slate)"/>
     <text x="373" y="399" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Projection</text>
   </g>
-  <text x="373" y="427" text-anchor="middle" fill="#33402e" font-size="10" font-family="ui-monospace,Menlo,monospace">on_event(e)</text>
+  <text x="373" y="427" text-anchor="middle" fill="#62645b" font-size="10" font-family="ui-monospace,Menlo,monospace">on_event(e)</text>
 
   <!-- projection -> read model -->
   <line x1="450" y1="412" x2="486" y2="412" stroke="#5b7a9d" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#es-read)"/>
@@ -152,5 +152,7 @@
     <path d="M488 395a11 11 0 0 1 11-11h128a11 11 0 0 1 11 11v15H488Z" fill="url(#es-head-slate)"/>
     <text x="563" y="399" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">Read model</text>
   </g>
-  <text x="563" y="427" text-anchor="middle" fill="#7a8472" font-size="10">fast queries</text>
+  <text x="563" y="427" text-anchor="middle" fill="#62645b" font-size="10">fast queries</text>
+
+<g data-framework-brand="2026-10-08" aria-hidden="true"><rect x="0" y="460" width="800" height="62.4" fill="#ffffff"/><path d="M12 462H788" stroke="#dedbd2" stroke-width="1"/><path d="M12 462H80" stroke="#ffb34a" stroke-width="2"/><!-- framework-logo:start --><svg xmlns="http://www.w3.org/2000/svg" width="84.05" height="54.4" viewBox="0 0 373.88 242" x="703.95" y="464.0" aria-hidden="true"><g fill="#10110f" transform="translate(20 130) scale(0.07 -0.07)"><g transform="translate(0 0)"><path d="M636 -30Q484 -30 380 46Q346 70 318 100L318 -480L139 -480L139 1080L298 1080L298 960Q334 1003 381 1036Q485 1110 637 1110Q787 1110 895.5 1035.5Q1004 961 1062 832Q1120 703 1120 541Q1120 379 1062 250Q1004 121 895.5 45.5Q787 -30 636 -30ZM614 133Q721 133 791 187Q861 241 896 333.5Q931 426 931 541Q931 655 896.5 747Q862 839 790.5 893Q719 947 609 947Q504 947 435 895.5Q366 844 332 752.5Q298 661 298 541Q298 423 331.5 330.5Q365 238 435 185.5Q505 133 614 133Z" /></g><g transform="translate(1160 0)"><path d="M290 -480L468 4L30 1080L217 1080L554 230L870 1080L1051 1080L463 -480Z" /></g><g transform="translate(2316 0)"><path d="M243 0L243 933L60 933L60 1080L243 1080L243 1139Q243 1181 247 1224.5Q251 1268 265 1309.5Q279 1351 311 1386Q348 1427 392 1444.5Q436 1462 481.5 1466Q527 1470 568 1470L705 1470L705 1322L578 1322Q499 1322 460 1283.5Q421 1245 421 1167L421 1080L954 1080L954 1470L1132 1470L1132 0L954 0L954 933L421 933L421 0Z" /></g><g transform="translate(3608 0)"><g data-family-terminal="trail-y"><defs><linearGradient id="brand-1a0912f555-logo-family-pyfly-20-130-140" gradientUnits="userSpaceOnUse" x1="30" y1="1080" x2="554" y2="230"><stop offset="0" stop-color="#ffb34a" stop-opacity="0.2" /><stop offset="0.8" stop-color="#ffb34a" stop-opacity="1" /></linearGradient></defs><path d="M290 -480L468 4L30 1080L217 1080L554 230L870 1080L1051 1080L463 -480Z" fill="url(#brand-1a0912f555-logo-family-pyfly-20-130-140)" /></g></g></g><g fill="#62645b" transform="translate(25 210) scale(0.0155 -0.0155)"><path d="M625 -30Q476 -30 373 46Q314 89 271 150L271 0L139 0L139 1440L287 1440L287 953Q325 1001 375 1036Q479 1110 631 1110Q779 1110 885 1035Q991 960 1047.5 831Q1104 702 1104 541Q1104 379 1047 250Q990 121 883 45.5Q776 -30 625 -30ZM610 107Q723 107 798 164Q873 221 910.5 319.5Q948 418 948 541Q948 663 911 761Q874 859 798.5 916Q723 973 607 973Q494 973 419.5 918Q345 863 308 765.5Q271 668 271 541Q271 416 308 317.5Q345 219 420 163Q495 107 610 107Z" transform="translate(0 0)" /><path d="M294 -480L472 3L33 1080L189 1080L544 192L871 1080L1021 1080L441 -480Z" transform="translate(1131 0)" /></g><svg x="76" y="183" width="143" height="45.48" viewBox="5 -148 619.4 197"><defs><linearGradient id="brand-1a0912f555-logo-firefly-trail" gradientUnits="userSpaceOnUse" x1="567.4" y1="-108" x2="623.4" y2="-54"><stop offset="0" stop-color="#ffb34a" stop-opacity="0.2" /><stop offset="0.8" stop-color="#ffb34a" stop-opacity="1" /></linearGradient></defs><path d="M24.3 0L24.3 -93.3L6 -93.3L6 -108L24.3 -108L24.3 -113.9Q24.3 -118.1 24.7 -122.45Q25.1 -126.8 26.5 -130.95Q27.9 -135.1 31.1 -138.6Q34.8 -142.7 39.2 -144.45Q43.6 -146.2 48.15 -146.6Q52.7 -147 56.8 -147L70.5 -147L70.5 -132.2L57.8 -132.2Q49.9 -132.2 46 -128.35Q42.1 -124.5 42.1 -116.7L42.1 -108L70.5 -108L70.5 -93.3L42.1 -93.3L42.1 0ZM91.5 0L91.5 -108L109.3 -108L109.3 0ZM134.8 0L134.8 -108L150.7 -108L150.7 -90.8Q151.8 -92.7 153.1 -94.5Q156.1 -98.7 159.9 -101.4Q164.1 -104.8 169.4 -106.6Q174.7 -108.4 180.2 -108.75Q185.7 -109.1 190.5 -108L190.5 -91.3Q184.9 -92.8 178.2 -92.1Q171.5 -91.4 165.8 -87.2Q160.6 -83.5 157.75 -78.2Q154.9 -72.9 153.8 -66.75Q152.7 -60.6 152.7 -54.2L152.7 0ZM247.3 3Q231.4 3 219.55 -4.05Q207.7 -11.1 201.1 -23.75Q194.5 -36.4 194.5 -53.3Q194.5 -71 201 -83.95Q207.5 -96.9 219.15 -103.95Q230.8 -111 246.5 -111Q262.8 -111 274.25 -103.5Q285.7 -96 291.45 -82.1Q297.2 -68.2 296.4 -49L213.6 -49Q214.6 -33.5 222 -24.4Q230.6 -13.9 246.5 -13.9Q257.2 -13.9 265.1 -18.8Q273 -23.7 277.5 -32.9L294.6 -27Q288.3 -12.7 275.65 -4.85Q263 3 247.3 3ZM277.9 -63.3Q276.5 -77.4 270.3 -85.2Q262.5 -95 247.1 -95Q230.6 -95 222 -84.4Q215.5 -76.4 213.9 -63.3ZM324.4 0L324.4 -93.3L306.1 -93.3L306.1 -108L324.4 -108L324.4 -113.9Q324.4 -118.1 324.8 -122.45Q325.2 -126.8 326.6 -130.95Q328 -135.1 331.2 -138.6Q334.9 -142.7 339.3 -144.45Q343.7 -146.2 348.25 -146.6Q352.8 -147 356.9 -147L370.6 -147L370.6 -132.2L357.9 -132.2Q350 -132.2 346.1 -128.35Q342.2 -124.5 342.2 -116.7L342.2 -108L395.5 -108L395.5 -147L413.3 -147L413.3 0L395.5 0L395.5 -93.3L342.2 -93.3L342.2 0ZM452.8 48L470.6 -0.4L426.8 -108L445.5 -108L479.2 -23L510.8 -108L528.9 -108L470.1 48Z" fill="#10110f" /><circle cx="100.4" cy="-136.3" r="9.97" fill="#ffb34a" /><path d="M567.4 -108L623.4 -54L603.4 -54L547.4 -108Z" fill="url(#brand-1a0912f555-logo-firefly-trail)" /><path d="M623.4 -54L567.4 0L547.4 0L603.4 -54Z" fill="#ffb34a" /></svg></svg><!-- framework-logo:end --></g>
 </svg>

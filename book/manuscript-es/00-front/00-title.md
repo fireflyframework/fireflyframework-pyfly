@@ -1,5 +1,5 @@
-# PyFly by Example {.chtitle}
+# pyfly by example {.chtitle}
 
-### Microservicios Python orientados a eventos con el framework Firefly
+### Sistemas de negocio conectados con Python asíncrono
 
 **Firefly Software Foundation**

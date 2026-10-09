@@ -1,0 +1,261 @@
+{
+  "version": "2026-10-08",
+  "logo": "docs/assets/pyfly-logo-light.svg",
+  "mark": "docs/assets/pyfly-mark.svg",
+  "palette": {
+    "#4cbb2f": "#10110f",
+    "#3a9e23": "#10110f",
+    "#1f5e16": "#10110f",
+    "#16331a": "#10110f",
+    "#23402a": "#10110f",
+    "#1c3217": "#10110f",
+    "#12220e": "#10110f",
+    "#243019": "#10110f",
+    "#1c2420": "#10110f",
+    "#0f3d08": "#10110f",
+    "#0c3206": "#10110f",
+    "#43b02a": "#8a5714",
+    "#2c8a1c": "#8a5714",
+    "#2f8f1c": "#8a5714",
+    "#2f7d1c": "#8a5714",
+    "#2c5a1f": "#8a5714",
+    "#2b8a1a": "#8a5714",
+    "#5cc739": "#ffb34a",
+    "#5fd13a": "#ffb34a",
+    "#9bd24a": "#ffb34a",
+    "#ffc24b": "#ffb34a",
+    "#e0a528": "#ffb34a",
+    "#e6b53e": "#ffb34a",
+    "#e0a030": "#ffb34a",
+    "#c2e85f": "#ffd69a",
+    "#dff58a": "#ffd69a",
+    "#ffd86b": "#ffd69a",
+    "#a7e76a": "#ffd69a",
+    "#33402e": "#62645b",
+    "#6a7a64": "#62645b",
+    "#7a8472": "#62645b",
+    "#7c876f": "#62645b",
+    "#8aa07e": "#a6a295",
+    "#a9c89c": "#a6a295",
+    "#9cbf86": "#a6a295",
+    "#c7d2bc": "#a6a295",
+    "#bcd9a0": "#a6a295",
+    "#8fb573": "#a6a295",
+    "#dfe7d4": "#dedbd2",
+    "#e0e8d6": "#dedbd2",
+    "#e7ece1": "#dedbd2",
+    "#b8d9a0": "#dedbd2",
+    "#d8efc6": "#dedbd2",
+    "#bfe3a6": "#dedbd2",
+    "#eaf6df": "#f3f1eb",
+    "#f4f9ee": "#f3f1eb",
+    "#e6f7da": "#f3f1eb",
+    "#dff3d4": "#f3f1eb",
+    "#f2ffd0": "#f3f1eb",
+    "#f7faf3": "#f3f1eb",
+    "#eaffc9": "#f3f1eb",
+    "#f4f7f0": "#f3f1eb",
+    "#f6faf2": "#f3f1eb",
+    "#f1faec": "#f3f1eb",
+    "#f6faf1": "#f3f1eb",
+    "#f3f8ee": "#f3f1eb"
+  },
+  "diagrams": {
+    "assets/architecture.svg": {
+      "structure": "4f6793d6a4dc1941368ffbbc1619236c4b46981ae4381f719869803d270c1125",
+      "originalViewBox": "0 0 864 612"
+    },
+    "assets/auto-configuration.svg": {
+      "structure": "239b2f11fa513875c6513778b2050189cbdfa9f641123fc86f2fc966da42b9d2",
+      "originalViewBox": "0 0 908 486"
+    },
+    "assets/distributed-patterns.svg": {
+      "structure": "4e7b39fb0bd2e436d26f53fb3cc27b8c2dba75d01d09900a08e46329d3c85b64",
+      "originalViewBox": "0 0 908 500"
+    },
+    "assets/ecosystem.svg": {
+      "structure": "63c3704f3a203fc653646f2849ad5576fe7bdb5c345eca30bd4781b3b44fe2e4",
+      "originalViewBox": "0 0 1000 650"
+    },
+    "assets/hexagonal.svg": {
+      "structure": "072d56159ef6e3baaeb8d8811f9b800531052d4850f1968261c1c16c3ee481ca",
+      "originalViewBox": "0 0 924 694"
+    },
+    "assets/request-lifecycle.svg": {
+      "structure": "3a328f0ce9f0527d6787de11ab052b475ded8f3d95e8285d8c3c9d265347a93b",
+      "originalViewBox": "0 0 980 392"
+    },
+    "book/art/figures/01-choice.svg": {
+      "structure": "b9dc00497ad331d88bc31ad586bd84971ee8cab567d8ae8491df7afa6eba2dbc",
+      "originalViewBox": "0 0 780 330"
+    },
+    "book/art/figures/01-layers.svg": {
+      "structure": "1232b13dbe9d59e163d31012e84649fbbf5c0ba3a6355d7824fe5fc4435d8187",
+      "originalViewBox": "0 0 760 396"
+    },
+    "book/art/figures/02-di.svg": {
+      "structure": "f8ab1485d473b9ecd650f16ef4a27caa773782913a3c20bc6828354c959bb6a9",
+      "originalViewBox": "0 0 760 360"
+    },
+    "book/art/figures/02-lifecycle.svg": {
+      "structure": "e9943d4219fd4acd9cd1ffcc14e23e9c93c5e496b6fa5696b58bfedb7efd9974",
+      "originalViewBox": "0 0 800 340"
+    },
+    "book/art/figures/03-config.svg": {
+      "structure": "0f65b1baa96504397ab4c0ef63c17afcb74d7f094cf87695749426070cad48fb",
+      "originalViewBox": "0 0 760 420"
+    },
+    "book/art/figures/04-request.svg": {
+      "structure": "9973c6c49941a7c8dbe906c6a056b019ef890a1056da09090f21e71779c967d1",
+      "originalViewBox": "0 0 760 300"
+    },
+    "book/art/figures/05-pagination.svg": {
+      "structure": "2c21c9b530c1c49957215edd0e9cb05238bf4cabd30d019b2f24ee0efb2d5937",
+      "originalViewBox": "0 0 820 330"
+    },
+    "book/art/figures/05-repository.svg": {
+      "structure": "dcd761cce177b4c28de09939f60d79c160d9e73f82a526b124d488d96412948e",
+      "originalViewBox": "0 0 780 320"
+    },
+    "book/art/figures/06-aggregate.svg": {
+      "structure": "4cc6574d10b038cb627c566124998ef61653188532bba57d10fdece8846cd0f5",
+      "originalViewBox": "0 0 760 420"
+    },
+    "book/art/figures/06-vo-entity.svg": {
+      "structure": "b137bd6034b7823421a39241ab4e9588d5299e753b30b938297d342ed852a487",
+      "originalViewBox": "0 0 820 320"
+    },
+    "book/art/figures/07-cqrs.svg": {
+      "structure": "8d96264cc7d12df8a1299f92e4292e244ee5b34a35505cd15f24c3c352de0fe3",
+      "originalViewBox": "0 0 800 348"
+    },
+    "book/art/figures/08-eda.svg": {
+      "structure": "8f9adea12f8455093d95a574502d5152cedb7d7a90c4e5d9d9daf8cd01bc9d29",
+      "originalViewBox": "0 0 780 340"
+    },
+    "book/art/figures/09-eventsourcing.svg": {
+      "structure": "64a91634921307cefe09d1da225bc54b11d8eef877148fb4012f8ce0cbe4804a",
+      "originalViewBox": "0 0 800 460"
+    },
+    "book/art/figures/10-messaging.svg": {
+      "structure": "780a38197363f17a1f6086f31006411f5daf738976f0709a5fff72538d95cd90",
+      "originalViewBox": "0 0 780 380"
+    },
+    "book/art/figures/11-client.svg": {
+      "structure": "aa3bd7dac4820492e8c01a6562a3a3d5e3016748707a1bed795aa6a77df4034c",
+      "originalViewBox": "0 0 780 332"
+    },
+    "book/art/figures/12-saga.svg": {
+      "structure": "45fc34f2133468ea3c3708f08aa85f163d5dc48e8b199a1877dfb35e39554234",
+      "originalViewBox": "0 0 800 380"
+    },
+    "book/art/figures/13-cache.svg": {
+      "structure": "e430aa3cb1e46e09aacc5021b76dcba446aaae2490d9b30eb12c589c8a594c18",
+      "originalViewBox": "0 0 780 360"
+    },
+    "book/art/figures/13-resilience.svg": {
+      "structure": "f35d63bec73c388baf3ce779096b9c533dd6434683a969e90cdf5b2cfc15c8a0",
+      "originalViewBox": "0 0 800 330"
+    },
+    "book/art/figures/14-security.svg": {
+      "structure": "147a45b9d6c0602604b3bffa88abeda683392e6ab625a7d73a313ad31b149afe",
+      "originalViewBox": "0 0 800 332"
+    },
+    "book/art/figures/15-observability.svg": {
+      "structure": "8caf447c11569695e1e709651b7d7fa208d80063b81e2ecf4e05d2bfb0bf05e3",
+      "originalViewBox": "0 0 800 470"
+    },
+    "book/art/figures/16-testing.svg": {
+      "structure": "2010c38853c53cba7011bf1cf443f41fce5a69c234b01f1c211e845bd4fdd3b4",
+      "originalViewBox": "0 0 780 430"
+    },
+    "book/art/figures/17-integrations.svg": {
+      "structure": "258b4602ef4a46451254986fa3de8d6a341af2c1fce74ef2e3b0b1f469559702",
+      "originalViewBox": "0 0 780 408"
+    },
+    "book/art/figures/18-production.svg": {
+      "structure": "8c73f80ee40195ec7853057c7db007251f04f788bbf798cba6fd9ca6a97ad86c",
+      "originalViewBox": "0 0 780 400"
+    },
+    "book/art/openers/ch01.svg": {
+      "structure": "bc56fb557dfdc16c537641261fbef2e7714ecd42b920fec19a175afe27423bf1",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch02.svg": {
+      "structure": "707651c888a8e6febf0c7ce1538506cbe0c923dfc9da1e980c43189071638740",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch03.svg": {
+      "structure": "08d8f58da65d16e92ffbd9d22a05794ba1cad7269d751138754bf810087c6f24",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch04.svg": {
+      "structure": "8ef0525fb6ac31a77f15c7b0091a238ddf2b230d2a7799fc3152a289d3fa92a6",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch05.svg": {
+      "structure": "e86e289c88cc7f9a7024d7755690ba7906ef263d16d74109b7ba568e8b2d40d5",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch06.svg": {
+      "structure": "006bd90ceef6e8e2f1d56dd297ab518374984a1e46e2829fa88a9a27f37faf7e",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch07.svg": {
+      "structure": "bc8b14c2b44af6c10d4f23bfd00a422682719bceceb9ee8ad503a9205a2204ce",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch08.svg": {
+      "structure": "04b3d50e4fd8865a0e508db1e16019afba9573f9a3457cea209addb97aa4d4b9",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch09.svg": {
+      "structure": "6b3c555c3eff01149cb9ef457a27336944429ee117ffef1bf04a93bb2aecf151",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch10.svg": {
+      "structure": "4ba40a46fd15ca5e4ef2e000e05056336e7e79dcfc4d647a250c12d389996958",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch11.svg": {
+      "structure": "c6df895c5fb927a2c90ed29d3a9126b262f6db3e3e8a0b53759d11c9b726bd26",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch12.svg": {
+      "structure": "ecae1f424a7e83a023c374e11885b4303dbc1b50e8e9d829e4d8c97f673edc60",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch13.svg": {
+      "structure": "9f0a91bbea4ded00dd67070a572df8c47d7c556758112d06819ee7296a26525c",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch14.svg": {
+      "structure": "9c1741b20b2c20a261339dcebe7c7db95e848f7fc86fa40c36fb0739d9d35ace",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch15.svg": {
+      "structure": "c8b582871a4938048df3787755690cfbf78ecd75b24f840ff30dacb5ca062408",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch16.svg": {
+      "structure": "99168f5d6525d12b9980e452fc43c1e4ea49087f88db42244c1e15f09c24fe48",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch17.svg": {
+      "structure": "47245ca766d1a1e9ec1630a2987f480f95a1fbc32da16eb370c7580283c973c6",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/openers/ch18.svg": {
+      "structure": "d80c8ff43266687d85856fbe4e20dff27e158c098d47ba1437227a2b5f014a83",
+      "originalViewBox": "0 0 720 280"
+    },
+    "book/art/webapps-en.svg": {
+      "structure": "7b83bc31e4e2787cfb7fc1822e6075bcaf719b8aca9db04e8ba785e386e68d1d",
+      "originalViewBox": "0 0 600 352"
+    },
+    "book/art/webapps-es.svg": {
+      "structure": "f07dc970b193887bf1734a5f77d69647767eb7de1f2bd9ab54ae4198ff1f48be",
+      "originalViewBox": "0 0 600 352"
+    }
+  }
+}

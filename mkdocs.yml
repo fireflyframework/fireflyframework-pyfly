@@ -2,7 +2,7 @@
 # Renders the existing docs/*.md into https://fireflyframework.github.io/fireflyframework-pyfly/docs/
 # The landing page (web/) and brand assets are assembled around this build by scripts/build_site.py.
 
-site_name: PyFly
+site_name: pyfly
 site_description: >-
   The official Python implementation of the Firefly Framework — Spring Boot's
   cohesion, native to async Python. Dependency injection, CQRS, sagas, event
@@ -26,7 +26,7 @@ copyright: >-
 
 theme:
   name: material
-  logo: assets/pyfly-mark.svg
+  logo: assets/pyfly-logo-dark.svg
   favicon: assets/pyfly-mark.svg
   custom_dir: overrides
   font:

@@ -59,7 +59,7 @@ def test_build_can_write_outside_tracked_dist(tmp_path, monkeypatch):
     (manuscript / "chapter.md").write_text("# Hello\n")
     (source / "book.yaml").write_text(
         "title: Book\nauthor: Author\nlanguage: en\nidentifier: urn:uuid:book\n"
-        "manuscript_dir: manuscript\ncover_png: missing.png\noutput_basename: fresh\n"
+        "manuscript_dir: manuscript\noutput_basename: fresh\n"
         "parts:\n  - title: Part I\n    chapters:\n"
         "      - {id: chapter, file: chapter.md, num: 1, title: Hello}\n"
     )
@@ -88,7 +88,7 @@ def test_build_rejects_missing_configured_manuscript_before_writing(tmp_path, mo
             (manuscript / name).write_text("# Present\n")
     (source / "book.yaml").write_text(
         "title: Book\nauthor: Author\nlanguage: en\nidentifier: urn:uuid:book\n"
-        "manuscript_dir: manuscript\ncover_png: missing.png\noutput_basename: fresh\n"
+        "manuscript_dir: manuscript\noutput_basename: fresh\n"
         "front:\n  - {id: front, file: front.md, title: Front}\n"
         "parts:\n  - title: Part I\n    chapters:\n"
         "      - {id: chapter, file: chapter.md, num: 1, title: Hello}\n"

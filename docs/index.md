@@ -1,4 +1,6 @@
-# PyFly Framework
+![pyfly — Firefly Framework for Python](assets/pyfly-banner.svg)
+
+# pyfly
 
 **The Official Python Implementation of the [Firefly Framework](https://github.com/fireflyframework)**
 

@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="PyFly — Event-Driven Python Microservices with the Firefly Framework" width="100%" />
+  <img src="assets/banner.svg" alt="pyfly — Firefly Framework for Python" width="100%" />
 </p>
 
-<h1 align="center">PyFly</h1>
+<h1 align="center">pyfly</h1>
 
 <p align="center">
   <strong>The official Python implementation of the Firefly Framework — Spring Boot's cohesion, native to async Python.</strong>
@@ -37,7 +37,7 @@
 <details>
 <summary><b>Table of contents</b></summary>
 
-- [📘 The Book — *PyFly by Example*](#-the-book--pyfly-by-example)
+- [📘 The Book — *pyfly by example*](#-the-book--pyfly-by-example)
 - [Why PyFly?](#why-pyfly)
 - [Quickstart](#quickstart)
 - [Philosophy](#philosophy)
@@ -55,13 +55,13 @@
 
 ---
 
-## 📘 The Book — *PyFly by Example*
+## 📘 The Book — *pyfly by example*
 
-**[PyFly by Example](book/)** is the official, project-driven book for the framework. Across **18 chapters in five parts** it builds **Lumen** — the wallet & ledger service in [`samples/lumen/`](samples/lumen/README.md) — from an empty folder into a secured, observable, event-driven microservice. Lumen is the main companion project. **Appendix E** adds a separate [catalog webapp](samples/webapp/README.md), covering native HTML, forms, URL/static helpers, custom errors, and administration of existing models.
+**[pyfly by example](book/)** is the official, project-driven book for the framework. Across **18 chapters in five parts** it builds **Lumen** — the wallet & ledger service in [`samples/lumen/`](samples/lumen/README.md) — from an empty folder into a secured, observable, event-driven microservice. Lumen is the main companion project. **Appendix E** adds a separate [catalog webapp](samples/webapp/README.md), covering native HTML, forms, URL/static helpers, custom errors, and administration of existing models.
 
 It covers the whole stack: dependency injection, configuration & profiles, the web layer, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), DDD aggregates & `Money`, CQRS, domain events & event sourcing, messaging, HTTP clients, sagas, caching & resilience, security, observability, testing, scheduling, and going to production. Spring developers get a **Spring parity** callout at every turn.
 
-**📥 Download the latest release books:** **[English PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.pdf)** · **[English EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example.epub)** · **[Spanish PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.pdf)** · **[Spanish EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-by-example-es.epub)**. For a specific version, use its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases), or build from source with `bash book/build/run.sh --out-dir book/release-output`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
+**📥 Download the 2026-10-08 book edition:** **[English PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example.pdf)** · **[English EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example.epub)** · **[Spanish PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example-es.pdf)** · **[Spanish EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example-es.epub)**. For a specific version, use its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases), or build from source with `bash book/build/run.sh --out-dir book/release-output`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
 
 ---
 
@@ -1201,7 +1201,7 @@ The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Chan
 - **`v26.09.08`** (2026-09-28) — **the data layer on a unit of work**: Spring `@transactional` semantics on every backend (all seven propagations, rollback-only, isolation, read-only replica routing, timeouts), one `DataSourceRegistry` for every engine, repositories that commit per call outside a transaction, the framework's stores in the business transaction, MongoDB transactions on a replica set, and a tested matrix of SQLite, PostgreSQL, MySQL, MariaDB and MongoDB. Several changes are breaking: read the upgrade guide in the [CHANGELOG](CHANGELOG.md).
 - **`v26.06.114`** (2026-06-26) — **security overhaul**: full **RFC 9700 / OAuth 2.1** alignment and broad **Spring Security parity** — a complete OAuth 2.1 / OIDC **authorization server** (PKCE, OIDC id tokens, JWKS, introspection/revocation, DCR, PAR, JAR), **DPoP / mTLS** sender-constrained tokens, form / HTTP-Basic / X.509 login, an `AuthenticationManager` / `UserDetailsService` SPI, a delegating password encoder (bcrypt / PBKDF2 / scrypt / Argon2), and secure-by-default hardening (PKCE-default, CSRF-on, ROPC opt-in, signing-secret fail-fast). See the [Security](docs/modules/security.md) and [OAuth2](docs/modules/oauth2.md) guides.
 - **`v26.06.113`** (2026-06-17) — **server-layer observability**: per-server metrics (active connections, in-flight requests, workers, uptime) across Uvicorn / Granian / Hypercorn, correct multi-worker Prometheus aggregation, and a live admin **Observability** dashboard.
-- **`v26.06.112`** (2026-06-16) — *PyFly by Example* figures rebuilt in one polished, vector visual language (English + Spanish editions).
+- **`v26.06.112`** (2026-06-16) — *pyfly by example* figures rebuilt in one polished, vector visual language (English + Spanish editions).
 - **`v26.05.01`** (2026-05-07) — **full Java-framework parity**: the Saga + Workflow + TCC transactional engine, nine new modules (event sourcing, callbacks, webhooks, notifications, IDP, ECM, plugins, rule engine, config server), 12 third-party adapters, and the move to CalVer.
 
 See **[CHANGELOG.md](CHANGELOG.md)** for every release and the complete notes.

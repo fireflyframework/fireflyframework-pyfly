@@ -2,18 +2,26 @@
 @page{
   size: 7.5in 9.25in;
   margin: 0.82in 0.78in 0.86in;
-  @bottom-center{ content: counter(page); font:9pt -apple-system,"Segoe UI",sans-serif; color:#9aa6a0; }
+  @bottom-center{ content: counter(page); font:9pt -apple-system,"Segoe UI",sans-serif; color:#85877e; }
   @top-center{ content: string(runhead); font:8pt -apple-system,"Segoe UI",sans-serif;
-    letter-spacing:.12em; text-transform:uppercase; color:#a7b0a0; }
+    letter-spacing:.12em; text-transform:uppercase; color:#85877e; }
 }
 @page :first{ @top-center{ content:none; } @bottom-center{ content:none; } }
 
 html{ font-size: 11pt; }            /* map rem-based sizes to print */
 body{ background:#fff; }
 
-/* the cover image is its own first page (no header/number) */
-.cover-page{ break-after:page; text-align:center; }
-.cover-page img{ width:100%; height:auto; }
+/* Front and back covers have their own full-trim page without running text. */
+@page book-cover{
+  size:7.5in 9.25in; margin:0;
+  @top-center{ content:none; }
+  @bottom-center{ content:none; }
+}
+.cover-page{
+  page:book-cover; width:7.5in; height:9.25in; margin:0; padding:0;
+  break-before:page; break-after:page;
+}
+.cover-page img{ display:block; width:7.5in; height:9.25in; object-fit:contain; }
 
 /* each front-matter doc and each chapter starts on a fresh page */
 .chapter{ break-before:page; padding-bottom:0; }
@@ -21,6 +29,7 @@ body{ background:#fff; }
 
 /* running head from the chapter title */
 h1.chtitle{ string-set: runhead content(text); }
+section#title h1.chtitle{ string-set:runhead ""; }
 
 /* keep blocks intact across page boundaries */
 table,figure.fig,.admonition{ break-inside:avoid; }
@@ -34,6 +43,9 @@ p{ orphans:3; widows:3; }
 /* nothing may exceed the text column; code wraps instead of clipping */
 img,svg,table,pre.code,.code pre{ max-width:100%; }
 pre.code,.code pre{ white-space:pre-wrap; overflow-wrap:anywhere; }
+code{ overflow-wrap:anywhere; word-break:break-all; }
+table{ table-layout:fixed; break-inside:auto; }
+th,td,th code,td code{ overflow-wrap:anywhere; }
 
 /* ============ Contents page (print) ============ */
 /* start on its own page; suppress the running head (no chtitle here) */
@@ -43,7 +55,7 @@ section.toc h1.chtitle{ string-set:runhead "Contents"; }
 .toc-link{ text-decoration:none; color:var(--ink); }
 .toc-link::after{
   content: leader('.') ' ' target-counter(attr(href url), page);
-  color:#6b7768;
+  color:#62645b;
 }
 
 /* ============ Part-divider page (print) ============ */

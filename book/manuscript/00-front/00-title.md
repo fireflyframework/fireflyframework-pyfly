@@ -1,5 +1,5 @@
-# PyFly by Example {.chtitle}
+# pyfly by example {.chtitle}
 
-### Event-Driven Python Microservices with the Firefly Framework
+### Building connected business systems with async Python
 
 **Firefly Software Foundation**

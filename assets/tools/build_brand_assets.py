@@ -1,31 +1,20 @@
 #!/usr/bin/env python3
-"""Regenerate the PyFly README brand assets — assets/banner.svg and the six
-diagram SVGs — from the shared visual kit.
+"""Rebuild the six public diagrams and validate the shared family identity.
 
-Self-contained: derives the repo root from its own location, generates the snake
-artwork from assets/pyfly-logo.png, vectorizes the Maven Pro wordmark, and uses
-the vendored Simple-Icons paths in icons.py.
-
-Requirements: Python 3.12+, fontTools, Pillow (the book/.venv has both:
-  book/.venv/bin/python assets/tools/build_brand_assets.py
-). Maven Pro is fetched (and cached) from Google Fonts if not already installed.
-Render/verify the output with resvg:  npx -y @resvg/resvg-js-cli <in.svg> <out.png>
+Layout and technical labels stay here. book/build/brand_diagrams.py applies the
+approved palette and embeds the canonical outlined logo. The banner is copied
+from docs/assets, never reconstructed with a local font or retired snake art.
+Run with book/.venv/bin/python assets/tools/build_brand_assets.py.
 """
 from __future__ import annotations
-import base64, io, math, os, sys, urllib.request
+import math, sys, json, shutil
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 ASSETS = REPO / "assets"
-CACHE = HERE / ".cache"
-CACHE.mkdir(exist_ok=True)
 sys.path.insert(0, str(HERE))
 from fontTools.ttLib import TTFont
-from fontTools.varLib.instancer import instantiateVariableFont
-from fontTools.pens.svgPathPen import SVGPathPen
-from fontTools.pens.transformPen import TransformPen
-from PIL import Image
 try:
     from icons import ICONS
 except Exception:
@@ -37,32 +26,6 @@ MID="#2c8a1c"; DARK="#1f5e16"; BODY="#33402e"; MUTED="#7c876f"; SUB="#f4f9ee"; B
 INK="#243019"; AMBER="#c2722a"
 MONO="ui-monospace,'SF Mono',Menlo,Consolas,monospace"
 SANS="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif"
-
-# --------------------------------------------------------------------------- fonts
-def maven_var() -> str:
-    """Path to a Maven Pro variable font; fetch+cache from Google Fonts if needed."""
-    for p in ("~/Library/Fonts/MavenPro[wght].ttf",):
-        q = os.path.expanduser(p)
-        if os.path.exists(q):
-            return q
-    dst = CACHE / "MavenPro.ttf"
-    if not dst.exists():
-        url = "https://raw.githubusercontent.com/google/fonts/main/ofl/mavenpro/MavenPro%5Bwght%5D.ttf"
-        with urllib.request.urlopen(url, timeout=30) as r:  # verified TLS (default context)
-            dst.write_bytes(r.read())
-    return str(dst)
-
-_VAR = maven_var()
-def load_maven(wght: int) -> TTFont:
-    f = TTFont(_VAR); instantiateVariableFont(f, {"wght": wght}, inplace=True); return f
-
-def word_paths(f: TTFont, text: str, em: float, x0: float, baseline: float, tracking=0.0):
-    upm=f["head"].unitsPerEm; cmap=f.getBestCmap(); gs=f.getGlyphSet()
-    s=em/upm; penx=x0; out=[]
-    for ch in text:
-        g=cmap[ord(ch)]; sp=SVGPathPen(gs); gs[g].draw(TransformPen(sp,(s,0,0,-s,penx,baseline)))
-        out.append(sp.getCommands()); penx+=gs[g].width*s+tracking
-    return out, penx-x0
 
 # Arial metrics ≈ system sans, for guaranteed-fit box sizing
 _AR={}
@@ -82,21 +45,9 @@ def tw(s,size,bold=False):
 def mw(s,size): return 0.602*size*len(str(s))
 def esc(s): return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
-# --------------------------------------------------------------------------- snake art
-def gen_snake():
-    logo=Image.open(ASSETS/"pyfly-logo.png").convert("RGBA")
-    crop=logo.crop((0,90,535,650)); crop=crop.crop(crop.getbbox())
-    def uri(h, colors):
-        im=crop.resize((round(crop.width*h/crop.height),h), Image.LANCZOS)
-        buf=io.BytesIO(); im.save(buf,format="PNG",optimize=True); data=buf.getvalue()
-        if len(data)>150_000 or colors:
-            q=im.quantize(colors=colors or 128, method=Image.FASTOCTREE)
-            buf=io.BytesIO(); q.save(buf,format="PNG",optimize=True); data=buf.getvalue()
-        return "data:image/png;base64,"+base64.b64encode(data).decode(), im.width/im.height
-    hero,aspect=uri(520,None); mark,_=uri(132,64)
-    return hero,aspect,mark
-
-HERO_URI, HERO_ASPECT, SNAKE_MARK = gen_snake()
+sys.path.insert(0, str(REPO / "book/build"))
+import brand_diagrams
+BRAND_CONFIG = json.loads(brand_diagrams.MANIFEST.read_text())
 
 # --------------------------------------------------------------------------- kit
 def defs(cx,cy,r=520):
@@ -126,8 +77,9 @@ def icon(name,cx,cy,size,color=None):
     return (f'<g transform="translate({cx:.1f},{cy:.1f}) scale({s:.4f}) translate({-vw/2:.1f},{-vh/2:.1f})">'
             f'<path d="{ic["d"]}" fill="{color or ic["color"]}"/></g>')
 def snake(x,y,h):
-    if not SNAKE_MARK: return mote(x+12,y+h/2,1.2)
-    return f'<image x="{x:.1f}" y="{y:.1f}" width="{h*0.91:.1f}" height="{h:.1f}" href="{SNAKE_MARK}"/>'
+    return brand_diagrams.embedded_asset(REPO / BRAND_CONFIG["mark"], f"mark-{x}-{y}-",
+        x=f"{x:.1f}", y=f"{y:.1f}", width=f"{h*0.91:.1f}", height=f"{h:.1f}",
+        data_brand_decoration="official-mark", aria_hidden="true")
 def title(w,t,sub=None,repo="fireflyframework-pyfly"):
     s=[snake(24,18,38),
        f'<text x="64" y="45" font-size="21" font-weight="800" fill="{INK}" font-family="{SANS}" letter-spacing="0.2">{esc(t)}</text>',
@@ -173,48 +125,7 @@ def check(name,rects,pad=2):
 
 # --------------------------------------------------------------------------- banner
 def build_banner():
-    W,H=1280,320
-    fH,fM,fR=load_maven(800),load_maven(600),load_maven(500)
-    cap=fH["OS/2"].sCapHeight/fH["head"].unitsPerEm
-    EM=150; sh=252; sw=sh*HERO_ASPECT; sx,sy=22,(H-sh)/2
-    wm_x=sx+sw+46; wm_base=176
-    wm,wmw=word_paths(fH,"pyFly",EM,wm_x,wm_base,tracking=-2); cappx=cap*EM; wmt=wm_base-cappx
-    tl_x=wm_x+4
-    t1,t1w=word_paths(fM,"Event-Driven Python Microservices",23,tl_x,250)
-    t2,_=word_paths(fR,"async-native  ·  hexagonal  ·  Spring-Boot DX for Python",15.5,tl_x,282)
-    def fly(x,y,s,k): return f'<use href="#fly{k}" transform="translate({x},{y}) scale({s})"/>'
-    bg=[(706,64,1.3,.5),(792,118,1.0,.42),(905,58,1.5,.5),(1002,104,1.1,.42),(1108,72,1.4,.48),(1182,128,1.0,.36),
-        (835,214,1.3,.44),(968,250,1.05,.38),(1092,232,1.5,.5),(1204,206,1.0,.34),(742,176,1.2,.4),(1024,182,.9,.3),(894,150,1.1,.4),(1150,168,1.0,.4)]
-    hero=[(980,116,1.9,"g"),(1066,168,1.5,"a"),(900,196,1.15,"g"),(1150,104,1.05,"a"),(1108,220,.95,"g"),(828,128,1.0,"a")]
-    def grp(paths,fill): return f'<g fill="{fill}">'+"".join(f'<path d="{d}"/>' for d in paths)+'</g>'
-    svg=f'''<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="PyFly — Event-Driven Python Microservices with the Firefly Framework">
-  <defs>
-    <linearGradient id="sky" x1="0" y1="0" x2="{W}" y2="{H}" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#07110b"/><stop offset="0.5" stop-color="#0a1410"/><stop offset="1" stop-color="#0c1a0f"/></linearGradient>
-    <radialGradient id="ambient" cx="985" cy="92" r="470" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4cbb2f" stop-opacity="0.22"/><stop offset="0.5" stop-color="#7ed321" stop-opacity="0.07"/><stop offset="1" stop-color="#7ed321" stop-opacity="0"/></radialGradient>
-    <radialGradient id="snakeGlow" cx="50%" cy="48%" r="60%"><stop offset="0" stop-color="#7ed321" stop-opacity="0.30"/><stop offset="0.6" stop-color="#4cbb2f" stop-opacity="0.08"/><stop offset="1" stop-color="#4cbb2f" stop-opacity="0"/></radialGradient>
-    <linearGradient id="wm" x1="0" y1="{wmt}" x2="0" y2="{wm_base}" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#b6f06a"/><stop offset="0.5" stop-color="#7ed321"/><stop offset="1" stop-color="#46b522"/></linearGradient>
-    <g id="flyg"><circle r="13" fill="#6abf2e" opacity="0.09"/><circle r="7.5" fill="#9bd24a" opacity="0.18"/><circle r="3.6" fill="#cdf06a" opacity="0.6"/><circle r="1.9" fill="#f2ffd0"/></g>
-    <g id="flya"><circle r="13" fill="#9bd24a" opacity="0.08"/><circle r="7.5" fill="#c2e85f" opacity="0.16"/><circle r="3.6" fill="#dff58a" opacity="0.6"/><circle r="1.9" fill="#fbffe2"/></g>
-  </defs>
-  <rect width="{W}" height="{H}" fill="url(#sky)"/>
-  <rect width="{W}" height="{H}" fill="url(#ambient)"/>
-  <g fill="#bfe27a">{"".join(f'<circle cx="{x}" cy="{y}" r="{r}" opacity="{o}"/>' for x,y,r,o in bg)}</g>
-  <g fill="none" stroke="#5cc12e" stroke-linecap="round">
-    <path d="M860,250 C920,196 962,168 980,116" stroke-width="2.2" opacity="0.10"/>
-    <path d="M860,250 C920,196 962,168 980,116" stroke-width="0.9" opacity="0.22"/>
-    <path d="M1190,242 C1150,206 1120,190 1066,168" stroke-width="1.8" opacity="0.08"/>
-  </g>
-  {"".join(fly(x,y,s,k) for x,y,s,k in hero)}
-  <ellipse cx="{sx+sw/2:.0f}" cy="{H/2:.0f}" rx="{sw*0.62:.0f}" ry="148" fill="url(#snakeGlow)"/>
-  <image x="{sx:.1f}" y="{sy:.1f}" width="{sw:.1f}" height="{sh}" href="{HERO_URI}"/>
-  <g transform="skewX(-7)" fill="url(#wm)" stroke="#16500f" stroke-width="5.5" stroke-linejoin="round" paint-order="stroke">{"".join(f'<path d="{d}"/>' for d in wm)}</g>
-  {fly(wm_x+wmw+22, wmt+10, 1.25, "a")}
-  <rect x="{tl_x}" y="214" width="{max(t1w,260):.0f}" height="2.4" rx="1.2" fill="#43b02a" opacity="0.55"/>
-  {grp(t1,"#e3f4d4")}
-  {grp(t2,"#8fb673")}
-  <text x="{W-26}" y="34" text-anchor="end" font-family="{MONO}" font-size="12" fill="#5f8050" opacity="0.9" letter-spacing="0.4">fireflyframework-pyfly</text>
-</svg>'''
-    (ASSETS/"banner.svg").write_text(svg)
+    shutil.copyfile(REPO / "docs/assets/pyfly-banner.svg", ASSETS / "banner.svg")
 
 # --------------------------------------------------------------------------- diagrams
 def architecture():
@@ -399,7 +310,8 @@ def ecosystem():
 def main():
     build_banner()
     for fn in (architecture,hexagonal,autoconf,lifecycle,patterns,ecosystem): fn()
-    print("banner + 6 diagrams written to", ASSETS)
+    brand_diagrams.main([])
+    print("canonical banner + 6 diagrams written to", ASSETS)
     print("WARNINGS:", *(WARN or ["none"]))
 
 if __name__ == "__main__":

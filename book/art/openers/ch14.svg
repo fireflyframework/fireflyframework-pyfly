@@ -1,98 +1,100 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 336.16"
      role="img" aria-label="Chapter 14: Security — Request flows through JWT Filter and @secure RBAC check to Service, with IDP issuing the token below"
-     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+     font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" data-original-view-box="0 0 720 280">
 
   <!-- Background -->
-  <rect width="720" height="280" fill="#eaf6df"/>
+  <rect width="720" height="280" fill="#f3f1eb"/>
 
   <defs>
     <filter id="s14-shadow" x="-10%" y="-10%" width="130%" height="130%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#2c8a1c" flood-opacity="0.22"/>
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#8a5714" flood-opacity="0.22"/>
     </filter>
     <marker id="s14-arr" markerWidth="10" markerHeight="7"
             refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#8aa07e"/>
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a6a295"/>
     </marker>
     <marker id="s14-arr-g" markerWidth="10" markerHeight="7"
             refX="9" refY="3.5" orient="auto">
-      <polygon points="0 0, 10 3.5, 0 7" fill="#43b02a"/>
+      <polygon points="0 0, 10 3.5, 0 7" fill="#8a5714"/>
     </marker>
   </defs>
 
   <!-- Section label -->
   <text x="360" y="28" text-anchor="middle" dominant-baseline="middle"
-        fill="#43b02a" font-size="14" font-weight="700">Security — JWT auth + RBAC</text>
+        fill="#8a5714" font-size="14" font-weight="700">Security — JWT auth + RBAC</text>
 
   <!-- Request box (left) -->
   <rect x="42" y="82" width="116" height="60" rx="12" ry="12"
-        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
-  <rect x="42" y="82" width="116" height="26" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="42" y="96" width="116" height="12" fill="#43b02a"/>
+        fill="#fff" stroke="#8a5714" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="42" y="82" width="116" height="26" rx="12" ry="12" fill="#8a5714"/>
+  <rect x="42" y="96" width="116" height="12" fill="#8a5714"/>
   <text x="100" y="95" text-anchor="middle" dominant-baseline="middle"
         fill="#fff" font-size="12" font-weight="700">Request</text>
   <text x="100" y="128" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">HTTP call</text>
+        fill="#62645b" font-size="10">HTTP call</text>
 
   <!-- Arrow Request → JWT Filter -->
   <line x1="158" y1="112" x2="200" y2="112"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#s14-arr)"/>
+        stroke="#a6a295" stroke-width="2" marker-end="url(#s14-arr)"/>
 
   <!-- JWT Filter box -->
   <rect x="202" y="82" width="120" height="60" rx="12" ry="12"
-        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
-  <rect x="202" y="82" width="120" height="26" rx="12" ry="12" fill="#5fd13a"/>
-  <rect x="202" y="96" width="120" height="12" fill="#5fd13a"/>
+        fill="#fff" stroke="#8a5714" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="202" y="82" width="120" height="26" rx="12" ry="12" fill="#ffb34a"/>
+  <rect x="202" y="96" width="120" height="12" fill="#ffb34a"/>
   <text x="262" y="95" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="12" font-weight="700">JWT Filter</text>
+        fill="#10110f" font-size="12" font-weight="700">JWT Filter</text>
   <text x="262" y="128" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">verify token</text>
+        fill="#62645b" font-size="10">verify token</text>
 
   <!-- Arrow JWT Filter → @secure -->
   <line x1="322" y1="112" x2="364" y2="112"
-        stroke="#8aa07e" stroke-width="2" marker-end="url(#s14-arr)"/>
+        stroke="#a6a295" stroke-width="2" marker-end="url(#s14-arr)"/>
 
   <!-- @secure check box -->
   <rect x="366" y="82" width="120" height="60" rx="12" ry="12"
-        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
-  <rect x="366" y="82" width="120" height="26" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="366" y="96" width="120" height="12" fill="#43b02a"/>
+        fill="#fff" stroke="#8a5714" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="366" y="82" width="120" height="26" rx="12" ry="12" fill="#8a5714"/>
+  <rect x="366" y="96" width="120" height="12" fill="#8a5714"/>
   <text x="426" y="95" text-anchor="middle" dominant-baseline="middle"
         fill="#fff" font-size="12" font-weight="700">@secure</text>
   <text x="426" y="128" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">RBAC check</text>
+        fill="#62645b" font-size="10">RBAC check</text>
 
   <!-- Arrow @secure → Service -->
   <line x1="486" y1="112" x2="528" y2="112"
-        stroke="#43b02a" stroke-width="2" marker-end="url(#s14-arr-g)"/>
+        stroke="#8a5714" stroke-width="2" marker-end="url(#s14-arr-g)"/>
 
   <!-- Service box (right) -->
   <rect x="530" y="82" width="148" height="60" rx="12" ry="12"
-        fill="#fff" stroke="#43b02a" stroke-width="2" filter="url(#s14-shadow)"/>
-  <rect x="530" y="82" width="148" height="26" rx="12" ry="12" fill="#43b02a"/>
-  <rect x="530" y="96" width="148" height="12" fill="#43b02a"/>
+        fill="#fff" stroke="#8a5714" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="530" y="82" width="148" height="26" rx="12" ry="12" fill="#8a5714"/>
+  <rect x="530" y="96" width="148" height="12" fill="#8a5714"/>
   <text x="604" y="95" text-anchor="middle" dominant-baseline="middle"
         fill="#fff" font-size="12" font-weight="700">Service</text>
   <text x="604" y="128" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">business logic</text>
+        fill="#62645b" font-size="10">business logic</text>
 
   <!-- IDP badge below JWT Filter -->
   <rect x="202" y="180" width="120" height="54" rx="10" ry="10"
-        fill="#fff" stroke="#ffc24b" stroke-width="2" filter="url(#s14-shadow)"/>
-  <rect x="202" y="180" width="120" height="24" rx="10" ry="10" fill="#ffc24b"/>
-  <rect x="202" y="194" width="120" height="10" fill="#ffc24b"/>
+        fill="#fff" stroke="#ffb34a" stroke-width="2" filter="url(#s14-shadow)"/>
+  <rect x="202" y="180" width="120" height="24" rx="10" ry="10" fill="#ffb34a"/>
+  <rect x="202" y="194" width="120" height="10" fill="#ffb34a"/>
   <text x="262" y="192" text-anchor="middle" dominant-baseline="middle"
-        fill="#16331a" font-size="12" font-weight="700">IDP</text>
+        fill="#10110f" font-size="12" font-weight="700">IDP</text>
   <text x="262" y="220" text-anchor="middle" dominant-baseline="middle"
-        fill="#6a7a64" font-size="10">token issuer</text>
+        fill="#62645b" font-size="10">token issuer</text>
 
   <!-- Dashed line IDP → JWT Filter -->
   <line x1="262" y1="180" x2="262" y2="142"
-        stroke="#ffc24b" stroke-width="1.8" stroke-dasharray="5,4"/>
-  <text x="278" y="164" fill="#6a7a64" font-size="9" font-style="italic">issues JWT</text>
+        stroke="#ffb34a" stroke-width="1.8" stroke-dasharray="5,4"/>
+  <text x="278" y="164" fill="#62645b" font-size="9" font-style="italic">issues JWT</text>
 
   <!-- Amber sparkle top-right -->
   <g transform="translate(680, 44)">
-    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffc24b"/>
+    <path d="M0,-9 L2,-2 L9,0 L2,2 L0,9 L-2,2 L-9,0 L-2,-2 Z" fill="#ffb34a"/>
   </g>
 
+
+<g data-framework-brand="2026-10-08" aria-hidden="true"><rect x="0" y="280" width="720" height="56.16" fill="#ffffff"/><path d="M12 282H708" stroke="#dedbd2" stroke-width="1"/><path d="M12 282H72" stroke="#ffb34a" stroke-width="2"/><!-- framework-logo:start --><svg xmlns="http://www.w3.org/2000/svg" width="75.64" height="48.96" viewBox="0 0 373.88 242" x="632.36" y="283.6" aria-hidden="true"><g fill="#10110f" transform="translate(20 130) scale(0.07 -0.07)"><g transform="translate(0 0)"><path d="M636 -30Q484 -30 380 46Q346 70 318 100L318 -480L139 -480L139 1080L298 1080L298 960Q334 1003 381 1036Q485 1110 637 1110Q787 1110 895.5 1035.5Q1004 961 1062 832Q1120 703 1120 541Q1120 379 1062 250Q1004 121 895.5 45.5Q787 -30 636 -30ZM614 133Q721 133 791 187Q861 241 896 333.5Q931 426 931 541Q931 655 896.5 747Q862 839 790.5 893Q719 947 609 947Q504 947 435 895.5Q366 844 332 752.5Q298 661 298 541Q298 423 331.5 330.5Q365 238 435 185.5Q505 133 614 133Z" /></g><g transform="translate(1160 0)"><path d="M290 -480L468 4L30 1080L217 1080L554 230L870 1080L1051 1080L463 -480Z" /></g><g transform="translate(2316 0)"><path d="M243 0L243 933L60 933L60 1080L243 1080L243 1139Q243 1181 247 1224.5Q251 1268 265 1309.5Q279 1351 311 1386Q348 1427 392 1444.5Q436 1462 481.5 1466Q527 1470 568 1470L705 1470L705 1322L578 1322Q499 1322 460 1283.5Q421 1245 421 1167L421 1080L954 1080L954 1470L1132 1470L1132 0L954 0L954 933L421 933L421 0Z" /></g><g transform="translate(3608 0)"><g data-family-terminal="trail-y"><defs><linearGradient id="brand-99b06834ce-logo-family-pyfly-20-130-140" gradientUnits="userSpaceOnUse" x1="30" y1="1080" x2="554" y2="230"><stop offset="0" stop-color="#ffb34a" stop-opacity="0.2" /><stop offset="0.8" stop-color="#ffb34a" stop-opacity="1" /></linearGradient></defs><path d="M290 -480L468 4L30 1080L217 1080L554 230L870 1080L1051 1080L463 -480Z" fill="url(#brand-99b06834ce-logo-family-pyfly-20-130-140)" /></g></g></g><g fill="#62645b" transform="translate(25 210) scale(0.0155 -0.0155)"><path d="M625 -30Q476 -30 373 46Q314 89 271 150L271 0L139 0L139 1440L287 1440L287 953Q325 1001 375 1036Q479 1110 631 1110Q779 1110 885 1035Q991 960 1047.5 831Q1104 702 1104 541Q1104 379 1047 250Q990 121 883 45.5Q776 -30 625 -30ZM610 107Q723 107 798 164Q873 221 910.5 319.5Q948 418 948 541Q948 663 911 761Q874 859 798.5 916Q723 973 607 973Q494 973 419.5 918Q345 863 308 765.5Q271 668 271 541Q271 416 308 317.5Q345 219 420 163Q495 107 610 107Z" transform="translate(0 0)" /><path d="M294 -480L472 3L33 1080L189 1080L544 192L871 1080L1021 1080L441 -480Z" transform="translate(1131 0)" /></g><svg x="76" y="183" width="143" height="45.48" viewBox="5 -148 619.4 197"><defs><linearGradient id="brand-99b06834ce-logo-firefly-trail" gradientUnits="userSpaceOnUse" x1="567.4" y1="-108" x2="623.4" y2="-54"><stop offset="0" stop-color="#ffb34a" stop-opacity="0.2" /><stop offset="0.8" stop-color="#ffb34a" stop-opacity="1" /></linearGradient></defs><path d="M24.3 0L24.3 -93.3L6 -93.3L6 -108L24.3 -108L24.3 -113.9Q24.3 -118.1 24.7 -122.45Q25.1 -126.8 26.5 -130.95Q27.9 -135.1 31.1 -138.6Q34.8 -142.7 39.2 -144.45Q43.6 -146.2 48.15 -146.6Q52.7 -147 56.8 -147L70.5 -147L70.5 -132.2L57.8 -132.2Q49.9 -132.2 46 -128.35Q42.1 -124.5 42.1 -116.7L42.1 -108L70.5 -108L70.5 -93.3L42.1 -93.3L42.1 0ZM91.5 0L91.5 -108L109.3 -108L109.3 0ZM134.8 0L134.8 -108L150.7 -108L150.7 -90.8Q151.8 -92.7 153.1 -94.5Q156.1 -98.7 159.9 -101.4Q164.1 -104.8 169.4 -106.6Q174.7 -108.4 180.2 -108.75Q185.7 -109.1 190.5 -108L190.5 -91.3Q184.9 -92.8 178.2 -92.1Q171.5 -91.4 165.8 -87.2Q160.6 -83.5 157.75 -78.2Q154.9 -72.9 153.8 -66.75Q152.7 -60.6 152.7 -54.2L152.7 0ZM247.3 3Q231.4 3 219.55 -4.05Q207.7 -11.1 201.1 -23.75Q194.5 -36.4 194.5 -53.3Q194.5 -71 201 -83.95Q207.5 -96.9 219.15 -103.95Q230.8 -111 246.5 -111Q262.8 -111 274.25 -103.5Q285.7 -96 291.45 -82.1Q297.2 -68.2 296.4 -49L213.6 -49Q214.6 -33.5 222 -24.4Q230.6 -13.9 246.5 -13.9Q257.2 -13.9 265.1 -18.8Q273 -23.7 277.5 -32.9L294.6 -27Q288.3 -12.7 275.65 -4.85Q263 3 247.3 3ZM277.9 -63.3Q276.5 -77.4 270.3 -85.2Q262.5 -95 247.1 -95Q230.6 -95 222 -84.4Q215.5 -76.4 213.9 -63.3ZM324.4 0L324.4 -93.3L306.1 -93.3L306.1 -108L324.4 -108L324.4 -113.9Q324.4 -118.1 324.8 -122.45Q325.2 -126.8 326.6 -130.95Q328 -135.1 331.2 -138.6Q334.9 -142.7 339.3 -144.45Q343.7 -146.2 348.25 -146.6Q352.8 -147 356.9 -147L370.6 -147L370.6 -132.2L357.9 -132.2Q350 -132.2 346.1 -128.35Q342.2 -124.5 342.2 -116.7L342.2 -108L395.5 -108L395.5 -147L413.3 -147L413.3 0L395.5 0L395.5 -93.3L342.2 -93.3L342.2 0ZM452.8 48L470.6 -0.4L426.8 -108L445.5 -108L479.2 -23L510.8 -108L528.9 -108L470.1 48Z" fill="#10110f" /><circle cx="100.4" cy="-136.3" r="9.97" fill="#ffb34a" /><path d="M567.4 -108L623.4 -54L603.4 -54L547.4 -108Z" fill="url(#brand-99b06834ce-logo-firefly-trail)" /><path d="M623.4 -54L567.4 0L547.4 0L603.4 -54Z" fill="#ffb34a" /></svg></svg><!-- framework-logo:end --></g>
 </svg>
