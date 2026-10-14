@@ -51,12 +51,12 @@ class TestResponse:
         of ``pyfly.testing`` stays importable without it.
         """
         try:
-            from jsonpath_ng import parse as jsonpath_parse  # type: ignore[import-untyped]
+            from jsonpath_ng.parser import JsonPathParser
         except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError(
                 "assert_json_path requires jsonpath-ng; install it with `pip install pyfly[testing]`."
             ) from exc
-        expr = jsonpath_parse(path)
+        expr = JsonPathParser().parse(path)
         matches = expr.find(self.json())
         if exists:
             assert matches, f"No match for JSON path '{path}'"

@@ -144,7 +144,7 @@ class TestMeterProvider:
             Config({"pyfly": {"observability": {"metrics": {"register-global": False}}}})
         )
         assert isinstance(provider, MeterProvider)
-        assert list(provider._sdk_config.metric_readers) == []
+        assert list(provider._metric_readers) == []
         # Instruments still work — a service records; nothing is exported.
         provider.get_meter("t").create_counter("requests").add(1)
         provider.shutdown()
@@ -162,7 +162,7 @@ class TestMeterProvider:
             }
         )
         provider = MeterProviderAutoConfiguration().meter_provider(cfg)
-        (reader,) = provider._sdk_config.metric_readers
+        (reader,) = provider._metric_readers
         assert isinstance(reader, PeriodicExportingMetricReader)
         assert reader._exporter._endpoint == "http://collector:4318/v1/metrics"
         provider.shutdown()
@@ -178,7 +178,7 @@ class TestMeterProvider:
             }
         )
         provider = MeterProviderAutoConfiguration().meter_provider(cfg)
-        (reader,) = provider._sdk_config.metric_readers
+        (reader,) = provider._metric_readers
         assert reader._exporter._endpoint == "http://m:4318/v1/metrics"
         provider.shutdown()
 

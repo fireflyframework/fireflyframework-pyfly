@@ -329,6 +329,7 @@ class LeaseLock:
     def _entry(entries: list[tuple[asyncio.Task[Any] | None, str]]) -> tuple[asyncio.Task[Any] | None, str]:
         """The acquisition of the running task, else the latest (a lease taken and released by one task)."""
         task = asyncio.current_task()
+        entry: tuple[asyncio.Task[Any] | None, str]
         for entry in reversed(entries):
             if entry[0] is task:
                 return entry

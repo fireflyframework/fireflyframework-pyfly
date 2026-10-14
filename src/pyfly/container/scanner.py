@@ -96,7 +96,7 @@ def _auto_bind_interfaces(cls: type, container: Container) -> None:
 
 def _is_protocol(cls: type) -> bool:
     """Check if a class is a runtime-checkable Protocol."""
-    return bool(getattr(cls, "_is_protocol", False)) and cls is not Protocol  # type: ignore[comparison-overlap]
+    return bool(getattr(cls, "_is_protocol", False)) and cls is not Protocol
 
 
 def _is_port(cls: type) -> bool:

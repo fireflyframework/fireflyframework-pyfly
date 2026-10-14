@@ -125,6 +125,7 @@ nav:
   - CLI Reference: cli.md
   - Spring Comparison: spring-comparison.md
   - Versioning: versioning.md
+  - Dependency Updates: dependency-updates.md
   - Modules:
       - Overview: modules/README.md
       - Foundation:

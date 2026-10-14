@@ -88,6 +88,8 @@ class TestInstaller:
         env = os.environ.copy()
         env["PYFLY_HOME"] = str(install_dir)
         env["PYFLY_SOURCE"] = str(project_root)
+        # Preconfigure PATH so the installer never edits the user's shell profile.
+        env["PATH"] = str(install_dir / "bin") + os.pathsep + env["PATH"]
 
         result = subprocess.run(
             ["bash", str(INSTALLER_PATH)],
@@ -112,6 +114,8 @@ class TestInstaller:
         env = os.environ.copy()
         env["PYFLY_HOME"] = str(install_dir)
         env["PYFLY_SOURCE"] = str(project_root)
+        # Preconfigure PATH so the installer never edits the user's shell profile.
+        env["PATH"] = str(install_dir / "bin") + os.pathsep + env["PATH"]
 
         # Install first
         subprocess.run(

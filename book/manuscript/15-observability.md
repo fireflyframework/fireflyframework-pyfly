@@ -188,9 +188,16 @@ That redaction pass runs for *every* logger in the process, including ones insid
 The regex engine ships with every install. The Presidio-backed NER engine — which also catches free-text names and addresses — is available via the `[pii]` extra and activates automatically when installed:
 
 ```bash
-uv add "pyfly[observability,pii]"
-python -m spacy download en_core_web_sm   # lighter model; lg for higher recall
+uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.05/pyfly-26.10.5-py3-none-any.whl"
+uv run python -m spacy download en_core_web_sm
 ```
+
+For v26.10.05, the optional PII extra requires Git and GitHub access: it pins
+an official Presidio source fix so cryptography 50 can be installed. The source
+still reports the same Presidio version as its older PyPI package. Existing pip
+installations must explicitly reinstall the pinned anonymizer before upgrading;
+follow the [dependency migration procedure](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/#presidio-and-cryptography)
+and finish with `python -m pip check`. The regex engine does not need this extra.
 
 Configure redaction in `pyfly.yaml`:
 
@@ -206,8 +213,9 @@ pyfly:
         - token
         - secret
       presidio:
+        model: en_core_web_sm
         score-threshold: 0.6
-        languages: [en, es]
+        languages: [en]
 ```
 
 `deny-fields` lists structured log field *names* whose values are unconditionally replaced with `<REDACTED>`. Use it for fields like `password` where you know the value is sensitive without inspecting the content.
