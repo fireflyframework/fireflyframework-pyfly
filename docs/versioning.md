@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.04` | 2026-10-14 | Revised OAuth references and EN/ES books included in the software release; synchronized release metadata. |
 | `26.10.03` | 2026-10-14 | HTTP authorization-code/PKCE redemption and interoperable OAuth Basic credentials. |
 | `26.10.02` | 2026-10-13 | Bounded token refresh and explicit code-exchange authentication/resource indicators. |
 | `26.10.01` | 2026-10-06 | Feature flags on OpenFeature and flagd, with a shared PyFly/LaraFly contract. |
@@ -101,17 +102,17 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.03"
+print(pyfly.__version__)  # → "26.10.04"
 ```
 
 ```bash
-pyfly --version            # → 26.10.03
+pyfly --version            # → 26.10.04
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.03) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.04) (Python 3.13.9)
 ```
 
 ---

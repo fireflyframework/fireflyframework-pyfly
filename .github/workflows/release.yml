@@ -92,7 +92,7 @@ jobs:
           ' CHANGELOG.md > RELEASE_NOTES.md
 
           # Append GitHub-style "Full Changelog" compare link when a prior tag exists.
-          PREV="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          PREV="$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)"
           if [ -n "$PREV" ]; then
             {
               echo ""
