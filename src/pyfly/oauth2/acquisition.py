@@ -1,6 +1,6 @@
 # Copyright 2026 Firefly Software Foundation.
 # Licensed under the Apache License, Version 2.0.
-"""Bounded authorization-code/PKCE, client-credentials and device acquisition."""
+"""Bounded authorization-code/PKCE, refresh, client-credentials and device acquisition."""
 
 from __future__ import annotations
 
@@ -166,6 +166,48 @@ def _scope_value(scopes: tuple[str, ...]) -> str:
     value = " ".join(scopes)
     if len(value) > 4096:
         raise ValueError("serialized scope must not exceed 4096 characters")
+    return value
+
+
+def _request_value(value: str, name: str, limit: int = 4096) -> str:
+    if not isinstance(value, str) or not value or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value):
+        raise ValueError(f"{name} requires a bounded nonempty UTF-8 string without controls")
+    try:
+        if len(value.encode("utf-8")) > limit:
+            raise ValueError
+    except (UnicodeError, ValueError):
+        raise ValueError(f"{name} exceeds its UTF-8 request bound") from None
+    return value
+
+
+def _resource_value(value: str | None, *, allow_loopback_http: bool) -> str | None:
+    if value is None:
+        return None
+    _request_value(value, "resource", 2048)
+    try:
+        if not re.fullmatch(r"[A-Za-z0-9._~:/?\[\]@!$&'()*+,;=%-]+", value) or re.search(r"%(?![A-Fa-f0-9]{2})", value):
+            raise ValueError
+        parsed = urlsplit(value)
+        if not parsed.scheme or not (parsed.netloc or parsed.path) or parsed.username is not None:
+            raise ValueError
+        if not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@%/-]*", parsed.path):
+            raise ValueError
+        if not re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*", parsed.query):
+            raise ValueError
+        if parsed.netloc and not re.fullmatch(
+            r"(?:\[[A-Za-z0-9._~!$&'()*+,;=:%-]+\]|[A-Za-z0-9._~!$&'()*+,;=%-]+)(?::[0-9]*)?",
+            parsed.netloc,
+        ):
+            raise ValueError
+        if parsed.scheme in {"http", "https"}:
+            host = parsed.hostname
+            _ = parsed.port
+            if not host or not host.strip("."):
+                raise ValueError
+            if parsed.scheme == "http" and not (allow_loopback_http is True and host in {"127.0.0.1", "::1"}):
+                raise ValueError
+    except ValueError:
+        raise ValueError("resource requires a safe absolute URI without userinfo or fragments") from None
     return value
 
 
@@ -352,25 +394,75 @@ class OAuth2Client:
                 raise OAuth2ClientError("invalid_response") from None
         return tokens
 
-    async def exchange_code(self, code: str, *, redirect_uri: str, code_verifier: str) -> OAuth2Tokens:
+    def _connection_authentication(self, authentication: Literal["client_secret_basic", "client_secret_post"]) -> None:
+        if authentication not in ("client_secret_basic", "client_secret_post"):
+            raise ValueError("Unsupported client authentication method")
+        _request_value(self._client_id, "client_id")
+        if self._secret is not None and self._secret != "":
+            _request_value(self._secret, "client_secret")
+        elif authentication == "client_secret_basic":
+            raise ValueError("Basic authentication requires confidential client credentials")
+
+    async def exchange_code(
+        self,
+        code: str,
+        *,
+        redirect_uri: str,
+        code_verifier: str,
+        authentication: Literal["client_secret_basic", "client_secret_post"] = "client_secret_post",
+        resource: str | None = None,
+    ) -> OAuth2Tokens:
         """Exchange only after caller verifies callback state/issuer/URI and replay.
 
         The redirect URI is sent verbatim; no listener is created. Returned ID
         tokens are opaque and must not be used as authenticated identity.
         """
+        self._connection_authentication(authentication)
+        _request_value(code, "code")
+        _request_value(redirect_uri, "redirect_uri")
         pkce_challenge(code_verifier)
-        if not code or not redirect_uri:
-            raise ValueError("code and redirect_uri are required")
+        resource = _resource_value(resource, allow_loopback_http=self._loopback)
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        }
+        if resource is not None:
+            data["resource"] = resource
         doc = await self._post(
             self._endpoints.token_endpoint,
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "code_verifier": code_verifier,
-            },
+            data,
+            authentication=authentication,
         )
         return self._tokens(doc)
+
+    async def refresh_token(
+        self,
+        refresh_token: str,
+        *,
+        scopes: tuple[str, ...] = (),
+        authentication: Literal["client_secret_basic", "client_secret_post"] = "client_secret_post",
+        resource: str | None = None,
+    ) -> OAuth2Tokens:
+        """Make one refresh request; the caller owns scope policy and rotation/replay custody."""
+        self._connection_authentication(authentication)
+        _request_value(refresh_token, "refresh_token", 65536)
+        scope = _scope_value(scopes)
+        resource = _resource_value(resource, allow_loopback_http=self._loopback)
+        data = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+        if scope:
+            data["scope"] = scope
+        if resource is not None:
+            data["resource"] = resource
+        doc = await self._post(self._endpoints.token_endpoint, data, authentication=authentication)
+        tokens = self._tokens(doc)
+        if tokens.scope is not None:
+            try:
+                _scope_value(tuple(tokens.scope.split(" ")))
+            except ValueError:
+                raise OAuth2ClientError("invalid_response") from None
+        return tokens
 
     async def authorize_device(self, *, scopes: tuple[str, ...] = (), use_pkce: bool = False) -> DeviceAuthorization:
         """Start a device grant, optionally binding it to an internally generated S256 proof.

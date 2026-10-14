@@ -67,9 +67,62 @@ redirect URI/path and issuer (including mix-up/replay protection). The library
 creates no callback listener or browser process. `OAuth2Tokens.id_token` is an
 opaque value, not verified identity; never substitute it for `access_token`.
 Credential storage, refresh serialization/rotation and local roles remain the
-application's responsibility. Authorization-code and device operations use form
-authentication for an explicitly supplied confidential-client secret; public
-clients send no secret.
+application's responsibility. Device operations use form authentication for an
+explicitly supplied confidential-client secret; public clients send no secret.
+
+## Code exchange and refresh
+
+`exchange_code(code, *, redirect_uri, code_verifier, authentication="client_secret_post", resource=None)`
+keeps the existing form authentication and wire format when the new options are
+omitted. For providers requiring HTTP Basic, explicitly choose
+`authentication="client_secret_basic"`. Basic requires a nonempty confidential
+client secret and form-encodes each credential before base64 encoding. The default
+post method also supports public clients without a secret. Neither method falls
+back to another authentication method after rejection.
+
+Use `refresh_token(refresh_token, *, scopes=(), authentication="client_secret_post", resource=None)`
+for one explicit refresh request:
+
+```python
+async def refresh_saved_grant(saved_refresh_token: str):
+    async with OAuth2Client("my-public-client", endpoints) as client:
+        return await client.refresh_token(
+            saved_refresh_token,
+            scopes=("api.read",),
+            resource="https://api.example.com",
+        )
+```
+
+Code, redirect URI and client ID must be nonempty UTF-8 strings of at most
+4096 bytes without C0/C1 controls. Nonempty client secrets have the same limits;
+omitting the secret or passing an empty secret uses a public client with post
+authentication. Refresh tokens have
+the same rules with a 65,536-byte limit. Invalid values fail before HTTP with
+redacted errors. Refresh scopes use the bounded scope syntax below; an empty
+tuple omits the parameter. Returned scopes are checked for syntax, but the caller
+must validate them against the original grant and its current access policy.
+The library does not infer approved scopes from requested scopes. Missing
+`scope` or `refresh_token` fields remain `None`; it does not silently reuse a
+previous refresh token or invent a replacement.
+
+`resource` is an optional [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707#section-2)
+identifier sent only to the configured token endpoint. It is never fetched or
+opened. Use the exact identifier registered with the trusted provider; the
+library does not discover or approve resources. The value must be an absolute
+ASCII URI, at most 2048 UTF-8 bytes, with valid percent escapes and no userinfo,
+fragment or controls. HTTPS resources require a host. URNs, `api://` identifiers
+and other absolute schemes are accepted as identifiers. HTTP resources require
+`allow_loopback_http=True` and a literal `127.0.0.1` or `::1` host. This resource
+profile is stricter than the development token-endpoint profile: `localhost`
+and truthy non-boolean opt-ins are not accepted for HTTP resources.
+
+Code exchange and refresh each dispatch once using the constructor timeout and
+response bound. Cancellation, timeout, malformed responses and transport errors
+never trigger a replay. The application must serialize refreshes, encrypt stored
+tokens and persist rotation decisions. If a refresh request may have reached the
+provider but its result is unknown, do not automatically replay the old token;
+reconcile the grant or ask the user to authorize again. These operations create
+no callback state, token vault, browser flow, identity verification or local roles.
 
 For machine access, use the public client-credentials operation:
 
@@ -113,9 +166,9 @@ Machine acquisition accepts only valid Bearer token responses, including the
 applies the same scope limits to a returned scope. The presence of either
 `refresh_token` or `id_token`, even with a null value, fails with
 `OAuth2ClientError("invalid_response")`. This is a strict machine-token contract;
-authorization-code and device token response behavior is unchanged. No refresh
-grant, persistence, automatic renewal or retry is performed. Scope and access
-policy remain the application's responsibility.
+authorization-code and device token response behavior is unchanged. Machine
+acquisition performs no refresh grant, persistence, automatic renewal or retry.
+Scope and access policy remain the application's responsibility.
 
 The per-call `timeout` must be finite and positive; booleans are not accepted.
 It bounds the request and response read by the smaller of this value and the

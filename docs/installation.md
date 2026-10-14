@@ -513,7 +513,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.10.01
+    ✓ pyfly v26.10.02
 
   All checks passed!
 ```

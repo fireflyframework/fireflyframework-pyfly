@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.02 (2026-10-13)
+
+### Added
+
+- Public `OAuth2Client.refresh_token()` for one bounded refresh request with
+  optional scopes, explicit Basic or POST authentication and a resource
+  indicator. Missing response scopes and refresh tokens remain absent;
+  applications retain access-policy validation and rotating-token custody.
+- `OAuth2Client.exchange_code()` accepts explicit client authentication and a
+  resource indicator. The existing POST authentication and default wire format
+  are preserved. Resources are validated identifiers sent only to the trusted
+  token endpoint; they are never fetched.
+
+### Compatibility
+
+- Code, redirect URI and client credentials now reject controls, invalid UTF-8
+  and values exceeding their 4096-byte request bound before HTTP. Public clients
+  retain POST authentication without a secret; Basic requires confidential
+  credentials. Resource and refresh-scope limits are documented in the
+  [standalone OAuth client guide](docs/modules/oauth2-client.md).
+- Neither operation retries or changes authentication methods after a failure.
+  Applications still own callback state and issuer checks, encrypted storage,
+  refresh serialization and reconciliation of unknown provider outcomes.
+  Returned ID tokens remain opaque values, not verified identities.
+
 ## v26.10.01 (2026-10-06)
 
 ### Added

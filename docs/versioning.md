@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.02` | 2026-10-13 | Bounded token refresh and explicit code-exchange authentication/resource indicators. |
 | `26.10.01` | 2026-10-06 | Feature flags on OpenFeature and flagd, with a shared PyFly/LaraFly contract. |
 | `26.09.15` | 2026-09-30 | Public JWKS fetch seam and caller budgets; bounded OAuth2 client credentials. |
 | `26.09.14` | 2026-09-30 | Opt-in S256 PKCE for device authorization and token polling. |
@@ -99,17 +100,17 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.01"
+print(pyfly.__version__)  # → "26.10.02"
 ```
 
 ```bash
-pyfly --version            # → 26.10.01
+pyfly --version            # → 26.10.02
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.01) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.02) (Python 3.13.9)
 ```
 
 ---
