@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.03 (2026-10-14)
+
+### Fixed
+
+- The native authorization-server HTTP token endpoint now forwards an
+  authorization code, its exact redirect URI and its PKCE verifier to
+  `AuthorizationServer.token()`. Missing bindings and malformed verifiers are
+  rejected before code redemption; Unicode verifier input returns a protocol
+  error instead of an internal server error.
+- OAuth Basic credentials are form-decoded after splitting the encoded pair.
+  The public acquisition client and native opaque-token introspector now
+  interoperate with registered credentials containing reserved characters,
+  spaces or Unicode. Ordinary ASCII credential wires remain unchanged.
+
+### Compatibility
+
+- The direct authorization-server API, atomic grant-store behavior and existing
+  machine/refresh HTTP contracts are preserved. Code replay still revokes the
+  refresh family issued from that code. The standalone machine acquisition
+  client's strict access-token-only response profile is unchanged.
+
 ## v26.10.02 (2026-10-13)
 
 ### Added

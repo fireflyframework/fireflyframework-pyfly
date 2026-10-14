@@ -711,6 +711,33 @@ redirected back as `error` parameters (with `state` echoed). Token/management
 errors map to a 400, except `INVALID_CLIENT`, which is a `401` with
 `WWW-Authenticate: Basic realm="oauth2"`.
 
+For an `authorization_code` token request, send the issued `code`, the exact
+`redirect_uri` registered for the authorization request, and its saved
+`code_verifier`. The HTTP endpoint forwards these values to
+`AuthorizationServer.token()` and rejects missing bindings or malformed PKCE
+verifiers before redemption. A verifier contains 43–128 unreserved ASCII
+characters. An incorrect verifier or redirect does not consume the valid code;
+replaying a redeemed code rejects the request and revokes its issued refresh
+family through the server's existing atomic grant store.
+
+The public [`OAuth2Client.exchange_code()`](oauth2-client.md#code-exchange-and-refresh)
+supports this HTTP flow with confidential Basic/POST authentication or a public
+client using POST without a secret. The caller still validates browser state and
+issuer, retains the verifier, and stores returned tokens securely.
+
+OAuth Basic authentication form-encodes the client ID and secret separately,
+joins them with a colon, and base64-encodes that pair. The server decodes each
+component once, so literal `+`, `%`, `:`, spaces and Unicode credentials match
+their registered values. Use this OAuth encoding rather than raw HTTP Basic
+credential strings; [`RFC 6749 §2.3.1`](https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1)
+defines the wire format.
+
+The first-party server's machine-grant HTTP response includes a refresh token.
+The standalone `OAuth2Client.client_credentials()` intentionally accepts only a
+machine access token and rejects refresh/ID tokens in that response. Keep these
+profiles separate: an existing first-party machine HTTP caller can use the
+public `refresh_token()` operation for its explicitly retained refresh token.
+
 ### Dynamic Client Registration (RFC 7591)
 
 `POST /oauth2/register` registers a client at runtime. It requires the server to

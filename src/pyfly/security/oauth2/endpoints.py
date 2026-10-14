@@ -28,13 +28,14 @@ import base64
 import binascii
 from secrets import compare_digest as _consteq
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import unquote_plus, urlencode
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from pyfly.kernel.exceptions import SecurityException
+from pyfly.oauth2 import pkce_challenge
 from pyfly.security.context import SecurityContext
 from pyfly.security.oauth2.authorization_server import AuthorizationServer
 from pyfly.security.oauth2.client import ClientRegistration
@@ -218,12 +219,28 @@ class AuthorizationServerEndpoints:
                 return self._error(exc)
             confirmation = {"jkt": jkt}
         try:
+            grant_type = str(form.get("grant_type", ""))
+            code = str(form["code"]) if form.get("code") else None
+            redirect_uri = str(form["redirect_uri"]) if form.get("redirect_uri") else None
+            code_verifier = str(form["code_verifier"]) if form.get("code_verifier") else None
+            if grant_type == "authorization_code":
+                if not code or not redirect_uri or not code_verifier:
+                    raise SecurityException(
+                        "Authorization code, redirect URI and verifier are required", code="INVALID_REQUEST"
+                    )
+                try:
+                    pkce_challenge(code_verifier)
+                except ValueError:
+                    raise SecurityException("Invalid PKCE verifier", code="INVALID_REQUEST") from None
             result = await self._server.token(
-                grant_type=str(form.get("grant_type", "")),
+                grant_type=grant_type,
                 client_id=client_id,
                 client_secret=client_secret,
                 scope=str(form.get("scope", "")),
                 refresh_token=(str(form["refresh_token"]) if form.get("refresh_token") else None),
+                code=code,
+                redirect_uri=redirect_uri,
+                code_verifier=code_verifier,
                 confirmation=confirmation,
             )
         except SecurityException as exc:
@@ -291,7 +308,12 @@ class AuthorizationServerEndpoints:
         except (binascii.Error, ValueError, UnicodeDecodeError):
             return None
         cid, sep, secret = decoded.partition(":")
-        return (cid, secret) if sep else None
+        if not sep:
+            return None
+        try:
+            return unquote_plus(cid, errors="strict"), unquote_plus(secret, errors="strict")
+        except UnicodeDecodeError:
+            return None
 
     @staticmethod
     def _error(exc: SecurityException) -> JSONResponse:

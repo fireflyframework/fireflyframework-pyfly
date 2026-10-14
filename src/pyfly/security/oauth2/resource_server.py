@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass, field
 from http.client import HTTPException
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote_plus, urlsplit
 
 import jwt
 
@@ -459,7 +459,7 @@ class OpaqueTokenIntrospector:
                 resp = client.post(
                     self._uri,
                     data={"token": token, "token_type_hint": "access_token"},
-                    auth=(self._client_id, self._client_secret),
+                    auth=(quote_plus(self._client_id), quote_plus(self._client_secret)),
                     headers={"Accept": "application/json"},
                 )
         except httpx.HTTPError as exc:
