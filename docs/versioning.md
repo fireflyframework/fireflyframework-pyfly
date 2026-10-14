@@ -105,8 +105,11 @@ import pyfly
 print(pyfly.__version__)  # → "26.10.04"
 ```
 
+The CLI reads the installed distribution metadata and reports the normalized
+package version:
+
 ```bash
-pyfly --version            # → 26.10.04
+pyfly --version            # → pyfly, version 26.10.4
 ```
 
 The startup banner displays the leading-zero form:

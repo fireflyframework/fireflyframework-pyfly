@@ -1,3 +1,5 @@
+# Copyright 2026 Firefly Software Foundation.
+# SPDX-License-Identifier: Apache-2.0
 """Prevent active package versions and published download examples from drifting."""
 
 import tomllib
@@ -32,7 +34,8 @@ def test_every_displayed_version_site_shows_the_release() -> None:
     for path, expected in sites.items():
         assert expected in (root / path).read_text(encoding="utf-8"), path
     versioning = (root / "docs/versioning.md").read_text(encoding="utf-8")
+    package_version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
     assert f"| `{__version__}` |" in versioning
-    assert f"pyfly --version            # → {__version__}" in versioning
+    assert f"pyfly --version            # → pyfly, version {package_version}" in versioning
     assert f":: PyFly Framework :: ({display}) (Python" in versioning
     assert f":: PyFly :: ({display})" in (root / "docs/modules/core.md").read_text(encoding="utf-8")
