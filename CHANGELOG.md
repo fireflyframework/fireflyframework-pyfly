@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.06 (2026-10-14)
+
+### Fixed
+
+- Honor standard OpenTelemetry service identity for newly created trace and
+  metric providers ([#151](https://github.com/fireflyframework/fireflyframework-pyfly/issues/151)).
+  An explicit nonempty `pyfly.observability.tracing.service-name`, including
+  `PYFLY_OBSERVABILITY_TRACING_SERVICE_NAME`, retains priority; otherwise use
+  `OTEL_SERVICE_NAME`, then `service.name` from `OTEL_RESOURCE_ATTRIBUTES`,
+  then `pyfly.app.name`, then `pyfly-app`.
+- Preserve other SDK resource attributes and use SDK parsing for resource
+  environment values, including URL encoding. Remove the implicit framework
+  service-name default that previously masked standard environment identity.
+
+### Documentation
+
+- Explain identity precedence and deliberate overrides in the observability
+  guide and both book editions; examples leave the service name unset so a
+  platform-injected `OTEL_SERVICE_NAME` is respected.
+- Synchronize package, installer, site, and book download examples with
+  `v26.10.06` (normalized package version `26.10.6`).
+
+### Compatibility
+
+- Existing global and user-defined providers keep their resources. Identity is
+  configured at provider creation; restart the process to apply changes to
+  process-global providers. This release does not redeploy running workloads
+  or rewrite historical telemetry.
+
 ## v26.10.05 (2026-10-14)
 
 ### Changed

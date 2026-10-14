@@ -323,7 +323,7 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | `cli` | click, rich, jinja2, questionary | CLI tools (pyfly new, run, info, doctor, db) |
 | `full` | Bundled application extras (excludes `pii`, `testing`, `testcontainers`, and `argon2`) | Broad framework installation; add optional PII/testing/password backends explicitly |
 
-The optional `pii` extra in v26.10.05 requires Git and GitHub access for the
+The optional `pii` extra in v26.10.06 requires Git and GitHub access for the
 immutable upstream anonymizer fix. See the [dependency update notes](dependency-updates.md#presidio-and-cryptography)
 before upgrading an existing PII installation.
 
@@ -517,7 +517,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.10.05
+    ✓ pyfly v26.10.06
 
   All checks passed!
 ```

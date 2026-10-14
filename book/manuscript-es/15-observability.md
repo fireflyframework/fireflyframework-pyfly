@@ -192,11 +192,11 @@ Esa pasada de redacción se ejecuta para *cada* logger del proceso, incluidos lo
 El motor de expresiones regulares viene con cada instalación. El motor NER respaldado por Presidio —que además atrapa nombres y direcciones en texto libre— está disponible mediante el extra `[pii]` y se activa automáticamente cuando se instala:
 
 ```bash
-uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.05/pyfly-26.10.5-py3-none-any.whl"
+uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.06/pyfly-26.10.6-py3-none-any.whl"
 uv run python -m spacy download en_core_web_sm
 ```
 
-En v26.10.05, el extra PII requiere Git y acceso a GitHub: fija una corrección
+En v26.10.06, el extra PII requiere Git y acceso a GitHub: fija una corrección
 oficial del código fuente de Presidio para poder instalar cryptography 50.
 Ese código conserva el mismo número de versión que el paquete anterior de PyPI.
 Las instalaciones existentes con pip deben reinstalar explícitamente el
@@ -687,11 +687,38 @@ pyfly:
   observability:
     tracing:
       enabled: true
-      service-name: "${pyfly.app.name}"
       exporter: otlp
       otlp:
         endpoint: "http://localhost:4318"
 ```
+
+Deja `tracing.service-name` sin definir para respetar la identidad que inyecta
+la plataforma. Al crear proveedores de trazas y métricas, PyFly resuelve
+`service.name` primero desde un `pyfly.observability.tracing.service-name` no
+vacío (incluido `PYFLY_OBSERVABILITY_TRACING_SERVICE_NAME`), después desde
+`OTEL_SERVICE_NAME`, después desde `service.name` en
+`OTEL_RESOURCE_ATTRIBUTES`, después desde `pyfly.app.name` y, por último,
+desde `pyfly-app`.
+
+```bash
+export OTEL_SERVICE_NAME=lumen-api
+export OTEL_RESOURCE_ATTRIBUTES='service.namespace=lumen,release.note=blue%2Cgreen'
+```
+
+El SDK decodifica los valores de los atributos (`blue%2Cgreen` pasa a ser
+`blue,green`) y PyFly conserva los demás atributos del recurso. Para sustituir
+deliberadamente la identidad del despliegue, define
+`tracing.service-name: lumen-custom` dentro de `pyfly.observability`, o usa
+`PYFLY_OBSERVABILITY_TRACING_SERVICE_NAME`. Definir explícitamente
+`service-name: "${pyfly.app.name}"` también tiene prioridad sobre el entorno
+OpenTelemetry; no hace falta para usar el nombre de la aplicación como respaldo.
+
+La identidad se configura al crear el proveedor. Reinicia el proceso para
+cambiar los recursos globales; los proveedores globales existentes y los
+personalizados se reutilizan sin cambiar sus nombres. Esta versión no
+redespliega aplicaciones en ejecución ni reescribe la telemetría histórica.
+Consulta la [guía de identidad del servicio](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/observability/#service-identity-and-resource-attributes)
+para conocer el contrato completo de propiedad de los proveedores.
 
 **Ejecútalo — observa spans sin un colector.** Levantar Jaeger o Tempo es
 excesivo mientras estás aprendiendo. Configura en su lugar el **exportador de

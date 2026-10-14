@@ -1315,7 +1315,10 @@ read-only deployment. A separate management listener additionally requires
 |---|---|---|
 | `pyfly.observability.metrics.enabled` | `true` | Enable metrics collection. |
 | `pyfly.observability.tracing.enabled` | `true` | Enable distributed tracing. |
-| `pyfly.observability.tracing.service-name` | `"${pyfly.app.name}"` | OpenTelemetry service name (defaults to app name). |
+| `pyfly.observability.tracing.service-name` | unset | Explicit nonempty override for newly created trace and metric resources; otherwise `OTEL_SERVICE_NAME`, resource environment `service.name`, app name, then `pyfly-app`. |
+
+See [service identity and resource attributes](observability.md#service-identity-and-resource-attributes)
+for standard environment variables, preserved attributes, and provider restart behavior.
 
 ### Full YAML Reference
 
@@ -1441,7 +1444,6 @@ pyfly:
       enabled: true
     tracing:
       enabled: true
-      service-name: "${pyfly.app.name}"
   transactional:
     enabled: false
     saga:
