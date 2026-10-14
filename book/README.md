@@ -7,10 +7,10 @@ wallet offer route, shared targeting fixture, runtime gates and operator workflo
 
 | Edition | PDF | EPUB |
 |---|---|---|
-| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example.epub) |
-| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-2026.10.08/pyfly-by-example-es.epub) |
+| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example.epub) |
+| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example-es.epub) |
 
-These links download the 2026-10-08 book edition, published independently of the
+These links download the 2026-10-14 book edition, published independently of the
 framework package. For other editions, open the [tagged releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
 and download the books attached to that tag.
 
