@@ -730,7 +730,13 @@ joins them with a colon, and base64-encodes that pair. The server decodes each
 component once, so literal `+`, `%`, `:`, spaces and Unicode credentials match
 their registered values. Use this OAuth encoding rather than raw HTTP Basic
 credential strings; [`RFC 6749 §2.3.1`](https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1)
-defines the wire format.
+defines the wire format. `OpaqueTokenIntrospector` uses the same credential
+encoding when authenticating a token-introspection request.
+
+The native server permits a public client without a secret to use
+`authorization_code` only. Refresh requires a confidential client and its
+registered secret. The server issues access tokens with its configured audience;
+it does not implement per-request RFC 8707 resource selection.
 
 The first-party server's machine-grant HTTP response includes a refresh token.
 The standalone `OAuth2Client.client_credentials()` intentionally accepts only a

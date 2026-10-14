@@ -1676,23 +1676,120 @@ código**.
 
 ### Rotación de tokens de actualización y detección de reutilización
 
-Los tokens de actualización (refresh tokens) rotan. Cada vez que la app refresca,
-obtiene un *nuevo* token de actualización y el antiguo se marca como consumido:
+Usa un token de actualización emitido al mismo cliente confidencial. El servidor
+nativo exige autenticación de cliente para refrescar: `lumen-mobile` puede
+canjear un código con PKCE, pero no puede refrescar sin secreto.
+
+El ejemplo actualiza la concesión de máquina de `lumen-reconciler`. Cada
+actualización aceptada emite un nuevo token y marca el anterior como consumido:
 
 ```bash
 curl -s -X POST http://localhost:8080/oauth2/token \
-  -d grant_type=refresh_token -d client_id=lumen-mobile \
-  -d refresh_token="$OLD_REFRESH"
+  -d grant_type=refresh_token -d client_id=lumen-reconciler \
+  --data-urlencode "client_secret=$RECONCILER_SECRET" \
+  --data-urlencode "refresh_token=$OLD_REFRESH"
 ```
 
-El token consumido no se elimina: se conserva precisamente para poder detectar una
-*repetición*. Si se presenta un token de actualización robado después de que el
-cliente legítimo ya lo haya rotado, el servidor detecta la reutilización y revoca la
-**familia de tokens completa** (el token original y todos sus descendientes),
-obligando tanto al atacante como a la víctima a pasar de nuevo por el inicio de
-sesión. Un cliente legítimo nunca reenvía un token ya rotado, así que la
-reutilización es prueba inequívoca de robo. Tanto el caso de reutilización como una
-presentación desde el cliente equivocado lanzan `INVALID_GRANT`.
+El servidor conserva los tokens consumidos para detectar su reutilización.
+Presentar uno tras la rotación revoca toda su familia, incluido el token original
+y sus descendientes. El cliente debe obtener una nueva concesión. Una
+actualización concurrente accidental o un reintento tras un resultado incierto
+provoca la misma respuesta. Serializa las actualizaciones y reconcilia los
+resultados inciertos. Tanto la reutilización como la presentación desde el cliente
+equivocado lanzan `INVALID_GRANT`.
+
+### Llamar al endpoint de tokens desde la aplicación
+
+Instala `pyfly[oauth2-client]` para usar el módulo independiente `pyfly.oauth2`.
+Permite solicitar tokens sin instalar rutas web ni crear un contexto de
+aplicación. Cuando el callback haya validado su estado de un solo uso, emisor
+y URI de redirección, pasa el código y el verificador PKCE guardado a
+`exchange_code()`:
+
+```python
+import os
+
+from pyfly.oauth2 import OAuth2Client, OAuth2Endpoints
+
+
+async def exchange_validated_callback(code: str, verifier: str):
+    endpoints = OAuth2Endpoints(os.environ["OAUTH_TOKEN_ENDPOINT"])
+    async with OAuth2Client("lumen-mobile", endpoints) as client:
+        return await client.exchange_code(
+            code,
+            redirect_uri="com.lumen.app://callback",
+            code_verifier=verifier,
+        )
+
+
+async def refresh_confidential_grant(saved_refresh_token: str):
+    endpoints = OAuth2Endpoints(os.environ["OAUTH_TOKEN_ENDPOINT"])
+    async with OAuth2Client(
+        "lumen-reconciler",
+        endpoints,
+        client_secret=os.environ["RECONCILER_SECRET"],
+    ) as client:
+        return await client.refresh_token(
+            saved_refresh_token,
+            authentication="client_secret_basic",
+        )
+```
+
+Configura un endpoint de tokens HTTPS de confianza. El cliente envía cada canje
+o actualización una sola vez, con límites de tiempo y tamaño de respuesta. No
+abre un navegador, valida tokens de identidad, almacena credenciales ni crea
+roles de aplicación. Mantén los tokens y valores PKCE fuera de logs y
+diagnósticos serializados: que `repr` los oculte no elimina los secretos de sus
+campos.
+
+`exchange_code()` y `refresh_token()` usan `client_secret_post` por defecto.
+Este método permite que un cliente público canjee un código sin secreto.
+
+Usa `client_secret_basic` para un cliente confidencial cuando su proveedor
+lo requiera. OAuth Basic codifica por separado el ID y el secreto
+como campos de formulario antes de unirlos y codificarlos en base64. Así
+conserva signos más, porcentajes, dos puntos, espacios y credenciales Unicode.
+Ningún método cambia de autenticación después de un rechazo.
+`OpaqueTokenIntrospector` usa la misma codificación de credenciales para
+la introspección autenticada de tokens.
+
+La ruta de tokens de `AuthorizationServerEndpoints` pasa al servidor nativo el
+código, la URI exacta de redirección y el verificador. La falta de esos valores
+o un verificador fuera del rango de 43 a 128 caracteres ASCII no reservados
+provoca un rechazo antes del canje. Una redirección o verificador incorrectos
+deja disponible el código válido; canjearlo dos veces revoca la familia de
+actualización emitida en el primer canje.
+
+Para un proveedor compatible con indicadores de recurso, ambas operaciones del
+cliente aceptan `resource` con el identificador exacto registrado. El cliente
+lo envía al endpoint de tokens configurado y nunca consulta esa URI. Debe ser
+una URI ASCII absoluta con escapes porcentuales válidos, sin credenciales,
+fragmentos ni caracteres de control. Los identificadores HTTP exigen un host
+literal `127.0.0.1` o `::1`. Activa `allow_loopback_http=True` explícitamente. El servidor
+nativo usa su audiencia configurada: esta opción del cliente no añade
+selección de recursos a ese servidor.
+
+Los ámbitos de actualización se indican explícitamente. Comprueba los ámbitos
+recibidos contra la concesión original y la política de acceso vigente. Si la
+respuesta omite `scope` o `refresh_token`, quedan en `None`; la biblioteca no
+reutiliza el token anterior ni inventa un reemplazo. La aplicación debe
+serializar las actualizaciones y persistir la rotación de forma segura. Si una
+petición pudo llegar al proveedor pero se desconoce su resultado, no reenvíes
+automáticamente el token anterior. Reconcilia la concesión o pide al usuario
+una nueva autorización.
+
+La respuesta HTTP de máquina del servidor nativo incluye un token de
+actualización. La operación independiente `client_credentials()` solo acepta
+un token de acceso de máquina y rechaza respuestas con tokens de actualización
+o identidad. Usa cada operación con un proveedor cuya respuesta cumpla su
+contrato. Un cliente HTTP nativo de máquina existente puede usar
+`refresh_token()` con su token de actualización guardado explícitamente, como
+en el ejemplo anterior.
+
+La [referencia del cliente independiente](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/oauth2-client/)
+recoge los límites de entrada, sintaxis de ámbitos, polling de dispositivos y
+firmas completas. La [referencia del servidor OAuth](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/oauth2/)
+explica las rutas HTTP, autenticación y almacenes de concesiones del servidor.
 
 ### Firma asimétrica y JWKS
 

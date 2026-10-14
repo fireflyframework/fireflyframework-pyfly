@@ -124,6 +124,13 @@ provider but its result is unknown, do not automatically replay the old token;
 reconcile the grant or ask the user to authorize again. These operations create
 no callback state, token vault, browser flow, identity verification or local roles.
 
+When calling the native `AuthorizationServerEndpoints` routes, code exchange
+uses the registered redirect URI and retained S256 verifier. Public clients
+can exchange a code, but the native server requires a confidential client
+secret for refresh. Its audience is configured on the server; the client's
+`resource` parameter does not add resource selection to that server. See the
+[server HTTP contract](oauth2.md#http-endpoints-authorizationserverendpoints).
+
 For machine access, use the public client-credentials operation:
 
 ```python

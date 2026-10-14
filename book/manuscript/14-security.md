@@ -1662,22 +1662,112 @@ injection attack and **revokes the refresh token already issued from that code**
 
 ### Refresh rotation and reuse detection
 
-Refresh tokens rotate. Every time the app refreshes, it gets a *new* refresh
-token and the old one is marked consumed:
+Use a refresh token issued to the same confidential client. The native server
+requires client authentication for refresh; `lumen-mobile` can exchange a PKCE
+code but cannot refresh without a secret.
+
+This example refreshes the `lumen-reconciler` machine grant. Each accepted
+refresh issues a new token and marks the previous token consumed:
 
 ```bash
 curl -s -X POST http://localhost:8080/oauth2/token \
-  -d grant_type=refresh_token -d client_id=lumen-mobile \
-  -d refresh_token="$OLD_REFRESH"
+  -d grant_type=refresh_token -d client_id=lumen-reconciler \
+  --data-urlencode "client_secret=$RECONCILER_SECRET" \
+  --data-urlencode "refresh_token=$OLD_REFRESH"
 ```
 
-The consumed token is not deleted — it is kept precisely so that a *replay* can
-be caught. If a stolen refresh token is presented after the legitimate client has
-already rotated it, the server detects the reuse and revokes the **entire token
-family** (the original token and every descendant), forcing both the attacker and
-the victim back through login. A legitimate client never replays a rotated token,
-so reuse is unambiguous evidence of theft. Both the reuse case and a presentation
-from the wrong client raise `INVALID_GRANT`.
+The server retains consumed tokens so it can detect reuse. Presenting one after
+rotation revokes its entire token family, including the original token and its
+descendants. The client must obtain a new grant. An accidental concurrent refresh
+or a retry after an uncertain earlier result triggers the same response.
+Serialize refreshes and reconcile uncertain outcomes. Both reuse and presentation
+by the wrong client raise `INVALID_GRANT`.
+
+### Calling a token endpoint from application code
+
+Install `pyfly[oauth2-client]` for the standalone `pyfly.oauth2` module. It
+provides token requests without installing web routes or creating an application
+context. After your callback handler has checked its one-time state, issuer and
+redirect URI, pass the code and retained PKCE verifier to `exchange_code()`:
+
+```python
+import os
+
+from pyfly.oauth2 import OAuth2Client, OAuth2Endpoints
+
+
+async def exchange_validated_callback(code: str, verifier: str):
+    endpoints = OAuth2Endpoints(os.environ["OAUTH_TOKEN_ENDPOINT"])
+    async with OAuth2Client("lumen-mobile", endpoints) as client:
+        return await client.exchange_code(
+            code,
+            redirect_uri="com.lumen.app://callback",
+            code_verifier=verifier,
+        )
+
+
+async def refresh_confidential_grant(saved_refresh_token: str):
+    endpoints = OAuth2Endpoints(os.environ["OAUTH_TOKEN_ENDPOINT"])
+    async with OAuth2Client(
+        "lumen-reconciler",
+        endpoints,
+        client_secret=os.environ["RECONCILER_SECRET"],
+    ) as client:
+        return await client.refresh_token(
+            saved_refresh_token,
+            authentication="client_secret_basic",
+        )
+```
+
+Configure a trusted HTTPS token endpoint. The client sends each code exchange
+or refresh once, using a bounded timeout and response size. It does not open a
+browser, validate an ID token, store credentials or create application roles.
+Returned tokens and PKCE values must stay out of logs and serialized diagnostics;
+redacted `repr` output does not remove secrets from their fields.
+
+`exchange_code()` and `refresh_token()` default to `client_secret_post`. This
+method supports code exchange by a public client without a secret. Choose
+`client_secret_basic` explicitly for a confidential client when its provider
+requires it. OAuth Basic form-encodes the client ID and secret separately before
+joining and base64-encoding them. This preserves literal plus signs, percent
+signs, colons, spaces and Unicode credentials. Neither method switches to
+another authentication method after rejection. `OpaqueTokenIntrospector` uses
+the same credential encoding for authenticated token introspection.
+
+The stock `AuthorizationServerEndpoints` token route forwards the code, exact
+redirect URI and verifier to the native server. Missing bindings or a verifier
+outside the 43 to 128 unreserved ASCII character range fail before redemption.
+A wrong redirect or verifier leaves the valid code available; redeeming a code
+twice revokes the refresh family issued by its first redemption.
+
+Pass `resource` with the exact registered identifier when the provider supports
+resource indicators. Both operations send it to the configured token endpoint.
+They never fetch that URI. The identifier must be an
+absolute ASCII URI with valid percent escapes and no userinfo, fragment or
+controls. HTTP resource identifiers require a literal `127.0.0.1` or `::1` host
+and explicit `allow_loopback_http=True`. The native first-party server uses its
+configured audience; this client option does not add resource selection to that
+server.
+
+Refresh scopes are explicit. Check returned scopes against the original grant
+and current access policy. Missing `scope` or `refresh_token` fields remain
+`None`; the library neither carries a previous refresh token forward nor invents
+a replacement. Your application must serialize refreshes and persist rotation
+securely. If a request may have reached the provider but its outcome is unknown,
+do not replay the old refresh token automatically. Reconcile the grant or ask
+the user to authorize again.
+
+The native server's machine-grant HTTP response includes a refresh token. The
+standalone `client_credentials()` operation accepts a machine access token only
+and rejects responses containing refresh or ID tokens. Use each operation with
+a provider response matching its contract. An existing native machine HTTP
+caller can use `refresh_token()` for its explicitly retained refresh token, as
+shown above.
+
+The [standalone client reference](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/oauth2-client/)
+lists input limits, scope syntax, device polling and the complete request
+signatures. The [OAuth server reference](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/oauth2/)
+covers the server's HTTP routes, authentication and grant stores.
 
 ### Asymmetric signing and JWKS
 
