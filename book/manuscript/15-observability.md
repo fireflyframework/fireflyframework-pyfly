@@ -188,11 +188,11 @@ That redaction pass runs for *every* logger in the process, including ones insid
 The regex engine ships with every install. The Presidio-backed NER engine — which also catches free-text names and addresses — is available via the `[pii]` extra and activates automatically when installed:
 
 ```bash
-uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.05/pyfly-26.10.5-py3-none-any.whl"
+uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.06/pyfly-26.10.6-py3-none-any.whl"
 uv run python -m spacy download en_core_web_sm
 ```
 
-For v26.10.05, the optional PII extra requires Git and GitHub access: it pins
+For v26.10.06, the optional PII extra requires Git and GitHub access: it pins
 an official Presidio source fix so cryptography 50 can be installed. The source
 still reports the same Presidio version as its older PyPI package. Existing pip
 installations must explicitly reinstall the pinned anonymizer before upgrading;
@@ -743,11 +743,35 @@ pyfly:
   observability:
     tracing:
       enabled: true
-      service-name: "${pyfly.app.name}"
       exporter: otlp
       otlp:
         endpoint: "http://localhost:4318"
 ```
+
+Leave `tracing.service-name` unset to honor an identity injected by the platform.
+For newly created trace and metric providers, PyFly resolves `service.name` from
+a nonempty `pyfly.observability.tracing.service-name` (including
+`PYFLY_OBSERVABILITY_TRACING_SERVICE_NAME`) first, then `OTEL_SERVICE_NAME`,
+then `service.name` in `OTEL_RESOURCE_ATTRIBUTES`, then `pyfly.app.name`, and
+finally `pyfly-app`.
+
+```bash
+export OTEL_SERVICE_NAME=lumen-api
+export OTEL_RESOURCE_ATTRIBUTES='service.namespace=lumen,release.note=blue%2Cgreen'
+```
+
+The SDK decodes resource attribute values (`blue%2Cgreen` becomes `blue,green`)
+and PyFly preserves the other resource attributes. To override deployment
+identity deliberately, set `tracing.service-name: lumen-custom` under
+`pyfly.observability`, or use `PYFLY_OBSERVABILITY_TRACING_SERVICE_NAME`.
+An explicit `service-name: "${pyfly.app.name}"` also overrides the standard
+OpenTelemetry environment; it is not needed for the app-name fallback.
+
+Identity is configured at provider creation. Restart the process to change
+process-global resources; existing globals and custom providers are reused
+without renaming. This release does not redeploy running applications or rewrite
+historical telemetry. See the [service identity guide](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/observability/#service-identity-and-resource-attributes)
+for the full provider ownership contract.
 
 **Run it — see spans without a collector.** Standing up Jaeger or Tempo is
 overkill while you are learning. Set the **console exporter** instead, which

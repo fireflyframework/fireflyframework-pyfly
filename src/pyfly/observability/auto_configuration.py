@@ -83,17 +83,18 @@ class TracingAutoConfiguration:
 
     @staticmethod
     def _service_name(config: Config) -> str:
-        """``pyfly.observability.tracing.service-name``, else ``pyfly.app.name``, else ``pyfly-app``.
+        """Explicit PyFly override, then standard OTel environment, then app name.
 
         Shared with :class:`MeterProviderAutoConfiguration` so traces and metrics carry one
         ``service.name`` — a dashboard joins the two on it.
         """
-        return str(
-            config.get(
-                "pyfly.observability.tracing.service-name",
-                config.get("pyfly.app.name", "pyfly-app"),
-            )
-        )
+        from opentelemetry.sdk.resources import OTELResourceDetector
+
+        explicit = config.get("pyfly.observability.tracing.service-name")
+        if explicit:
+            return str(explicit)
+        detected = OTELResourceDetector().detect().attributes.get("service.name")
+        return str(detected or config.get("pyfly.app.name") or "pyfly-app")
 
     @bean
     def tracer_provider(self, config: Config) -> TracerProvider:

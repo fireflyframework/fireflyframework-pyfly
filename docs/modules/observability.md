@@ -943,7 +943,6 @@ pyfly:
   observability:
     tracing:
       enabled: true                        # Default: true
-      service-name: "${pyfly.app.name}"    # Inherits app name by default
       exporter: otlp                       # otlp | console | none
       otlp:
         endpoint: "http://localhost:4318"  # OTLP/HTTP exporter endpoint
@@ -975,6 +974,46 @@ dropped by the API's no-op provider. The reader is OTLP/HTTP to the metrics endp
 configured under `metrics.otlp.endpoint` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, else the
 traces endpoint with `/v1/traces` rewritten to `/v1/metrics` (a base URL gains `/v1/metrics`).
 With no endpoint at all the provider has no reader: instruments still work, nothing is exported.
+
+### Service identity and resource attributes
+
+For each newly created OpenTelemetry trace or metric provider, PyFly chooses
+the resource's `service.name` in this order:
+
+1. A nonempty `pyfly.observability.tracing.service-name`, including an explicit
+   `PYFLY_OBSERVABILITY_TRACING_SERVICE_NAME` environment override.
+2. `OTEL_SERVICE_NAME`.
+3. `service.name` from `OTEL_RESOURCE_ATTRIBUTES`.
+4. `pyfly.app.name`.
+5. `pyfly-app`.
+
+Leave `tracing.service-name` unset when your deployment supplies the standard
+OpenTelemetry identity. The framework default does not set this property:
+adding `service-name: "${pyfly.app.name}"` yourself is an explicit override
+that takes precedence over both OpenTelemetry environment variables.
+
+```bash
+export OTEL_SERVICE_NAME=lumen-api
+export OTEL_RESOURCE_ATTRIBUTES='service.namespace=lumen,deployment.environment.name=production,release.note=blue%2Cgreen'
+uv run pyfly run --server uvicorn
+```
+
+The OpenTelemetry SDK parses resource environment attributes, including
+URL-encoded values: `release.note` above becomes `blue,green`. Other resource
+attributes, including SDK metadata, are preserved when PyFly selects the service
+name. Both newly created providers use the same resolution rules; this does not
+change Prometheus metric names or labels.
+
+To deliberately override a platform-injected identity for both signals, set
+`pyfly.observability.tracing.service-name: lumen-custom` in your configuration,
+or `PYFLY_OBSERVABILITY_TRACING_SERVICE_NAME=lumen-custom` in the environment.
+An empty property lets resolution continue to the OpenTelemetry environment.
+
+Resource identity is fixed when the provider is created. Restart the process
+after changing these settings for process-global providers. PyFly reuses
+existing globals and backs off for user-defined providers; it does not rename
+their resources. This change does not redeploy workloads or rewrite historical
+traces or metrics in your telemetry backend.
 
 ### Provider ownership and isolated contexts
 

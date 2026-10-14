@@ -209,7 +209,7 @@ pyfly:
       enabled: true
     tracing:
       enabled: true
-      service-name: "${pyfly.app.name}"
+      # Leave service-name unset so the platform's OTEL resource identity can take precedence.
   transactional:
     enabled: false
     saga:
