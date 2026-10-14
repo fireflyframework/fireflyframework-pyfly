@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 # ---- type mapping from Python types to Click parameter types ----
 
-_TYPE_MAP: dict[type, click.types.ParamType] = {
+_TYPE_MAP: dict[type, click.types.ParamType[str | int | float | bool]] = {
     str: click.STRING,
     int: click.INT,
     float: click.FLOAT,

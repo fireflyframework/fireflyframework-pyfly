@@ -571,3 +571,43 @@ async def test_the_auto_configured_bus_runs_on_the_primary_datasource(
         finally:
             await ctx.stop()
         assert await _listening(admin) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_ms", [0, 10000])
+async def test_redis_idle_consumer_keeps_its_blocking_connection(redis_url: str, block_ms: int) -> None:
+    """An idle stream must outlive redis-py's five-second default socket timeout."""
+    from pyfly.eda.adapters.redis import RedisStreamsEventBus
+
+    name = f"pyfly-idle-{uuid.uuid4().hex}"
+    separator = "&" if "?" in redis_url else "?"
+    bus = RedisStreamsEventBus(
+        url=f"{redis_url}{separator}client_name={name}", streams=[name], group=name, block_ms=block_ms
+    )
+    delivered = asyncio.Event()
+
+    async def handler(envelope: EventEnvelope) -> None:
+        assert envelope.payload == {"after_idle": True}
+        delivered.set()
+
+    async def blocked_connections() -> set[str]:
+        return {
+            client["id"]
+            for client in await bus._client.client_list()
+            if client["name"] == name and client["cmd"] == "xreadgroup"
+        }
+
+    bus.subscribe("idle.done", handler)
+    try:
+        await bus.start()
+        initial: set[str] = set()
+        async with asyncio.timeout(5):
+            while not initial:
+                initial = await blocked_connections()
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(5.5)
+        assert await blocked_connections() == initial
+        await bus.publish(name, "idle.done", {"after_idle": True})
+        await asyncio.wait_for(delivered.wait(), timeout=2)
+    finally:
+        await asyncio.wait_for(bus.stop(), timeout=2)

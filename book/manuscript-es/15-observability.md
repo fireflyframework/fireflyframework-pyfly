@@ -192,9 +192,17 @@ Esa pasada de redacción se ejecuta para *cada* logger del proceso, incluidos lo
 El motor de expresiones regulares viene con cada instalación. El motor NER respaldado por Presidio —que además atrapa nombres y direcciones en texto libre— está disponible mediante el extra `[pii]` y se activa automáticamente cuando se instala:
 
 ```bash
-uv add "pyfly[observability,pii]"
-python -m spacy download en_core_web_sm   # lighter model; lg for higher recall
+uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.05/pyfly-26.10.5-py3-none-any.whl"
+uv run python -m spacy download en_core_web_sm
 ```
+
+En v26.10.05, el extra PII requiere Git y acceso a GitHub: fija una corrección
+oficial del código fuente de Presidio para poder instalar cryptography 50.
+Ese código conserva el mismo número de versión que el paquete anterior de PyPI.
+Las instalaciones existentes con pip deben reinstalar explícitamente el
+anonimizador fijado antes de actualizar; sigue el [procedimiento de migración](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/#presidio-and-cryptography)
+y termina con `python -m pip check`. El motor de expresiones regulares no necesita
+este extra.
 
 Configura la redacción en `pyfly.yaml`:
 
@@ -210,8 +218,9 @@ pyfly:
         - token
         - secret
       presidio:
+        model: en_core_web_sm
         score-threshold: 0.6
-        languages: [en, es]
+        languages: [en]
 ```
 
 `deny-fields` enumera los *nombres* de los campos de log estructurado cuyos valores se sustituyen incondicionalmente por `<REDACTED>`. Úsalo para campos como `password`, donde sabes que el valor es sensible sin inspeccionar el contenido.

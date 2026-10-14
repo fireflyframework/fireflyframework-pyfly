@@ -29,7 +29,7 @@ import contextlib
 import fnmatch
 import logging
 import socket
-from typing import Any
+from typing import Any, cast
 
 from pyfly.eda.ports.outbound import EventHandler
 from pyfly.eda.serializers import EventSerializer, JsonEventSerializer
@@ -77,7 +77,11 @@ class RedisStreamsEventBus:
         self._consumer_id = consumer_id or socket.gethostname()
         self._block_ms = block_ms
         self._serializer: EventSerializer = serializer or JsonEventSerializer()
-        self._client = redis_asyncio.Redis.from_url(url, decode_responses=False)
+        # Redis 8 defaults to a five-second socket timeout, shorter than a valid
+        # XREADGROUP block (including block=0). Cancellation still interrupts stop().
+        self._client = redis_asyncio.Redis.from_url(
+            url, decode_responses=False, socket_timeout=None, legacy_responses=True
+        )
         self._handlers: list[tuple[str, EventHandler]] = []
         self._consume_task: asyncio.Task[None] | None = None
         self._started = False
@@ -153,7 +157,8 @@ class RedisStreamsEventBus:
                     continue
                 if not response:
                     continue
-                for stream_key, entries in response:
+                # legacy_responses=True keeps the list shape on both RESP2 and RESP3.
+                for stream_key, entries in cast(list[list[Any]], response):
                     stream_name = stream_key.decode() if isinstance(stream_key, bytes) else stream_key
                     for entry_id, fields in entries:
                         await self._dispatch_and_ack(stream_name, entry_id, fields)

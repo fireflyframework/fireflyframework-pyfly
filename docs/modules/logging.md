@@ -249,13 +249,17 @@ country code.
 
 ### Upgrading to Presidio (NER-based redaction)
 
-Install the optional extra:
+Install the optional extra from the release artifact:
 
 ```bash
-pip install "pyfly[pii]"
-# or
-uv add "pyfly[pii]"
+pip install "pyfly[pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.05/pyfly-26.10.5-py3-none-any.whl"
 ```
+
+Version 26.10.05 pins the official Presidio anonymizer source fix for
+cryptography 50. This extra requires Git and GitHub access during installation;
+existing pip installations must explicitly reinstall the pinned anonymizer
+source before upgrading. See [dependency update notes](../dependency-updates.md#presidio-and-cryptography)
+for the complete procedure.
 
 You also need a spaCy model (Presidio defaults to `en_core_web_lg`):
 

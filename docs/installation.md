@@ -321,7 +321,11 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | `security` | pyjwt[crypto], bcrypt, cryptography | JWT token generation/verification, password hashing |
 | `scheduling` | croniter | Cron expression parsing for scheduled tasks |
 | `cli` | click, rich, jinja2, questionary | CLI tools (pyfly new, run, info, doctor, db) |
-| `full` | All of the above | Complete framework with all modules |
+| `full` | Bundled application extras (excludes `pii`, `testing`, `testcontainers`, and `argon2`) | Broad framework installation; add optional PII/testing/password backends explicitly |
+
+The optional `pii` extra in v26.10.05 requires Git and GitHub access for the
+immutable upstream anonymizer fix. See the [dependency update notes](dependency-updates.md#presidio-and-cryptography)
+before upgrading an existing PII installation.
 
 ### Choosing Extras
 
@@ -513,7 +517,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.10.04
+    ✓ pyfly v26.10.05
 
   All checks passed!
 ```

@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.05 (2026-10-14)
+
+### Changed
+
+- Resolve the grouped Dependabot updates with refreshed runtime, development,
+  documentation, and book dependencies; pin all 14 Python setup workflow uses
+  to the v7.0.0 action commit. Preserve the qualified SQLAlchemy 2.0.50 and
+  asyncmy 0.2.11 minimums while updating their locked versions.
+- Upgrade cryptography to the patched 50 line. The optional `pii` extra uses
+  official Presidio commit `5e2fcea990aa3b99660d2aea9121d0ba74a8940b` because
+  the published anonymizer still caps cryptography below 49. PII installations
+  require Git and GitHub access until a compatible upstream release is qualified.
+  Existing pip PII installations must explicitly reinstall that source before
+  upgrading because the upstream distribution version is unchanged; follow the
+  migration commands in the dependency notes and finish with `pip check`.
+- Update WeasyPrint to 70 and CairoSVG to 2.9.1 or later for the EN/ES books.
+  See [dependency update notes](docs/dependency-updates.md) for the complete
+  version ledger, source provenance, and platform requirements.
+
+### Fixed
+
+- Preserve Redis Streams blocking reads beyond Redis 8's five-second socket
+  timeout, including indefinite reads, delivery after idling, and cancellation.
+- Adapt strict typing to updated Click, jsonpath-ng, Redis, and mypy contracts.
+  Keep installer and Testcontainers unit checks isolated from host profiles
+  and the Docker daemon.
+
+### Documentation
+
+- Synchronize package, installer, site, and book download examples with this
+  release. The tag and displayed version are `v26.10.05`; package metadata is
+  `26.10.5`.
+
 ## v26.10.04 (2026-10-14)
 
 ### Documentation
