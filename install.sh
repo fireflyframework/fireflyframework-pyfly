@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Firefly Software Foundation.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,7 +27,7 @@ set -euo pipefail
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-PYFLY_VERSION="26.10.03"
+PYFLY_VERSION="26.10.04"
 PYFLY_REPO="https://github.com/fireflyframework/fireflyframework-pyfly.git"
 DEFAULT_INSTALL_DIR="$HOME/.pyfly"
 MIN_PYTHON_MAJOR=3

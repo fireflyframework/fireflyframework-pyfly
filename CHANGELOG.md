@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.04 (2026-10-14)
+
+### Documentation
+
+- Include the revised public OAuth client and authorization-server references
+  and rebuilt English and Spanish PDF/EPUB books in the software release.
+  The references describe the shipped code and refresh APIs, endpoint bindings,
+  response-validation limits, and application-owned token custody.
+- Synchronize package, installer, site, and download examples with this release.
+  The tag and displayed version are `v26.10.04`; package metadata is `26.10.4`.
+
+### Compatibility
+
+- Runtime behavior is unchanged from v26.10.03. Books are rebuilt from the
+  software tag and their checksum manifest records that exact source commit.
+  Earlier software and standalone book releases retain their original assets.
+
 ## v26.10.03 (2026-10-14)
 
 ### Fixed

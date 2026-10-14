@@ -7,11 +7,13 @@ wallet offer route, shared targeting fixture, runtime gates and operator workflo
 
 | Edition | PDF | EPUB |
 |---|---|---|
-| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example.epub) |
-| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/books-26.10.14/pyfly-by-example-es.epub) |
+| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.04/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.04/pyfly-by-example.epub) |
+| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.04/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.04/pyfly-by-example-es.epub) |
 
-These links download the 2026-10-14 book edition, published independently of the
-framework package. For other editions, open the [tagged releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
+These books are rebuilt from the `v26.10.04` software tag. The independently
+published [2026-10-14 edition](https://github.com/fireflyframework/fireflyframework-pyfly/releases/tag/books-26.10.14)
+retains its original assets. For other editions, open the
+[tagged releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
 and download the books attached to that tag.
 
 ## Sources and examples
