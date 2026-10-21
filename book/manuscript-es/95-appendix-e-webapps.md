@@ -188,6 +188,10 @@ Los errores de servidor ocultan detalles de excepciones de forma predeterminada.
 Los errores del navegador negocian HTML mediante `Accept`; REST y la API de datos
 siguen devolviendo JSON. Los fallos de autenticación y CSRF conservan estado y
 cabeceras de seguridad. Las páginas usan `no-store` y `Vary: Accept`.
+El filtro y el middleware de cabeceras de seguridad completan los valores que
+faltan sin sustituir las políticas explícitas de la respuesta. Por ejemplo,
+`Referrer-Policy: no-referrer` se conserva como una sola cabecera; las cookies
+repetidas también se mantienen.
 
 ### Identidad visual y página de bienvenida
 
