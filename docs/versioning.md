@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.07` | 2026-10-21 | Security header defaults preserve explicit application policies without duplicating headers in either public adapter. |
 | `26.10.06` | 2026-10-14 | OpenTelemetry resource environment variables identify newly created trace and metric providers; explicit PyFly service-name overrides retain precedence. |
 | `26.10.05` | 2026-10-14 | Refreshed dependencies, pinned Python setup workflows, and synchronized release metadata and book downloads. |
 | `26.10.04` | 2026-10-14 | Revised OAuth references and EN/ES books included in the software release; synchronized release metadata. |
@@ -104,20 +105,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.06"
+print(pyfly.__version__)  # → "26.10.07"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.6
+pyfly --version            # → pyfly, version 26.10.7
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.06) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.07) (Python 3.13.9)
 ```
 
 ---

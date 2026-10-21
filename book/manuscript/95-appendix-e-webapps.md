@@ -188,6 +188,9 @@ application context processors or CSRF/form helpers. Server errors hide exceptio
 details by default. Browser errors negotiate HTML from `Accept`; REST and data-admin API
 errors remain JSON. Authentication and CSRF failures preserve their status and
 security headers. Error responses use `no-store` caching and `Vary: Accept`.
+The security-header filter and middleware fill missing defaults without replacing
+explicit response policies. For example, `Referrer-Policy: no-referrer` remains
+a single header; repeated cookies are preserved.
 
 ### Branded pages and the welcome screen
 

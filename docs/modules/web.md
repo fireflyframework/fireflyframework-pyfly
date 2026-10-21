@@ -1285,7 +1285,7 @@ Source file: `src/pyfly/web/adapters/starlette/filters/request_logging_filter.py
 
 #### SecurityHeadersFilter
 
-Adds OWASP-recommended security headers to every response.
+Adds missing response security headers using OWASP-recommended defaults. Explicit application policies take precedence, with case-insensitive header names; existing values are neither duplicated nor overwritten.
 
 **Order:** `HIGHEST_PRECEDENCE + 300` (runs after RequestLoggingFilter)
 
@@ -1297,7 +1297,7 @@ class SecurityHeadersFilter(OncePerRequestFilter):
         self._config = config or SecurityHeadersConfig()
 ```
 
-The filter adds these headers to every response:
+The filter uses these defaults when the corresponding header is absent:
 
 | Header                        | Default Value                                |
 |-------------------------------|----------------------------------------------|
@@ -1832,7 +1832,7 @@ Source file: `src/pyfly/web/cors.py`
 
 ## Security Headers
 
-The `SecurityHeadersConfig` dataclass controls which security headers are added to every response by the `SecurityHeadersFilter`:
+The `SecurityHeadersConfig` dataclass supplies defaults for missing response headers in `SecurityHeadersFilter` and the public `SecurityHeadersMiddleware`. Both preserve explicit application policies, including a stricter `Referrer-Policy: no-referrer`, without changing repeated cookies or unrelated headers:
 
 ```python
 from pyfly.web import SecurityHeadersConfig

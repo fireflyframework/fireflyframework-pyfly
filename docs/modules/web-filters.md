@@ -199,7 +199,7 @@ pyfly:
 
 ### SecurityHeadersFilter
 
-Adds OWASP-recommended security headers to every response.
+Fills missing response security headers with OWASP-recommended defaults. Explicit application policies are preserved, so `Referrer-Policy: no-referrer` remains a single header. Header names are matched case-insensitively; unrelated headers and repeated cookies are unchanged.
 
 ```python
 @order(HIGHEST_PRECEDENCE + 300)
@@ -209,8 +209,8 @@ class SecurityHeadersFilter(OncePerRequestFilter):
 
     async def do_filter(self, request, call_next):
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
         # ... more headers from config
         return response
 ```

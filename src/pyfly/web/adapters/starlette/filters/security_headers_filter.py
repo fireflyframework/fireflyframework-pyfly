@@ -52,8 +52,7 @@ class SecurityHeadersFilter(OncePerRequestFilter):
 
     async def do_filter(self, request: Request, call_next: CallNext) -> Response:
         response = cast(Response, await call_next(request))
-        # Bulk-append the precomputed headers in one extend rather than N MutableHeaders
-        # setitems (each re-scans the raw list). Security headers don't pre-exist on framework
-        # responses, so appending is correct.
-        response.raw_headers.extend(self._encoded)
+        # Explicit application policies take precedence over framework defaults.
+        present = {name.lower() for name, _ in response.raw_headers}
+        response.raw_headers.extend(pair for pair in self._encoded if pair[0] not in present)
         return response

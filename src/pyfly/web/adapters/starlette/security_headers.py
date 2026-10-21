@@ -44,16 +44,19 @@ class SecurityHeadersMiddleware:
         async def send_with_headers(message: Any) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                headers["X-Content-Type-Options"] = cfg.x_content_type_options
-                headers["X-Frame-Options"] = cfg.x_frame_options
-                headers["Strict-Transport-Security"] = cfg.strict_transport_security
-                headers["X-XSS-Protection"] = cfg.x_xss_protection
-                headers["Referrer-Policy"] = cfg.referrer_policy
-
-                if cfg.content_security_policy is not None:
-                    headers["Content-Security-Policy"] = cfg.content_security_policy
-                if cfg.permissions_policy is not None:
-                    headers["Permissions-Policy"] = cfg.permissions_policy
+                present = {name.lower() for name, _ in message.get("headers", [])}
+                defaults = (
+                    ("x-content-type-options", cfg.x_content_type_options),
+                    ("x-frame-options", cfg.x_frame_options),
+                    ("strict-transport-security", cfg.strict_transport_security),
+                    ("x-xss-protection", cfg.x_xss_protection),
+                    ("referrer-policy", cfg.referrer_policy),
+                    ("content-security-policy", cfg.content_security_policy),
+                    ("permissions-policy", cfg.permissions_policy),
+                )
+                for name, value in defaults:
+                    if value is not None and name.encode("latin-1") not in present:
+                        headers[name] = value
             await send(message)
 
         await self.app(scope, receive, send_with_headers)

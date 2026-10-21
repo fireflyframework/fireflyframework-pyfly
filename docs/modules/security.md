@@ -1556,17 +1556,21 @@ The switch and the exit put the context they establish on `request.state.securit
 
 ## Security Headers
 
-`SecurityHeadersFilter` adds OWASP-recommended response headers to **every** response. It is an `OncePerRequestFilter` ordered at `HIGHEST_PRECEDENCE + 300`, and appends a precomputed, static set of header pairs after the downstream handler returns. Header names and values come from `SecurityHeadersConfig` (a frozen dataclass); the table below lists the exact headers emitted with their defaults:
+`SecurityHeadersFilter` fills missing response security headers after the downstream handler returns. It is an `OncePerRequestFilter` ordered at `HIGHEST_PRECEDENCE + 300`, with defaults from the frozen `SecurityHeadersConfig` dataclass.
+
+Explicit response policies take precedence, with case-insensitive header names. An application can return `Referrer-Policy: no-referrer` without receiving a second, less restrictive policy. The public `SecurityHeadersMiddleware` follows the same rule. Neither adapter changes unrelated headers or repeated `Set-Cookie` fields.
+
+The framework does not compare policy strength: choose explicit response policies deliberately. The defaults are:
 
 | Header | Default value | Notes |
 |---|---|---|
-| `x-content-type-options` | `nosniff` | always emitted |
-| `x-frame-options` | `DENY` | always emitted |
-| `strict-transport-security` | `max-age=31536000; includeSubDomains` | always emitted |
-| `x-xss-protection` | `0` | always emitted (modern browsers: disable the legacy XSS auditor) |
-| `referrer-policy` | `strict-origin-when-cross-origin` | always emitted |
-| `content-security-policy` | *(unset)* | only emitted when `content_security_policy` is configured (default `None` = not added — CSP is too app-specific) |
-| `permissions-policy` | *(unset)* | only emitted when `permissions_policy` is configured (default `None` = not added) |
+| `x-content-type-options` | `nosniff` | added when absent |
+| `x-frame-options` | `DENY` | added when absent |
+| `strict-transport-security` | `max-age=31536000; includeSubDomains` | added when absent |
+| `x-xss-protection` | `0` | added when absent (modern browsers: disable the legacy XSS auditor) |
+| `referrer-policy` | `strict-origin-when-cross-origin` | added when absent |
+| `content-security-policy` | *(unset)* | added when absent and `content_security_policy` is configured (default `None` = not added — CSP is too app-specific) |
+| `permissions-policy` | *(unset)* | added when absent and `permissions_policy` is configured (default `None` = not added) |
 
 To customise, construct the filter with a `SecurityHeadersConfig`:
 

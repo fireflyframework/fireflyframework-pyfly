@@ -252,10 +252,10 @@ country code.
 Install the optional extra from the release artifact:
 
 ```bash
-pip install "pyfly[pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.06/pyfly-26.10.6-py3-none-any.whl"
+pip install "pyfly[pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-26.10.7-py3-none-any.whl"
 ```
 
-Version 26.10.06 pins the official Presidio anonymizer source fix for
+Version 26.10.07 pins the official Presidio anonymizer source fix for
 cryptography 50. This extra requires Git and GitHub access during installation;
 existing pip installations must explicitly reinstall the pinned anonymizer
 source before upgrading. See [dependency update notes](../dependency-updates.md#presidio-and-cryptography)
