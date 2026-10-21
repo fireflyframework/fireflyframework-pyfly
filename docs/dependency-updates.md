@@ -31,11 +31,11 @@ a release that supports cryptography 50 and that release is qualified.
 
 For an existing pip installation, first reinstall the named anonymizer from the
 exact source reference. Pip can otherwise retain the old index package because
-both sources report version `2.2.364`, even with `--upgrade`. Then upgrade PyFly to v26.10.06, which retains this source requirement:
+both sources report version `2.2.364`, even with `--upgrade`. Then upgrade PyFly to v26.10.07, which retains this source requirement:
 
 ```bash
 python -m pip install --upgrade --force-reinstall "presidio-anonymizer @ git+https://github.com/data-privacy-stack/presidio.git@5e2fcea990aa3b99660d2aea9121d0ba74a8940b#subdirectory=presidio-anonymizer"
-python -m pip install --upgrade "pyfly[pii,security] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.06/pyfly-26.10.6-py3-none-any.whl"
+python -m pip install --upgrade "pyfly[pii,security] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-26.10.7-py3-none-any.whl"
 python -m pip check
 python -m spacy download en_core_web_sm
 ```

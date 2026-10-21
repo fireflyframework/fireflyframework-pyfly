@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.07 (2026-10-21)
+
+### Fixed
+
+- Preserve explicit application response security policies in both
+  `SecurityHeadersFilter` and the public `SecurityHeadersMiddleware`. Match header
+  names case-insensitively and add configured defaults only when absent, avoiding
+  values such as `X-Content-Type-Options: nosniff, nosniff` and preserving an
+  explicit `Referrer-Policy: no-referrer`.
+- Keep unrelated response headers and repeated `Set-Cookie` fields unchanged,
+  including when both public security header adapters are composed.
+
+### Documentation
+
+- Explain response-policy precedence in the security, web, and filter guides and
+  both book editions. Explicit application policies remain the application's
+  responsibility; the framework does not compare their strength.
+- Synchronize package, installer, website, examples, and book downloads with
+  `v26.10.07` (normalized package version `26.10.7`).
+
 ## v26.10.06 (2026-10-14)
 
 ### Fixed
