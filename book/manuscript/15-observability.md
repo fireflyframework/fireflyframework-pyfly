@@ -1207,6 +1207,11 @@ The separate sub-paths let you group indicators independently — an in-flight m
 
 The **Admin Dashboard** is a zero-build, zero-dependency browser UI served directly from the `pyfly.admin` package. One configuration line enables it; navigate to `/admin` — no separate server, no `npm` build step.
 
+The current console uses the canonical Firefly Python family identity, with
+locally served Manrope and charcoal, paper and amber colors. A native Agentic
+runtime adds its own guarded, read-only inventory and usage view; Chapter 21
+shows the actual console and its access boundary.
+
 ### Enabling the dashboard
 
 ```yaml
@@ -1218,7 +1223,7 @@ pyfly:
     refresh_interval: 5000
 ```
 
-The dashboard auto-discovers beans, health indicators, loggers, scheduled tasks, HTTP mappings, caches, CQRS handlers, sagas, and metrics from the running `ApplicationContext`. It presents them in **15 built-in views** with real-time Server-Sent Event (SSE) updates — no WebSocket, no polling loop in your code.
+The dashboard auto-discovers beans, health indicators, loggers, scheduled tasks, HTTP mappings, caches, CQRS handlers, sagas, and metrics from the running `ApplicationContext`. It presents them in **built-in operational views** with real-time Server-Sent Event (SSE) updates — no WebSocket, no polling loop in your code.
 
 !!! note "Where to find it: the management port"
     Like the actuator, the dashboard is served on the **management port**. With
@@ -1684,7 +1689,7 @@ chapter Lumen:
   `/actuator/health/readiness` via auto-discovered `HealthIndicator` beans,
   including a `WalletRepositoryHealthIndicator` that probes the wallet store.
 - Surfaces all of the above in the **embedded Admin Dashboard** at `/admin`,
-  with 15 built-in views, real-time SSE streams, a live log tail, an HTTP
+  with built-in operational views, real-time SSE streams, a live log tail, an HTTP
   trace analytics panel, and runtime logger-level management.
 - Applies logging and metrics **cross-cuttingly** via `@aspect`,
   `@before`, `@after_returning`, `@after_throwing`, and `@around`, woven

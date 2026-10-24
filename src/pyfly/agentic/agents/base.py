@@ -1,0 +1,1510 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Agent -- the primary agent abstraction in the Firefly Agentic framework.
+
+:class:`Agent` wraps :class:`pydantic_ai.Agent` and enriches it with
+framework-level concerns: metadata (name, version, tags), automatic
+registration in the :class:`~pyfly.agentic.agents.registry.AgentRegistry`,
+lifecycle hooks, and sensible defaults drawn from
+:class:`~pyfly.agentic.config.AgenticConfig`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import atexit
+import contextlib
+import functools
+import logging
+import re
+import threading
+import time
+import weakref
+from collections.abc import Awaitable, Callable, Sequence
+from types import NoneType
+from typing import TYPE_CHECKING, Any, Generic, Literal, cast
+
+from pydantic_ai import Agent as PydanticAgent
+from pydantic_ai import DeferredToolRequests, DeferredToolResults, RunContext
+from pydantic_ai import Tool as PydanticTool
+from pydantic_ai.capabilities import AgentCapability, HandleDeferredToolCalls, Instrumentation
+from pydantic_ai.exceptions import UserError
+from pydantic_ai.models import Model, infer_model
+from pydantic_ai.models.instrumented import InstrumentationSettings
+from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.toolsets import ApprovalRequiredToolset
+
+from pyfly.agentic._model_lifecycle import ModelState, on_model_loop
+from pyfly.agentic.agents.builtin_middleware import (
+    LoggingMiddleware,
+    NativeEventsMiddleware,
+    ObservabilityMiddleware,
+)
+from pyfly.agentic.agents.context import AgentContext as _AgentContext
+from pyfly.agentic.agents.middleware import MiddlewareChain, MiddlewareContext
+from pyfly.agentic.agents.registry import agent_registry
+from pyfly.agentic.config import AgenticConfig, get_config
+from pyfly.agentic.exceptions import AgentError, BudgetExceededError, RateLimitError
+from pyfly.agentic.model_utils import get_model_identifier, normalize_model
+from pyfly.agentic.models.options import ModelOptions, resolve_model_options
+from pyfly.agentic.observability.budget import ScopeContext
+from pyfly.agentic.observability.cost_resolvers import UnknownModelCostError
+from pyfly.agentic.observability.quota import (
+    AdaptiveBackoff,
+    get_quota_manager,
+)
+from pyfly.agentic.observability.usage import (
+    UsageTracker,
+    default_usage_tracker,
+    reasoning_tokens_not_in_output,
+    resolve_run_usage,
+)
+from pyfly.agentic.reasoning.trace import ReasoningResult
+from pyfly.agentic.tools.base import AgentTool
+from pyfly.agentic.tools.toolkit import ToolKit
+from pyfly.agentic.types import AgentDepsT, Metadata, OutputT, UserContent
+
+if TYPE_CHECKING:
+    from pyfly.agentic.agents.context import AgentContext
+    from pyfly.agentic.agents.middleware import AgentMiddleware
+    from pyfly.agentic.memory.manager import MemoryManager
+    from pyfly.agentic.runtime import AgenticRuntime
+
+logger = logging.getLogger(__name__)
+
+_sync_loop_lock = threading.Lock()
+_sync_agent_loop: asyncio.AbstractEventLoop | None = None
+_sync_agent_thread: threading.Thread | None = None
+
+
+def _serve_sync_agent_loop(loop: asyncio.AbstractEventLoop) -> None:
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_forever()
+    finally:
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+def _get_sync_agent_loop() -> asyncio.AbstractEventLoop:
+    """Retain HTTP-client loop ownership across synchronous agent invocations."""
+    global _sync_agent_loop, _sync_agent_thread
+    with _sync_loop_lock:
+        if _sync_agent_loop is None:
+            _sync_agent_loop = asyncio.new_event_loop()
+            # Separate from the database loop: sync memory hooks may block this
+            # loop while the database worker services their requests.
+            _sync_agent_thread = threading.Thread(
+                target=_serve_sync_agent_loop, args=(_sync_agent_loop,), name="firefly-agent-sync", daemon=True
+            )
+            _sync_agent_thread.start()
+        return _sync_agent_loop
+
+
+def _shutdown_sync_agent_loop() -> None:
+    if _sync_agent_loop is not None and not _sync_agent_loop.is_closed():
+        _sync_agent_loop.call_soon_threadsafe(_sync_agent_loop.stop)
+    if _sync_agent_thread is not None:
+        _sync_agent_thread.join(timeout=5)
+
+
+atexit.register(_shutdown_sync_agent_loop)
+
+
+def _run_sync_coro(coro: Any) -> Any:
+    """Run on the persistent sync-agent loop, copying this invocation's context."""
+    loop = _get_sync_agent_loop()
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if current is loop:
+        coro.close()
+        raise AgentError("run_sync cannot block its owning event loop; use await agent.run(...) instead")
+    # call_soon_threadsafe (used by this bridge) captures the caller's ContextVars;
+    # each request and all its middleware hooks execute in one independent task.
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        return future.result()
+    except BaseException:
+        # An interrupted blocking wait must not leave model/tool execution running.
+        future.cancel()
+        raise
+
+
+def _suggested_retry_delay(exc: BaseException) -> float | None:
+    """Best-effort suggested retry delay (seconds) from a rate-limit error.
+
+    Prefers a provider's **structured** hint — Gemini ``ResourceExhausted``
+    carries ``retry_delay`` (a Duration with ``.seconds``); some SDKs expose a
+    numeric ``retry_after`` — then the OpenAI/Anthropic-shaped textual
+    ``"retry … Ns"`` body. Returns ``None`` when no hint is present (the caller
+    then uses exponential backoff).
+    """
+    for attr in ("retry_delay", "retry_after"):
+        val = getattr(exc, attr, None)
+        if val is None:
+            continue
+        seconds = getattr(val, "seconds", None)  # google Duration proto
+        if seconds is not None:
+            try:
+                return float(seconds)
+            except (TypeError, ValueError):
+                pass
+        if isinstance(val, int | float):
+            return float(val)
+    match = re.search(r"retry.*?(\d+\.?\d*)\s*s", str(exc).lower())
+    return float(match.group(1)) if match else None
+
+
+#: An inline human-in-the-loop approval handler. Receives the run context and the
+#: pending :class:`~pydantic_ai.DeferredToolRequests`, and returns a
+#: :class:`~pydantic_ai.DeferredToolResults` resolving some/all approvals so the
+#: run continues *without* pausing (return ``None`` to decline and let the run
+#: pause normally). Wired into the inner agent as a ``HandleDeferredToolCalls``
+#: capability. Use ``requests.build_results(...)`` to construct the result.
+ApprovalHandler = Callable[
+    [RunContext[Any], DeferredToolRequests],
+    DeferredToolResults | None | Awaitable[DeferredToolResults | None],
+]
+
+
+def is_deferred(result: Any) -> bool:
+    """Whether an agent run *paused* instead of completing.
+
+    Returns ``True`` when ``result.output`` is a pydantic-ai
+    :class:`~pydantic_ai.DeferredToolRequests` — i.e. the run hit a tool that
+    requires human-in-the-loop approval (``.approvals``) or external execution
+    (``.calls``) and is awaiting a :class:`~pydantic_ai.DeferredToolResults`
+    before it can continue. Resume by calling :meth:`Agent.run` (or
+    ``run_sync``) again with ``message_history=result.all_messages()`` and
+    ``deferred_tool_results=...``.
+    """
+    return isinstance(getattr(result, "output", None), DeferredToolRequests)
+
+
+def _default_agent_context() -> _AgentContext:
+    from pyfly.observability.correlation import get_correlation_id
+
+    correlation_id = get_correlation_id()
+    return _AgentContext(correlation_id=correlation_id) if correlation_id else _AgentContext()
+
+
+def _runtime_bound(method: Any) -> Any:
+    @functools.wraps(method)
+    async def bound(self: Any, *args: Any, **kwargs: Any) -> Any:
+        state = self._execution_state(kwargs) if method.__name__ in ("run", "run_stream") else None
+        if state is not None:
+            owner = state.claim()
+            if owner is not asyncio.get_running_loop():
+                if method.__name__ == "run_stream":
+                    raise AgentError("Run streaming on the provider model's owning event loop")
+                future = asyncio.run_coroutine_threadsafe(bound(self, *args, **kwargs), owner)
+                return await asyncio.wrap_future(future)
+            await state.enter()
+        if self._runtime is None:
+            return await method(self, *args, **kwargs)
+        with self._runtime.operation(config=self._config):
+            if method.__name__ in ("run", "run_stream") and self._runtime.quota_manager is not None:
+                self._runtime.quota_manager.reserve_request(self._effective_model_identifier(kwargs))
+            result = await method(self, *args, **kwargs)
+        if method.__name__ == "run_stream":
+            return _RuntimeStream(result, self._runtime, self._config, state)
+        return result
+
+    return bound
+
+
+class _RuntimeStream:
+    def __init__(self, inner: Any, runtime: Any, config: AgenticConfig, state: ModelState | None = None) -> None:
+        self.inner, self.runtime, self.config = inner, runtime, config
+        self._model_state = state
+        self._scope: Any = None
+        self._entered = False
+
+    async def __aenter__(self) -> Any:
+        if self._model_state is not None and self._model_state.owner() is not asyncio.get_running_loop():
+            raise AgentError("Run streaming on the provider model's owning event loop")
+        self._scope = self.runtime.operation(config=self.config)
+        self._scope.__enter__()
+        try:
+            result = await self.inner.__aenter__()
+            self._entered = True
+            self.runtime._streams.add(self)
+            return result
+        except BaseException:
+            self._scope.__exit__(None, None, None)
+            raise
+
+    async def __aexit__(self, *args: Any) -> Any:
+        if not self._entered:
+            return None
+        self._entered = False
+        try:
+            return await self.inner.__aexit__(*args)
+        finally:
+            self.runtime._streams.discard(self)
+            self._scope.__exit__(*args)
+
+    async def aclose(self) -> None:
+        await self.__aexit__(None, None, None)
+
+
+class Agent(Generic[AgentDepsT, OutputT]):
+    """A managed agent that wraps a Pydantic AI :class:`PydanticAgent`.
+
+    ``Agent`` preserves the full Pydantic AI API while adding:
+
+    * **Metadata** -- name, version, description, tags, and arbitrary metadata
+      for discovery and documentation.
+    * **Convention defaults** -- the default model and retry count are pulled
+      from :func:`~pyfly.agentic.config.get_config` when not
+      explicitly provided.
+    * **Decorator proxies** -- :meth:`tool`, :meth:`tool_plain`, and
+      :meth:`instructions` delegate to the underlying agent so that the
+      familiar Pydantic AI decorator pattern works unchanged.
+
+    Parameters:
+        name: A unique, human-readable identifier for this agent.
+        model: A Pydantic AI model string (e.g. ``"openai:gpt-4o"``) or a
+            pre-configured :class:`pydantic_ai.models.Model` instance for
+            programmatic credential management.  Defaults to the value in
+            :class:`AgenticConfig`.
+        instructions: Static instruction text or sequence of texts.
+        output_type: The Pydantic model (or scalar type) for structured output.
+        deps_type: The dependency type expected at run time.
+        tools: Sequence of tool functions or :class:`pydantic_ai.Tool` objects.
+        toolsets: Sequence of pydantic-ai toolsets (e.g. a ``ToolKit.as_toolset()``
+            result, ``WrapperToolset``/``ApprovalRequiredToolset``, or an MCP
+            server) made available to the agent alongside ``tools``.
+        capabilities: Native PydanticAI capabilities, including provider tools,
+            composed with Firefly's approval and instrumentation capabilities.
+        end_strategy: When to finish after an output tool succeeds. Defaults to
+            ``early`` to preserve existing Firefly behavior.
+        description: Free-form description shown in documentation and agent
+            discovery listings.
+        version: Semantic version string for this agent definition.
+        tags: Iterable of tags used for capability-based discovery.
+        metadata: Arbitrary key-value pairs attached to the agent.
+        retries: Override the default retry count.
+        model_options: Portable Firefly options, translated for the selected model on every run.
+        model_settings: Native Pydantic AI settings for advanced integrations.
+        memory: Optional :class:`MemoryManager` for conversation history
+            and working memory.  When set, ``run()`` automatically passes
+            ``message_history`` from conversation memory and stores new
+            messages back after each invocation.
+        auto_register: When *True* (the default), the agent is automatically
+            added to the global :class:`AgentRegistry`.
+        hitl: Force human-in-the-loop mode on. Normally HITL is auto-detected
+            from approval-requiring tools/toolsets; set this when tools defer
+            dynamically (raising ``ApprovalRequired``) so the output union is
+            widened to allow the ``DeferredToolRequests`` pause.
+        approval_handler: Optional inline approval handler (see
+            :data:`ApprovalHandler`). When supplied, approvals are resolved
+            *inside* the run via a ``HandleDeferredToolCalls`` capability instead
+            of pausing — useful for programmatic / policy-based auto-approval.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        model: str | Model | None = None,
+        instructions: str | Sequence[str] = (),
+        output_type: type[OutputT] = str,  # type: ignore[assignment]
+        deps_type: type[AgentDepsT] = NoneType,  # type: ignore[assignment]
+        tools: Sequence[Any] = (),
+        toolsets: Sequence[Any] = (),
+        capabilities: Sequence[AgentCapability[AgentDepsT]] = (),
+        end_strategy: Literal["early", "graceful", "exhaustive"] = "early",
+        description: str = "",
+        version: str = "0.1.0",
+        tags: Sequence[str] = (),
+        metadata: Metadata | None = None,
+        retries: int | None = None,
+        model_settings: ModelSettings | dict[str, Any] | None = None,
+        model_options: ModelOptions | None = None,
+        memory: MemoryManager | None = None,
+        middleware: list[AgentMiddleware] | None = None,
+        default_middleware: bool = True,
+        auto_register: bool = True,
+        hitl: bool = False,
+        approval_handler: ApprovalHandler | None = None,
+        config: AgenticConfig | None = None,
+        usage_tracker: UsageTracker | None = None,
+        runtime: AgenticRuntime | None = None,
+    ) -> None:
+        # The configuration this agent reads: the one it was given, else the process singleton.
+        # Scoped rather than installed, so two agents built from two settings objects (a test
+        # harness, a multi-tenant host) do not fight over one global. What the scoped config
+        # governs: the default middleware, retries, temperature, the cost gate and the rate
+        # limit. What it does NOT govern: the process usage ledger, which is shared by every
+        # agent and sized by ``set_config`` — an agent that must record into a ledger of its own
+        # (per tenant, per test) is given one as ``usage_tracker``.
+        from pyfly.agentic._runtime_context import selected_runtime
+
+        self._runtime = runtime if runtime is not None else selected_runtime()
+        cfg = config if config is not None else (self._runtime.config if self._runtime is not None else get_config())
+        self._config = cfg
+        self._usage_tracker = (
+            usage_tracker
+            if usage_tracker is not None
+            else self._runtime.usage_tracker
+            if self._runtime is not None
+            else None
+        )
+        self._model_options = model_options
+        self._model_states: dict[int, ModelState] = {}
+        self._model_cache: dict[str, Model] = {}
+        self._owned_model_ids: set[int] = set()
+
+        self._name = name
+        self._version = version
+        self._description = description
+        self._tags = list(tags)
+        self._metadata: Metadata = metadata or {}
+
+        # Fall back to framework-wide defaults when the caller omits model or retries.
+        # ``model`` may be a string, a pydantic_ai Model instance, or None.
+        resolved_model = model or cfg.default_model
+        resolved_retries = retries if retries is not None else cfg.max_retries
+
+        # Keep the original model identifier for cost tracking.
+        self.model_identifier: str = get_model_identifier(resolved_model)
+
+        self._memory = memory
+
+        self._middleware = MiddlewareChain(
+            self._build_middleware(
+                middleware, default_middleware=default_middleware, config=cfg, runtime_bound=self._runtime is not None
+            )
+        )
+
+        # Merge the framework default temperature when the caller omits one.
+        # ``ModelSettings`` is a TypedDict, so both forms are plain dicts at
+        # runtime. Caller-provided settings always win; the config default is
+        # only filled in when ``temperature`` is absent (and configured).
+        merged_settings: dict[str, Any] = dict(model_settings) if model_settings else {}
+        if cfg.default_temperature is not None and "temperature" not in merged_settings:
+            merged_settings["temperature"] = cfg.default_temperature
+        resolved_settings: ModelSettings | None = cast("ModelSettings", merged_settings) if merged_settings else None
+
+        # Human-in-the-loop: when any tool requires approval (declared on a
+        # AgentTool/ToolKit, or via an ApprovalRequiredToolset in ``toolsets``),
+        # or HITL is forced, or an inline approval handler is supplied, the run
+        # may pause and surface a ``DeferredToolRequests``. pydantic-ai only
+        # allows that terminal when it is in ``output_type`` — otherwise it
+        # raises ``UserError`` — so widen the output union exactly once here,
+        # gated strictly on HITL so non-HITL agents keep their declared shape.
+        self._hitl_enabled = hitl or approval_handler is not None or self._detect_hitl(tools, toolsets)
+        effective_output_type: Any = output_type
+        if self._hitl_enabled:
+            existing: list[Any] = list(output_type) if isinstance(output_type, list) else [output_type]
+            if DeferredToolRequests not in existing:
+                existing.append(DeferredToolRequests)
+            effective_output_type = existing
+
+        native_capabilities = self._build_capabilities(cfg, approval_handler, self._runtime)
+        self._native_instrumentation_settings = [
+            c.settings for c in native_capabilities if isinstance(c, Instrumentation)
+        ]
+        resolved_capabilities = [*native_capabilities, *capabilities]
+
+        self._agent: PydanticAgent[AgentDepsT, OutputT] = PydanticAgent(
+            normalize_model(resolved_model),
+            instructions=instructions,
+            output_type=effective_output_type,
+            deps_type=deps_type,
+            tools=self._resolve_tools(tools),
+            toolsets=list(toolsets),
+            retries=resolved_retries,
+            model_settings=resolved_settings,
+            capabilities=resolved_capabilities,
+            end_strategy=end_strategy,
+            name=name,
+        )
+
+        if isinstance(resolved_model, str) and isinstance(self._agent.model, Model) and self._runtime is not None:
+            self._owned_model_ids.add(id(self._agent.model))
+            self._execution_state({})
+
+        if model_options is not None:
+            resolve_model_options(self._agent.model, model_options, base_settings=merged_settings)
+
+        if self._runtime is not None:
+            self._runtime._agents.add(self)
+        if auto_register:
+            registry = self._runtime.agent_registry if self._runtime is not None else agent_registry
+            previous = registry.get(name) if registry.has(name) else None
+            self._registration_predecessor = weakref.ref(previous) if previous is not None else None
+            registry.register(self)
+            logger.debug("Auto-registered agent '%s' v%s", name, version)
+
+    # -- Properties ----------------------------------------------------------
+
+    @property
+    def agent(self) -> PydanticAgent[AgentDepsT, OutputT]:
+        """The underlying Pydantic AI agent instance."""
+        return self._agent
+
+    @property
+    def config(self) -> AgenticConfig:
+        """The :class:`AgenticConfig` this agent reads (its own, or the process singleton)."""
+        return self._config
+
+    @property
+    def model_options(self) -> ModelOptions | None:
+        """Portable defaults, retranslated when a run selects a different model."""
+        return self._model_options
+
+    @property
+    def usage_tracker(self) -> UsageTracker:
+        """The ledger this agent's runs are recorded in: its own, else the process tracker.
+
+        The process tracker is read from its module at call time, so a test that patches
+        ``pyfly.agentic.agents.base.default_usage_tracker`` still intercepts an
+        agent without a tracker of its own.
+        """
+        return self._usage_tracker if self._usage_tracker is not None else default_usage_tracker
+
+    @property
+    def name(self) -> str:
+        """Unique human-readable name."""
+        return self._name
+
+    @property
+    def version(self) -> str:
+        """Semantic version of this agent definition."""
+        return self._version
+
+    @property
+    def description(self) -> str:
+        """Free-form description for documentation."""
+        return self._description
+
+    @property
+    def tags(self) -> list[str]:
+        """Tags for capability-based discovery."""
+        return self._tags
+
+    @property
+    def metadata(self) -> Metadata:
+        """Arbitrary key-value metadata."""
+        return self._metadata
+
+    @property
+    def memory(self) -> MemoryManager | None:
+        """The memory manager attached to this agent, if any."""
+        return self._memory
+
+    @memory.setter
+    def memory(self, value: MemoryManager | None) -> None:
+        self._memory = value
+
+    @property
+    def middleware(self) -> MiddlewareChain:
+        """The middleware chain for this agent."""
+        return self._middleware
+
+    # -- Run methods (delegate to inner agent) -------------------------------
+
+    @_runtime_bound
+    async def run(
+        self,
+        prompt: str | Sequence[UserContent] | None = None,
+        *,
+        deps: AgentDepsT = None,  # type: ignore[assignment]
+        conversation_id: str | None = None,
+        timeout: float | None = None,
+        context: AgentContext | None = None,
+        deferred_tool_results: DeferredToolResults | None = None,
+        model_options: ModelOptions | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Run the agent asynchronously.
+
+        *prompt* can be a plain string, a sequence of multimodal
+        :class:`~pyfly.agentic.types.UserContent` parts (text,
+        images, documents, audio, video, binary data), or ``None``.
+
+        When a :class:`MemoryManager` is attached and *conversation_id*
+        is provided, the agent automatically loads conversation history
+        as ``message_history`` and stores new messages after the run.
+
+        To **resume** a run that paused for human-in-the-loop approval (see
+        :func:`is_deferred`), pass ``deferred_tool_results`` together with
+        ``message_history=<paused result>.all_messages()``; do not also set
+        *conversation_id* on the resume call (memory injection and an explicit
+        ``message_history`` are mutually exclusive).
+
+        Delegates to ``pydantic_ai.Agent.run``.
+        """
+        if deferred_tool_results is not None:
+            kwargs["deferred_tool_results"] = deferred_tool_results
+        if model_options is not None:
+            kwargs["model_options"] = model_options
+        if context is None:
+            context = _default_agent_context()
+
+        mw_ctx = MiddlewareContext(
+            agent_name=self._name,
+            prompt=prompt,
+            method="run",
+            deps=deps,
+            kwargs=kwargs,
+            metadata=self._model_metadata(),
+            model=self._effective_model_identifier(kwargs),
+            context=context,
+        )
+        await self._middleware.run_before(mw_ctx)
+
+        # Middleware short-circuit (e.g. cache hit)
+        if "_cache_result" in mw_ctx.metadata:
+            result = mw_ctx.metadata["_cache_result"]
+            result = await self._middleware.run_after(mw_ctx, result)
+            return result
+
+        t0 = time.monotonic()
+        try:
+            await self._inject_memory(conversation_id, kwargs)
+            result = await self._run_with_rate_limit_retry(
+                mw_ctx.prompt, deps=deps, timeout=timeout, retry_override=mw_ctx.metadata.get("_retry_config"), **kwargs
+            )
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            await self._persist_memory(conversation_id, prompt, result)
+            self._record_usage(result, elapsed_ms, correlation_id=context.correlation_id, model_identifier=mw_ctx.model)
+        except asyncio.CancelledError:
+            await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
+            raise
+        except Exception as exc:
+            # Let middleware release what before_run acquired (end the span,
+            # record the breaker failure), then re-raise the original error.
+            await self._middleware.run_error(mw_ctx, exc)
+            raise
+
+        result = await self._middleware.run_after(mw_ctx, result)
+        return result
+
+    def run_sync(
+        self,
+        prompt: str | Sequence[UserContent] | None = None,
+        *,
+        deps: AgentDepsT = None,  # type: ignore[assignment]
+        conversation_id: str | None = None,
+        timeout: float | None = None,
+        context: AgentContext | None = None,
+        deferred_tool_results: DeferredToolResults | None = None,
+        model_options: ModelOptions | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Run synchronously on a persistent background loop using the async agent.
+
+        Supports the same ``deferred_tool_results`` resume path as :meth:`run`.
+        Repeated calls reuse a persistent bridge. Provider models retain their
+        first-use event loop; the bridge forwards requests to that live owner
+        rather than moving its HTTP pool. This method cannot block that same
+        owning loop: use ``await run()`` there. Stream contexts must be entered
+        and iterated on their provider's owning loop. A closed owner requires a
+        new model/client.
+        """
+        if self._runtime is not None:
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if current_loop is not None and self._runtime._application_loop is current_loop:
+                raise AgentError("Use await agent.run() on the host application's owning event loop")
+        state = self._execution_state(kwargs)
+        if state is not None:
+            owner = state.owner()
+            try:
+                current = asyncio.get_running_loop()
+            except RuntimeError:
+                current = None
+            if owner is not None and owner is current:
+                raise AgentError("run_sync cannot block the provider's owning event loop; use await agent.run(...)")
+        if deferred_tool_results is not None:
+            kwargs["deferred_tool_results"] = deferred_tool_results
+        if model_options is not None:
+            kwargs["model_options"] = model_options
+        if context is None:
+            context = _default_agent_context()
+
+        mw_ctx = MiddlewareContext(
+            agent_name=self._name,
+            prompt=prompt,
+            method="run_sync",
+            deps=deps,
+            kwargs=kwargs,
+            metadata=self._model_metadata(),
+            model=self._effective_model_identifier(kwargs),
+            context=context,
+        )
+
+        async def execute() -> Any:
+            # Keep attached tracing/context-variable tokens in the same task
+            # through the request and cleanup, including notebook thread execution.
+            await self._middleware.run_before(mw_ctx)
+            if "_cache_result" in mw_ctx.metadata:
+                return await self._middleware.run_after(mw_ctx, mw_ctx.metadata["_cache_result"])
+
+            t0 = time.monotonic()
+            try:
+                await self._inject_memory(conversation_id, kwargs)
+                result = await self._run_with_rate_limit_retry(
+                    mw_ctx.prompt,
+                    deps=deps,
+                    timeout=timeout,
+                    retry_override=mw_ctx.metadata.get("_retry_config"),
+                    **kwargs,
+                )
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                await self._persist_memory(conversation_id, prompt, result)
+                self._record_usage(
+                    result, elapsed_ms, correlation_id=context.correlation_id, model_identifier=mw_ctx.model
+                )
+            except asyncio.CancelledError:
+                await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
+                raise
+            except Exception as exc:
+                await self._middleware.run_error(mw_ctx, exc)
+                raise
+            return await self._middleware.run_after(mw_ctx, result)
+
+        if self._runtime is not None:
+            with self._runtime.activate():
+                runtime = self._runtime
+
+                async def scoped_execute() -> Any:
+                    with runtime.operation(config=self._config):
+                        if runtime.quota_manager is not None:
+                            runtime.quota_manager.reserve_request(self._effective_model_identifier(kwargs))
+                        return await execute()
+
+                return self._runtime.sync_worker.run(on_model_loop(state, scoped_execute))
+        return _run_sync_coro(on_model_loop(state, execute))
+
+    @_runtime_bound
+    async def run_stream(
+        self,
+        prompt: str | Sequence[UserContent] | None = None,
+        *,
+        deps: AgentDepsT = None,  # type: ignore[assignment]
+        conversation_id: str | None = None,
+        timeout: float | None = None,
+        context: AgentContext | None = None,
+        streaming_mode: str = "buffered",
+        model_options: ModelOptions | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Run the agent with streaming.  Delegates to ``pydantic_ai.Agent.run_stream``.
+
+        The returned context manager is wrapped so that usage is recorded
+        when the stream completes (i.e. on ``__aexit__``).
+
+        Args:
+            streaming_mode: Streaming mode:
+                - "buffered" (default): Stream in chunks/messages (backward compatible)
+                - "incremental": True token-by-token streaming with minimal latency
+        """
+        if streaming_mode not in ("buffered", "incremental"):
+            raise ValueError(f"Invalid streaming_mode: {streaming_mode!r}. Expected 'buffered' or 'incremental'.")
+
+        if model_options is not None:
+            kwargs["model_options"] = model_options
+
+        if context is None:
+            context = _default_agent_context()
+
+        mw_ctx = MiddlewareContext(
+            agent_name=self._name,
+            prompt=prompt,
+            method="run_stream",
+            deps=deps,
+            kwargs=kwargs,
+            metadata=self._model_metadata(),
+            model=self._effective_model_identifier(kwargs),
+            context=context,
+        )
+        await self._middleware.run_before(mw_ctx)
+
+        # Middleware short-circuit (e.g. cache hit)
+        if "_cache_result" in mw_ctx.metadata:
+            result = mw_ctx.metadata["_cache_result"]
+            await self._middleware.run_after(mw_ctx, result)
+            return result
+
+        try:
+            await self._inject_memory(conversation_id, kwargs)
+            self._prepare_model_kwargs(kwargs)
+            stream_ctx = self._agent.run_stream(mw_ctx.prompt, deps=deps, **kwargs)
+        except asyncio.CancelledError:
+            await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
+            raise
+        except Exception as exc:
+            await self._middleware.run_error(mw_ctx, exc)
+            raise
+
+        if streaming_mode == "incremental":
+            return _IncrementalStreamContext(
+                stream_ctx,
+                self,
+                time.monotonic(),
+                mw_ctx,
+                correlation_id=context.correlation_id,
+                timeout=timeout,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+        else:
+            return _UsageTrackingStreamContext(
+                stream_ctx,
+                self,
+                time.monotonic(),
+                mw_ctx,
+                correlation_id=context.correlation_id,
+                timeout=timeout,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+
+    # -- Memory integration ------------------------------------------------
+
+    async def _inject_memory(self, conversation_id: str | None, kwargs: dict[str, Any]) -> None:
+        """If memory is attached, inject message_history into kwargs."""
+        if self._memory is None or conversation_id is None:
+            return
+        if "message_history" not in kwargs:
+            kwargs["message_history"] = await self._memory.async_get_message_history(conversation_id)
+            logger.debug("Agent '%s': injected memory for conversation '%s'", self._name, conversation_id)
+
+    async def _persist_memory(
+        self,
+        conversation_id: str | None,
+        prompt: Any,
+        result: Any,
+    ) -> None:
+        """After a run, store new messages in conversation memory."""
+        if self._memory is None or conversation_id is None:
+            return
+        if is_deferred(result):
+            # The run paused for approval; its output is a control object, not a
+            # final answer. Persisting it would corrupt the conversation turn —
+            # the resumed run records the completed turn instead.
+            return
+        if not hasattr(result, "new_messages"):
+            return
+        new_msgs = result.new_messages()
+        prompt_text = prompt if isinstance(prompt, str) else str(prompt)
+        output_text = str(result.output) if hasattr(result, "output") else ""
+        await self._memory.async_add_turn(conversation_id, prompt_text, output_text, new_msgs)
+        logger.debug("Agent '%s': persisted turn to conversation '%s'", self._name, conversation_id)
+
+    async def _persist_stream_memory(self, conversation_id: str | None, prompt: Any, stream: Any) -> None:
+        """Save completed streams, preserving the provider's typed history and reasoning items."""
+        if self._memory is None or conversation_id is None or not stream.is_complete or stream.cancelled:
+            return
+        output = await stream.get_output()
+        if isinstance(output, DeferredToolRequests):
+            return
+        await self._memory.async_add_turn(conversation_id, str(prompt), str(output), stream.new_messages())
+
+    # -- Usage tracking ------------------------------------------------------
+
+    def _record_usage(
+        self,
+        result: Any,
+        elapsed_ms: float,
+        *,
+        correlation_id: str = "",
+        model_identifier: str | None = None,
+    ) -> None:
+        """Extract token usage from a Pydantic AI result and feed the tracker."""
+        effective_model = model_identifier if model_identifier is not None else self.model_identifier
+        cfg = self._config
+        if not cfg.cost_tracking_enabled:
+            return
+        try:
+            usage = resolve_run_usage(result)
+            if usage is None:
+                return
+
+            input_tokens = getattr(usage, "input_tokens", 0) or 0
+            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            request_count = getattr(usage, "requests", 0) or 0
+            # pydantic-ai's ``RunUsage`` exposes ``cache_write_tokens`` (tokens
+            # written to the prompt cache); ``cache_creation_tokens`` is the
+            # historical fallback for custom/legacy usage objects.
+            cache_creation = getattr(usage, "cache_write_tokens", 0) or getattr(usage, "cache_creation_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_tokens", 0) or 0
+
+            record = self.usage_tracker.record_call(
+                model=effective_model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_tokens=cache_creation,
+                cache_read_tokens=cache_read,
+                reasoning_tokens=reasoning_tokens_not_in_output(usage),
+                request_count=request_count,
+                agent=self._name,
+                correlation_id=correlation_id,
+                latency_ms=elapsed_ms,
+                scope_ctx=ScopeContext(
+                    agent=self._name,
+                    model=effective_model,
+                    correlation_id=correlation_id,
+                ),
+            )
+            # Expose the computed cost on the result so downstream middleware
+            # (e.g. LoggingMiddleware's usage suffix) can surface it. Best-effort:
+            # result types that forbid attribute assignment are simply skipped.
+            if record is not None:
+                with contextlib.suppress(AttributeError, TypeError):
+                    result._pyfly_agentic_cost_usd = record.cost_usd
+        except (BudgetExceededError, UnknownModelCostError):
+            # Budget breaches and (under cost_strict) unpriceable models must
+            # fail the run, not be swallowed into a debug log.
+            raise
+        except Exception:  # noqa: BLE001
+            # Usage recording is a should-work path; surface failures at warning
+            # so a silently-broken cost/budget pipeline is visible to operators.
+            logger.warning("Failed to record usage for agent '%s'", self._name, exc_info=True)
+
+    # -- Reasoning integration ------------------------------------------------
+
+    @_runtime_bound
+    async def run_with_reasoning(
+        self,
+        pattern: Any,
+        prompt: str | Sequence[UserContent] | None = None,
+        *,
+        conversation_id: str | None = None,
+        context: AgentContext | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Run the agent using a reasoning pattern.
+
+        Convenience method that wires ``self`` as the agent, passes
+        the attached :class:`MemoryManager` (if any), and optionally
+        persists the final outcome in a selected conversation.
+
+        Parameters:
+            pattern: A :class:`ReasoningPattern` or any object with an
+                async ``execute(agent, input, **kwargs)`` method.
+            prompt: The input prompt.
+            conversation_id: When set and memory is attached, conversation
+                history is injected and the reasoning output is stored as
+                a new turn after completion.
+            context: Optional :class:`AgentContext` for correlation and
+                tracing.  A fresh context is created when *None*.
+            **kwargs: Forwarded to ``pattern.execute()``.
+
+        Returns:
+            A :class:`ReasoningResult` produced by the pattern.
+        """
+        if context is None:
+            context = _default_agent_context()
+
+        mw_ctx = MiddlewareContext(
+            agent_name=self._name,
+            prompt=prompt,
+            method="run_with_reasoning",
+            deps=None,
+            kwargs=kwargs,
+            model=self._effective_model_identifier(kwargs),
+            context=context,
+        )
+        await self._middleware.run_before(mw_ctx)
+
+        # Pass memory to the pattern if we have one
+        if self._memory is not None and "memory" not in kwargs:
+            kwargs["memory"] = self._memory
+
+        try:
+            result: ReasoningResult[Any] = await pattern.execute(self, mw_ctx.prompt, **kwargs)
+            # Persist the reasoning output as a conversation turn
+            if self._memory is not None and conversation_id is not None:
+                prompt_text = prompt if isinstance(prompt, str) else str(prompt)
+                output_text = str(result.output)[:1000] if result.output else ""
+                await self._memory.async_add_turn(
+                    conversation_id,
+                    prompt_text,
+                    output_text,
+                    [],
+                )
+
+        except asyncio.CancelledError:
+            await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
+            raise
+        except Exception as exc:
+            # Same error lifecycle as run/run_sync/run_stream: let middleware
+            # release what before_run acquired (end the span, record the breaker
+            # failure), then re-raise.
+            await self._middleware.run_error(mw_ctx, exc)
+            raise
+
+        result = await self._middleware.run_after(mw_ctx, result)
+        return result
+
+    # -- Decorator proxies ---------------------------------------------------
+
+    def tool(self, func: Any = None, **kwargs: Any) -> Any:
+        """Register a tool with the underlying agent.  See ``PydanticAgent.tool``."""
+        return self._agent.tool(func, **kwargs) if func is not None else self._agent.tool(**kwargs)
+
+    def tool_plain(self, func: Any = None, **kwargs: Any) -> Any:
+        """Register a plain tool.  See ``PydanticAgent.tool_plain``."""
+        return self._agent.tool_plain(func, **kwargs) if func is not None else self._agent.tool_plain(**kwargs)
+
+    def instructions(self, func: Any) -> Any:
+        """Register a dynamic instructions function.  See ``PydanticAgent.instructions``."""
+        return self._agent.instructions(func)
+
+    # -- Rate limit detection --------------------------------------------------
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        """Detect rate limit errors from any LLM provider.
+
+        Checks for:
+        - Framework :class:`RateLimitError`
+        - HTTP 429 status code (Anthropic, OpenAI SDKs)
+        - Bedrock ``ThrottlingException`` / ``TooManyRequestsException``
+        - String patterns as a fallback
+        """
+        if isinstance(exc, RateLimitError):
+            return True
+        if hasattr(exc, "status_code") and getattr(exc, "status_code", None) == 429:
+            return True
+        # Bedrock: boto3 ClientError with ThrottlingException code
+        exc_class = type(exc).__name__
+        if exc_class in ("ThrottlingException", "ClientError"):
+            error_code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if error_code in ("ThrottlingException", "TooManyRequestsException"):
+                return True
+        msg = str(exc).lower()
+        return ("rate" in msg and "limit" in msg) or "throttl" in msg or "429" in str(exc)
+
+    # -- Rate limit retry -----------------------------------------------------
+
+    def _execution_state(self, kwargs: dict[str, Any]) -> ModelState | None:
+        model = kwargs.get("model") or self._agent.model
+        if isinstance(model, str) and "model" in kwargs:
+            if model not in self._model_cache:
+                self._model_cache[model] = infer_model(cast(str, normalize_model(model)))
+                if self._runtime is not None:
+                    self._owned_model_ids.add(id(self._model_cache[model]))
+            model = self._model_cache[model]
+            kwargs["model"] = model
+        if not isinstance(model, Model) or model.provider is None:
+            return None
+        states = self._runtime._model_states if self._runtime is not None else self._model_states
+        identity = id(model)
+        if identity not in states:
+            owned = identity in self._owned_model_ids
+            state = ModelState(model, owned=owned, rebind_on_restart=owned)
+            states[identity] = state
+            if state.owned and self._runtime is not None:
+                self._runtime.own(state)
+        return states[identity]
+
+    def _effective_model_identifier(self, kwargs: dict[str, Any]) -> str:
+        override = kwargs.get("model")
+        return get_model_identifier(override) if override is not None else self.model_identifier
+
+    def _model_metadata(self) -> dict[str, Any]:
+        model = self._agent.model
+        while isinstance(model, WrapperModel):
+            model = model.wrapped
+        api = (
+            normalize_model(model) if isinstance(model, str) else f"{type(model).__module__}.{type(model).__qualname__}"
+        )
+        metadata: dict[str, Any] = {"_cache_model_api": api}
+        if self._model_options is not None:
+            metadata["_portable_model_options"] = self._model_options.model_dump(mode="json", exclude_unset=True)
+        return metadata
+
+    def _prepare_model_kwargs(self, kwargs: dict[str, Any]) -> None:
+        """Translate portable options at the invocation boundary, never on shared model state."""
+        if "model" in kwargs:
+            kwargs["model"] = normalize_model(kwargs["model"])
+        override = kwargs.pop("model_options", None)
+        if self._model_options is None and override is None:
+            return
+        values = self._model_options.model_dump(exclude_unset=True) if self._model_options is not None else {}
+        if override is not None:
+            values.update(override.model_dump(exclude_unset=True))
+        model = kwargs.get("model") or self._agent.model
+        settings = resolve_model_options(
+            model,
+            ModelOptions.model_validate(values),
+            base_settings=cast("dict[str, Any] | None", self._agent.model_settings),
+            override_settings=kwargs.get("model_settings"),
+        )
+        kwargs["model_settings"] = settings
+
+    async def _run_with_rate_limit_retry(
+        self,
+        prompt: str | Sequence[UserContent] | None,
+        *,
+        deps: AgentDepsT = None,  # type: ignore[assignment]
+        timeout: float | None = None,
+        retry_override: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute ``self._agent.run()`` with automatic 429 retry using AdaptiveBackoff.
+
+        Reads retry parameters from :func:`get_config`, but a per-agent
+        :class:`RetryMiddleware` may supply ``retry_override`` (its declared
+        ``max_retries`` / ``base_delay`` / ``max_delay``), which takes
+        precedence. Uses the
+        :class:`~pyfly.agentic.observability.quota.AdaptiveBackoff`
+        on the default :class:`QuotaManager` when quota is enabled and no
+        override is given, or a standalone backoff otherwise.
+        """
+        cfg = self._config
+        override = retry_override or {}
+        max_retries = override.get("max_retries", cfg.rate_limit_max_retries)
+        max_delay = override.get("max_delay", cfg.rate_limit_max_delay)
+        base_delay = override.get("base_delay", cfg.rate_limit_base_delay)
+
+        # Reuse the QuotaManager's shared backoff only when there's no per-agent
+        # override; an override needs its own backoff so its declared delays AND
+        # backoff multiplier take effect.
+        quota_manager = get_quota_manager()
+        if not override and quota_manager is not None and quota_manager.backoff is not None:
+            backoff = quota_manager.backoff
+        else:
+            backoff = AdaptiveBackoff(
+                base_delay=base_delay,
+                max_delay=max_delay,
+                multiplier=override.get("backoff_multiplier", 2.0),
+            )
+
+        key = self._effective_model_identifier(kwargs)
+        self._prepare_model_kwargs(kwargs)
+
+        for attempt in range(max_retries + 1):
+            try:
+                coro = self._agent.run(prompt, deps=deps, **kwargs)
+                if timeout is not None:
+                    result = await asyncio.wait_for(coro, timeout=timeout)
+                else:
+                    result = await coro
+                # Success — reset backoff counter
+                backoff.reset(key)
+                return result
+            except Exception as exc:
+                if not self._is_rate_limit_error(exc) or attempt >= max_retries:
+                    raise
+
+                backoff.record_failure(key)
+                delay = backoff.get_delay(key)
+
+                # Prefer a provider's structured retry hint (Gemini
+                # ResourceExhausted carries ``retry_delay``; some SDKs expose
+                # ``retry_after``); fall back to the OpenAI/Anthropic-shaped
+                # textual "retry … Ns" body, then to the exponential backoff.
+                hint = _suggested_retry_delay(exc)
+                if hint is not None:
+                    delay = min(hint, max_delay)
+
+                logger.warning(
+                    "Rate limit hit on '%s' (attempt %d/%d), retrying in %.1fs…",
+                    key,
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        # Should not be reached; final attempt raises in the loop
+        raise RuntimeError("Unexpected state in _run_with_rate_limit_retry")
+
+    # -- Default middleware resolution ----------------------------------------
+
+    @staticmethod
+    def _build_middleware(
+        user_middleware: list[Any] | None,
+        *,
+        default_middleware: bool = True,
+        config: AgenticConfig | None = None,
+        runtime_bound: bool = False,
+    ) -> list[Any]:
+        """Merge user-supplied middleware with auto-wired defaults.
+
+        When *default_middleware* is True, prepends a
+        :class:`LoggingMiddleware` and (when observability is enabled) an
+        :class:`ObservabilityMiddleware` to the chain unless the user
+        already supplied one. ``config`` is the agent's configuration; the
+        process singleton when omitted.
+        """
+        chain: list[Any] = []
+        user_mw = list(user_middleware or [])
+        cfg = config if config is not None else get_config()
+
+        if default_middleware:
+            has_logging = any(isinstance(m, LoggingMiddleware) for m in user_mw)
+            if not has_logging:
+                chain.append(LoggingMiddleware.for_config(cfg))
+
+            if cfg.observability_enabled:
+                has_obs = any(isinstance(m, ObservabilityMiddleware) for m in user_mw)
+                if not has_obs:
+                    chain.append(ObservabilityMiddleware())
+
+        if runtime_bound and not any(isinstance(m, NativeEventsMiddleware) for m in user_mw):
+            chain.insert(0, NativeEventsMiddleware())
+        chain.extend(user_mw)
+        return chain
+
+    # -- Tool resolution ------------------------------------------------------
+
+    @staticmethod
+    def _resolve_tools(tools: Sequence[Any]) -> list[Any]:
+        """Convert framework tool types into Pydantic AI tool objects.
+
+        * :class:`~pyfly.agentic.tools.base.AgentTool` instances are
+          wrapped in :class:`pydantic_ai.Tool` so their ``execute`` method is
+          called by the underlying agent.
+        * :class:`~pyfly.agentic.tools.toolkit.ToolKit` instances are
+          expanded via :meth:`~ToolKit.as_pydantic_tools`.
+        * Everything else (plain functions, ``pydantic_ai.Tool`` objects) is
+          passed through unchanged.
+        """
+        resolved: list[Any] = []
+        for item in tools:
+            if isinstance(item, ToolKit):
+                resolved.extend(item.as_pydantic_tools())
+            elif isinstance(item, AgentTool):
+                resolved.append(
+                    PydanticTool(
+                        item.pydantic_handler(),
+                        name=item.name,
+                        description=item.description,
+                        requires_approval=item.requires_approval,
+                    )
+                )
+            else:
+                resolved.append(item)
+        return resolved
+
+    @staticmethod
+    def _detect_hitl(tools: Sequence[Any], toolsets: Sequence[Any]) -> bool:
+        """Whether any tool/toolset can pause the run for approval or deferral.
+
+        True if a :class:`AgentTool` (directly or inside a ``ToolKit``) declares
+        ``requires_approval`` or ``defers``, a toolset is a native
+        :class:`~pydantic_ai.toolsets.ApprovalRequiredToolset`, or a toolset —
+        at any depth of ``CombinedToolset`` / ``WrapperToolset`` / ``FilteredToolset``
+        nesting — exposes a tool that declares ``requires_approval``. Raw
+        ``pydantic_ai.Tool`` objects with ``requires_approval`` are also honoured.
+
+        ``defers`` is the declaration a tool makes when it pauses from inside its
+        body (``CallDeferred``) rather than by flag: nothing about such a tool is
+        visible from the outside, so the earlier one-level scan could not see it and
+        the first pause crashed the run with pydantic-ai's ``UserError``. If
+        introspection still misses a case, pass ``hitl=True`` explicitly.
+        """
+
+        def pauses(tool: Any) -> bool:
+            return bool(getattr(tool, "requires_approval", False) or getattr(tool, "defers", False))
+
+        def toolset_pauses(ts: Any, depth: int = 0) -> bool:
+            if depth > 16:  # a cyclic wrapper graph is a bug, not a reason to hang
+                return False
+            if isinstance(ts, ApprovalRequiredToolset):
+                return True
+            # A FunctionToolset exposes its tools as a name -> Tool mapping; honour
+            # any that declare requires_approval (so as_toolset() HITL kits work).
+            ts_tools = getattr(ts, "tools", None)
+            if isinstance(ts_tools, dict) and any(pauses(t) for t in ts_tools.values()):
+                return True
+            # CombinedToolset holds ``toolsets``; every WrapperToolset (Filtered,
+            # Prefixed, Renamed, Prepared, Approval…) holds ``wrapped``.
+            inner = getattr(ts, "toolsets", None)
+            if isinstance(inner, (list, tuple)) and any(toolset_pauses(t, depth + 1) for t in inner):
+                return True
+            wrapped = getattr(ts, "wrapped", None)
+            return wrapped is not None and wrapped is not ts and toolset_pauses(wrapped, depth + 1)
+
+        for item in tools:
+            if isinstance(item, ToolKit):
+                if any(pauses(t) for t in item.tools):
+                    return True
+            elif pauses(item):
+                return True
+        return any(toolset_pauses(ts) for ts in toolsets)
+
+    @staticmethod
+    def _build_capabilities(
+        cfg: AgenticConfig, approval_handler: ApprovalHandler | None, runtime: AgenticRuntime | None = None
+    ) -> list[Any]:
+        """Assemble the inner pydantic-ai ``PydanticAgent``'s capabilities.
+
+        Two opt-in capabilities: an inline HITL approval handler (SP-3) and native
+        OpenTelemetry instrumentation (SP-10). Native instrumentation emits rich
+        GenAI-convention spans for each model request / tool call and is gated by
+        ``observability_enabled`` *and* ``native_instrumentation_enabled``. The
+        tracer/meter/logger providers are left unset (``None``) so spans flow
+        through the global OpenTelemetry API — the host owns the SDK/exporter. The
+        deprecated ``PydanticAgent(instrument=...)`` path is never used (it would trip the
+        deprecation gate); ``capabilities=[Instrumentation(...)]`` is warning-free.
+        """
+        capabilities: list[Any] = []
+        if approval_handler is not None:
+            capabilities.append(HandleDeferredToolCalls(approval_handler))
+        if cfg.observability_enabled and cfg.native_instrumentation_enabled:
+            capabilities.append(
+                Instrumentation(
+                    InstrumentationSettings(
+                        tracer_provider=runtime.tracer_provider if runtime is not None else None,
+                        meter_provider=runtime.meter_provider if runtime is not None else None,
+                        include_content=cfg.instrumentation_include_content,
+                        include_binary_content=cfg.instrumentation_include_content,
+                        include_model_request_parameters=cfg.instrumentation_include_content,
+                        # Upstream removed v1 and deprecated v2-v4; retain old
+                        # configurations by upgrading their telemetry format.
+                        version=6 if cfg.instrumentation_version == 6 else 5,
+                    )
+                )
+            )
+        return capabilities
+
+    # -- Dunder --------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        return f"Agent(name={self._name!r}, version={self._version!r}, model={self._agent.model!r})"
+
+
+class _UsageTrackingStreamContext:
+    """Async context manager wrapper that records usage when the stream finishes."""
+
+    def __init__(
+        self,
+        stream_ctx: Any,
+        agent: Agent[Any, Any],
+        t0: float,
+        mw_ctx: Any = None,
+        *,
+        correlation_id: str = "",
+        timeout: float | None = None,
+        conversation_id: str | None = None,
+        prompt: Any = None,
+    ) -> None:
+        self._stream_ctx = stream_ctx
+        self._agent = agent
+        self._t0 = t0
+        self._mw_ctx = mw_ctx
+        self._correlation_id = correlation_id
+        self._timeout = timeout
+        self._conversation_id = conversation_id
+        self._prompt = prompt
+        self._stream: Any = None
+
+    async def __aenter__(self) -> Any:
+        enter_coro = self._stream_ctx.__aenter__()
+        if self._timeout is not None:
+            self._stream = await asyncio.wait_for(enter_coro, timeout=self._timeout)
+        else:
+            self._stream = await enter_coro
+        return self._stream
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        result = await self._stream_ctx.__aexit__(exc_type, exc_val, exc_tb)
+        elapsed_ms = (time.monotonic() - self._t0) * 1000
+        # On a failed stream, fire error hooks (end span, record the breaker
+        # failure) and skip usage/after-hooks — there is no usable result.
+        if exc_type is not None:
+            if self._mw_ctx is not None:
+                await self._agent._middleware.run_error(self._mw_ctx, exc_val)
+            return result
+        # After the stream closes, usage() is available on the stream handle.
+        if self._stream is not None:
+            await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+            self._agent._record_usage(
+                self._stream,
+                elapsed_ms,
+                correlation_id=self._correlation_id,
+                model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
+            )
+        # Run after-hooks on the stream handle so middleware can inspect usage.
+        if self._mw_ctx is not None:
+            await self._agent._middleware.run_after(self._mw_ctx, self._stream)
+        return result
+
+
+class _IncrementalStreamContext:
+    """Async context manager for true token-by-token streaming.
+
+    Provides minimal latency streaming by yielding tokens as soon as they
+    arrive from the model, without buffering. This is ideal for interactive
+    applications where users want to see responses immediately.
+
+    The returned stream wrapper provides:
+    - stream_tokens(): Yields individual tokens with minimal latency
+    - stream_text(): Falls back to buffered text streaming
+    - All other stream methods from the underlying Pydantic AI stream
+    """
+
+    def __init__(
+        self,
+        stream_ctx: Any,
+        agent: Agent[Any, Any],
+        t0: float,
+        mw_ctx: Any = None,
+        *,
+        correlation_id: str = "",
+        timeout: float | None = None,
+        conversation_id: str | None = None,
+        prompt: Any = None,
+    ) -> None:
+        self._stream_ctx = stream_ctx
+        self._agent = agent
+        self._t0 = t0
+        self._mw_ctx = mw_ctx
+        self._correlation_id = correlation_id
+        self._timeout = timeout
+        self._conversation_id = conversation_id
+        self._prompt = prompt
+        self._stream: Any = None
+        self._wrapper: _IncrementalStreamWrapper | None = None
+
+    async def __aenter__(self) -> Any:
+        enter_coro = self._stream_ctx.__aenter__()
+        if self._timeout is not None:
+            self._stream = await asyncio.wait_for(enter_coro, timeout=self._timeout)
+        else:
+            self._stream = await enter_coro
+
+        # Wrap the stream to add incremental token streaming
+        self._wrapper = _IncrementalStreamWrapper(self._stream)
+        return self._wrapper
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        try:
+            if self._wrapper is not None:
+                await self._wrapper._close_text_streams()
+        finally:
+            result = await self._stream_ctx.__aexit__(exc_type, exc_val, exc_tb)
+        elapsed_ms = (time.monotonic() - self._t0) * 1000
+        # On a failed stream, fire error hooks and skip usage/after-hooks.
+        if exc_type is not None:
+            if self._mw_ctx is not None:
+                await self._agent._middleware.run_error(self._mw_ctx, exc_val)
+            return result
+        # After the stream closes, usage() is available on the stream handle.
+        if self._stream is not None:
+            await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+            self._agent._record_usage(
+                self._stream,
+                elapsed_ms,
+                correlation_id=self._correlation_id,
+                model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
+            )
+        # Run after-hooks on the stream handle so middleware can inspect usage.
+        if self._mw_ctx is not None:
+            await self._agent._middleware.run_after(self._mw_ctx, self._stream)
+        return result
+
+
+class _IncrementalStreamWrapper:
+    """Wrapper that adds true token-by-token streaming to a Pydantic AI stream.
+
+    This wrapper intercepts the underlying stream and provides a stream_tokens()
+    method that yields individual tokens as they arrive, providing minimal latency
+    for interactive applications.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._buffer: list[str] = []
+        self._prev_text = ""
+        self._text_streams: set[Any] = set()
+
+    async def _close_text_streams(self) -> None:
+        # Debounced text iterators own tasks that must stop before the model
+        # context exits, even when the caller retains an unfinished token iterator.
+        for stream in tuple(self._text_streams):
+            await stream.aclose()
+        self._text_streams.clear()
+
+    async def stream_tokens(self, *, debounce_ms: float = 0.0) -> Any:
+        """Stream individual tokens as they arrive.
+
+        This method provides true token-by-token streaming by tracking the
+        difference between successive text chunks from the model.
+
+        Args:
+            debounce_ms: Optional debounce delay in milliseconds to batch
+                rapid tokens together. Default 0 = no debouncing.
+
+        Yields:
+            str: Individual tokens as they arrive from the model.
+
+        Example:
+            async with await agent.run_stream(
+                "Write a story", streaming_mode="incremental"
+            ) as stream:
+                async for token in stream.stream_tokens():
+                    print(token, end="", flush=True)
+        """
+        self._prev_text = ""
+
+        text_stream = self._stream.stream_text(delta=True)
+        self._text_streams.add(text_stream)
+        try:
+            async with contextlib.aclosing(text_stream):
+                async for chunk in text_stream:
+                    # The delta=True gives us incremental text
+                    if chunk:
+                        if debounce_ms > 0:
+                            # Batch rapid tokens with debouncing
+                            self._buffer.append(chunk)
+                            await asyncio.sleep(debounce_ms / 1000.0)
+
+                            if self._buffer:
+                                # Yield batched tokens
+                                batched = "".join(self._buffer)
+                                self._buffer.clear()
+                                yield batched
+                        else:
+                            # Yield immediately without debouncing
+                            yield chunk
+        except UserError as exc:
+            # pydantic-ai forbids stream_text() for a non-text (structured) run.
+            # Token-by-token streaming is meaningless for structured output, so
+            # fail fast with an actionable message instead of an opaque UserError.
+            raise AgentError(
+                "incremental token streaming (stream_tokens) requires a text output_type; "
+                "this agent produces structured output. Use streaming_mode='buffered' and "
+                "iterate get_output() / stream_output() instead."
+            ) from exc
+        finally:
+            self._text_streams.discard(text_stream)
+
+        # Flush any remaining buffered tokens
+        if self._buffer:
+            yield "".join(self._buffer)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate all other attributes to the underlying stream."""
+        return getattr(self._stream, name)

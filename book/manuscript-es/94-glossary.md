@@ -109,3 +109,15 @@
 **Feature flag** — Definición en tiempo de ejecución que elige un valor tipado o una variante según el contexto; el llamador aporta el valor por defecto si falta, está desactivada o falla (Apéndice F).
 
 **Clave de segmentación (targeting key)** — Identificador estable de usuario o entidad con el que el algoritmo fraccional compartido conserva el grupo de despliegue (Apéndice F).
+
+**Runtime agéntico** — Límite de configuración, registros, contabilidad y recursos que pertenece a una aplicación y cubre ejecución anidada (capítulos 19–21).
+
+**Aprobación diferida** — Llamada de herramienta pausada con ID propio; requiere decisión autenticada e historial preservado para reanudarse (capítulo 19).
+
+**RAG** — Generación aumentada con recuperación: obtener evidencia autorizada y generar una respuesta limitada por ella. Similitud y esquema no demuestran veracidad (capítulo 20).
+
+**Almacén vectorial con alcance** — Interfaz que exige identificadores confiables de tenant y workspace en cada operación (capítulo 20).
+
+**Journal agéntico** — Registro por secuencia de resultados de modelo reutilizados en replay; puede tener persistencia de mejor esfuerzo y no garantiza efectos de negocio exactamente una vez (capítulo 21).
+
+**Presupuesto de workflow** — Límites por ejecución de concurrencia, llamadas y opcionalmente tokens, coste y tiempo; distintos del ledger de aplicación y las cuotas (capítulo 21).

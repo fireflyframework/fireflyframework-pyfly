@@ -27,6 +27,7 @@ const routes = {
     'mappings':   () => import('./views/mappings.js'),
     'caches':     () => import('./views/caches.js'),
     'flags':      () => import('./views/flags.js'),
+    'agentic':    () => import('./views/agentic.js'),
     'cqrs':       () => import('./views/cqrs.js'),
     'transactions': () => import('./views/transactions.js'),
     'traces':     () => import('./views/traces.js'),
@@ -41,7 +42,7 @@ const routes = {
 /* ── Application State ────────────────────────────────────────── */
 
 let settings = {
-    title: 'PyFly Admin',
+    title: 'pyfly admin',
     theme: 'dark',
     refreshInterval: 10000,
     serverMode: false,
@@ -357,6 +358,7 @@ async function init() {
     renderSidebar(sidebar, getRouteFromHash(), {
         serverMode: settings.serverMode,
         dataEnabled: settings.dataEnabled,
+        agenticEnabled: settings.agenticEnabled,
         onNavigate: (route) => navigateTo(route),
     });
 
@@ -368,6 +370,7 @@ async function init() {
         onNavigate: (route) => navigateTo(route),
         serverMode: settings.serverMode,
         dataEnabled: settings.dataEnabled,
+        agenticEnabled: settings.agenticEnabled,
         onToggleTheme: toggleTheme,
     });
 

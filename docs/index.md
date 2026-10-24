@@ -289,6 +289,7 @@ PyFly is organized into four layers:
 | **Data Document** | MongoDB adapter — Beanie ODM, document repositories | [Data Document](modules/data-document.md) |
 | **CQRS** | Command/Query segregation with CommandBus/QueryBus | [CQRS](modules/cqrs.md) |
 | **Validation** | Input validation with Pydantic | [Validation](modules/validation.md) |
+| **Agentic** | Opt-in agents, tools, knowledge, reasoning and workflows with an application-owned runtime | [Agentic](modules/agentic.md) |
 
 ### Infrastructure Layer
 
@@ -412,3 +413,12 @@ See [Installation](installation.md) for optional dependencies and extras.
 ## License
 
 Apache License 2.0 — Firefly Software Foundation.
+
+
+## Native Agentic
+
+The optional [Agentic module](modules/agentic.md) connects agents, tools, knowledge retrieval, reasoning and workflows to PyFly configuration, DI and lifecycle. Start with [native ownership](modules/agentic/native-runtime.md), [installation](modules/agentic/getting-started/installation.md), or the [complete guide catalogue](modules/agentic/catalogue.md).
+
+Agentic database memory and pgvector borrow native Data resources; see
+[transactional memory](modules/agentic/native-runtime.md#native-data-memory-and-transactions)
+and [guarded admin inventory](modules/admin.md#agentic-application-runtime-only).

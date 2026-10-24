@@ -1,0 +1,154 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Performance benchmarks for streaming latency.
+
+These benchmarks use Pydantic AI's local test model to measure framework
+overhead when consuming the first chunk, a full response, or no response.
+The reported callable durations include stream teardown; they do not measure
+provider latency or establish relative performance for deployed workloads.
+
+Run with:
+    pytest tests/performance/test_bench_streaming_latency.py --benchmark-only
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Iterator
+
+import pytest
+
+from pyfly.agentic.agents.base import Agent
+
+
+@pytest.fixture
+def bench_loop() -> Iterator[asyncio.AbstractEventLoop]:
+    """Single event loop reused across benchmark iterations.
+
+    `pytest-benchmark` runs the benchmarked callable many times. Sharing one
+    loop avoids per-iteration setup cost from dominating the measurement.
+    """
+    # Early exit from a stream leaves async-generator finalizers to be drained.
+    with asyncio.Runner(loop_factory=asyncio.new_event_loop) as runner:
+        yield runner.get_loop()
+
+
+@pytest.mark.nightly
+def test_bench_buffered_streaming_latency(benchmark, bench_loop):
+    """Benchmark buffered streaming mode latency."""
+    agent = Agent("bench-buffered", model="test", auto_register=False)
+
+    async def stream_buffered():
+        start = time.perf_counter()
+        first_token_time = None
+
+        stream_ctx = await agent.run_stream("hello", streaming_mode="buffered")
+        async with stream_ctx as stream:
+            async for _chunk in stream.stream_text():
+                if first_token_time is None:
+                    first_token_time = time.perf_counter() - start
+                break
+
+        return first_token_time
+
+    benchmark(lambda: bench_loop.run_until_complete(stream_buffered()))
+
+
+@pytest.mark.nightly
+def test_bench_incremental_streaming_latency(benchmark, bench_loop):
+    """Benchmark incremental streaming mode latency."""
+    agent = Agent("bench-incremental", model="test", auto_register=False)
+
+    async def stream_incremental():
+        start = time.perf_counter()
+        first_token_time = None
+
+        stream_ctx = await agent.run_stream("hello", streaming_mode="incremental")
+        async with stream_ctx as stream:
+            async for _token in stream.stream_tokens():
+                if first_token_time is None:
+                    first_token_time = time.perf_counter() - start
+                break
+
+        return first_token_time
+
+    benchmark(lambda: bench_loop.run_until_complete(stream_incremental()))
+
+
+@pytest.mark.nightly
+def test_bench_incremental_with_debounce(benchmark, bench_loop):
+    """Benchmark incremental streaming with debouncing."""
+    agent = Agent("bench-debounce", model="test", auto_register=False)
+
+    async def stream_with_debounce():
+        start = time.perf_counter()
+        first_token_time = None
+
+        stream_ctx = await agent.run_stream("hello", streaming_mode="incremental")
+        async with stream_ctx as stream:
+            async for _token in stream.stream_tokens(debounce_ms=10.0):
+                if first_token_time is None:
+                    first_token_time = time.perf_counter() - start
+                break
+
+        return first_token_time
+
+    benchmark(lambda: bench_loop.run_until_complete(stream_with_debounce()))
+
+
+@pytest.mark.nightly
+def test_bench_full_response_buffered(benchmark, bench_loop):
+    """Benchmark full response streaming in buffered mode."""
+    agent = Agent("bench-full-buf", model="test", auto_register=False)
+
+    async def stream_full_buffered():
+        chunks = []
+        stream_ctx = await agent.run_stream("Count to 10", streaming_mode="buffered")
+        async with stream_ctx as stream:
+            async for chunk in stream.stream_text():
+                chunks.append(chunk)
+        return len(chunks)
+
+    benchmark(lambda: bench_loop.run_until_complete(stream_full_buffered()))
+
+
+@pytest.mark.nightly
+def test_bench_full_response_incremental(benchmark, bench_loop):
+    """Benchmark full response streaming in incremental mode."""
+    agent = Agent("bench-full-inc", model="test", auto_register=False)
+
+    async def stream_full_incremental():
+        tokens = []
+        stream_ctx = await agent.run_stream("Count to 10", streaming_mode="incremental")
+        async with stream_ctx as stream:
+            async for token in stream.stream_tokens():
+                tokens.append(token)
+        return len(tokens)
+
+    benchmark(lambda: bench_loop.run_until_complete(stream_full_incremental()))
+
+
+@pytest.mark.nightly
+def test_bench_stream_context_manager_overhead(benchmark, bench_loop):
+    """Benchmark overhead of stream context manager creation."""
+    agent = Agent("bench-ctx", model="test", auto_register=False)
+
+    async def create_stream_context():
+        stream_ctx = await agent.run_stream("hello", streaming_mode="incremental")
+        async with stream_ctx:
+            pass
+
+    benchmark(lambda: bench_loop.run_until_complete(create_stream_context()))

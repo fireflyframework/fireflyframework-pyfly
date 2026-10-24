@@ -71,6 +71,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import DateTime
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Dialect
 from sqlalchemy.sql.operators import OperatorType
 from sqlalchemy.types import TypeDecorator, TypeEngine
@@ -204,9 +205,16 @@ def render_item(type_: str, obj: Any, autogen_context: AutogenContext) -> Litera
     ``DATETIME(6)``. The framework tables' types (``UtcTimestamp``, ``KeyString`` of
     :mod:`pyfly.data.relational.framework_schema`) get their module imported the same way.
 
+    A PostgreSQL JSON/JSONB variant rendered on another backend includes its ``astext_type`` as an
+    unqualified constructor (``Text()`` by default). Import that actual nested type too: Alembic qualifies
+    it only with its active PostgreSQL renderer. Leave the variant and its options unchanged.
+
     The ``env.py`` of ``pyfly db init`` passes it to both ``context.configure`` calls. An existing ``env.py``
     adds ``render_item=render_item`` there, or calls it from its own hook before its own rendering.
     """
     if type_ == "type" and type(obj).__module__.startswith("pyfly."):
         autogen_context.imports.add(f"import {type(obj).__module__}")
+    if type_ == "type" and isinstance(obj, postgresql.JSON):
+        nested_type = type(obj.astext_type)
+        autogen_context.imports.add(f"from {nested_type.__module__} import {nested_type.__name__}")
     return False

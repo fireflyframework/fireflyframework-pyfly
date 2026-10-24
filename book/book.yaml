@@ -57,6 +57,11 @@ parts:
       - {id: ch16, file: 16-testing.md, num: 16, title: "Testing PyFly Applications", opener: art/openers/ch16.svg}
       - {id: ch17, file: 17-scheduling-notifications.md, num: 17, title: "Scheduling, Notifications, Webhooks & Callbacks", opener: art/openers/ch17.svg}
       - {id: ch18, file: 18-production.md, num: 18, title: "Extending PyFly & Going to Production", opener: art/openers/ch18.svg}
+  - title: "Part VI — Native Agentic Assistance"
+    chapters:
+      - {id: ch19, file: 19-agentic-agents.md, num: 19, title: "Agents and Tools in Lumen"}
+      - {id: ch20, file: 20-agentic-knowledge.md, num: 20, title: "Knowledge and Reasoning"}
+      - {id: ch21, file: 21-agentic-workflows.md, num: 21, title: "Agentic Workflows and Operations"}
   - title: "Appendices"
     chapters:
       - {id: appa, file: 90-appendix-a-spring.md,  num: "A", title: "Spring Boot → PyFly Cheat-Sheet"}

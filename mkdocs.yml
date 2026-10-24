@@ -19,6 +19,9 @@ docs_dir: docs
 exclude_docs: |
   /README.md
   superpowers/
+  /modules/agentic/README.md
+  /modules/agentic/assets/*.md
+  /modules/agentic/assets/tools/
 
 copyright: >-
   Apache License 2.0 · © Firefly Software Foundation —
@@ -66,6 +69,10 @@ theme:
 
 extra_css:
   - stylesheets/pyfly.css
+  - modules/agentic/assets/diagrams.css
+
+extra_javascript:
+  - modules/agentic/assets/diagrams.js
 
 extra:
   # Make the header logo/title link back to the landing page instead of the docs index.
@@ -185,6 +192,48 @@ nav:
           - Custom Actuator Endpoints: modules/custom-actuator-endpoints.md
           - Admin Dashboard: modules/admin.md
           - AOP: modules/aop.md
+      - Agentic:
+          - Overview: modules/agentic.md
+          - Guide Index: modules/agentic/index.md
+          - Capability Catalogue: modules/agentic/catalogue.md
+          - Installation: modules/agentic/getting-started/installation.md
+          - Native DI & Lifecycle: modules/agentic/native-runtime.md
+          - Configuration Reference: modules/agentic/configuration.md
+          - Quick Start: modules/agentic/getting-started/quickstart.md
+          - Local Ollama: modules/agentic/getting-started/ollama.md
+          - Visual Guide: modules/agentic/diagrams.md
+          - Complete Tutorial: modules/agentic/tutorial.md
+          - Jupyter: modules/agentic/getting-started/jupyter.md
+          - Architecture: modules/agentic/architecture.md
+          - Agents: modules/agentic/agents.md
+          - Templates: modules/agentic/templates.md
+          - Tools: modules/agentic/tools.md
+          - Models: modules/agentic/models.md
+          - Skills: modules/agentic/skills.md
+          - Prompts: modules/agentic/prompts.md
+          - Content: modules/agentic/content.md
+          - Memory: modules/agentic/memory.md
+          - Embeddings: modules/agentic/embeddings.md
+          - Vector Stores: modules/agentic/vectorstores.md
+          - pg_vectorsearch Evaluation: modules/agentic/pg-vectorsearch-evaluation.md
+          - Reasoning: modules/agentic/reasoning.md
+          - Validation: modules/agentic/validation.md
+          - Evaluation: modules/agentic/evaluation.md
+          - Security: modules/agentic/security.md
+          - Script Execution: modules/agentic/execution.md
+          - Observability: modules/agentic/observability.md
+          - Resilience: modules/agentic/resilience.md
+          - Storage: modules/agentic/storage.md
+          - Explainability: modules/agentic/explainability.md
+          - Experiments: modules/agentic/experiments.md
+          - Lab: modules/agentic/lab.md
+          - Pipelines: modules/agentic/pipeline.md
+          - Workflows: modules/agentic/workflows.md
+          - IDP Walkthrough: modules/agentic/use-case-idp.md
+          - Example Catalogue: modules/agentic/examples.md
+          - Migration: modules/agentic/migration.md
+          - Historical Dependency Record: modules/agentic/dependency-upgrade-26101.md
+          - Historical Changelog: modules/agentic/changelog.md
       - Testing:
           - Testing: modules/testing.md
           - Integration Testing: modules/integration-testing.md

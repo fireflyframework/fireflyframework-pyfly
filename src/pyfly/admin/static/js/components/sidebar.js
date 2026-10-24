@@ -52,6 +52,8 @@ export const NAV_ITEMS = [
 ];
 
 /** Navigation item only shown in server mode. */
+export const AGENTIC_ITEMS = [{ id: 'agentic', label: 'Agentic', icon: 'shuffle', section: 'Intelligence' }];
+
 export const DATA_ITEMS = [{ id: 'datasources', label: 'Datasources', icon: 'database', section: 'Data' }];
 
 export const SERVER_ITEMS = [
@@ -97,18 +99,18 @@ export function createSvgIcon(pathData) {
  * @param {function}    [options.onNavigate]  Called when a nav item is clicked.
  */
 export function renderSidebar(container, currentRoute, options = {}) {
-    const { serverMode = false, dataEnabled = false, onNavigate = null } = options;
+    const { serverMode = false, dataEnabled = false, agenticEnabled = false, onNavigate = null } = options;
 
     // Clear previous content
     container.textContent = '';
 
-    // Brand header — the pyfly wordmark logo (no secondary label).
+    // Canonical outlined family lockup, including its parent endorsement.
     const brand = document.createElement('div');
     brand.className = 'admin-sidebar-brand';
 
     const logo = document.createElement('img');
-    logo.src = 'static/assets/pyfly-logo.png';
-    logo.alt = 'PyFly';
+    logo.src = 'static/assets/pyfly-dark.svg';
+    logo.alt = 'pyfly by Firefly';
     brand.appendChild(logo);
 
     container.appendChild(brand);
@@ -117,7 +119,9 @@ export function renderSidebar(container, currentRoute, options = {}) {
     const nav = document.createElement('nav');
     nav.className = 'admin-sidebar-nav';
 
-    const items = [...NAV_ITEMS, ...(dataEnabled ? DATA_ITEMS : []), ...(serverMode ? SERVER_ITEMS : [])];
+    const applicationItems = NAV_ITEMS.flatMap(item =>
+        item.id === 'metrics' && agenticEnabled ? [...AGENTIC_ITEMS, item] : [item]);
+    const items = [...applicationItems, ...(dataEnabled ? DATA_ITEMS : []), ...(serverMode ? SERVER_ITEMS : [])];
 
     for (const item of items) {
         // Section header

@@ -1,0 +1,1337 @@
+# Agents Guide
+
+Use these capability snippets inside your application’s [native runtime](native-runtime.md).
+Installation is through [PyFly Agentic extras](getting-started/installation.md).
+
+Copyright 2026 Firefly Software Foundation. Licensed under the Apache License 2.0.
+
+Unless an example explicitly compares models, it uses
+`PYFLY_AGENTIC_DEFAULT_MODEL`. Set that and your provider credentials using the
+[model configuration guide](models.md) before running agent examples.
+
+The Agents module wraps Pydantic AI's `Agent` class and adds lifecycle management,
+an application-scoped registry, multi-agent delegation, execution context, and a decorator API.
+
+---
+
+## Concepts
+
+An agent in PyFly Agentic is a named, configured wrapper around a Pydantic AI
+agent. Agents register by default and expose execution methods; the host explicitly
+invokes any `AgentLifecycle` startup and shutdown hooks it has configured.
+
+```mermaid
+classDiagram
+    class Agent {
+        +name str
+        +model_identifier str
+        +run(prompt, **kwargs) Any
+        +run_sync(prompt, **kwargs) Any
+        +run_stream(prompt, **kwargs) Any
+        +instructions(function)
+    }
+    class AgentRegistry {
+        +register(agent)
+        +get(name) Agent
+        +has(name) bool
+        +list_agents() list
+    }
+    class AgentLifecycle {
+        +on_init(hook)
+        +on_warmup(hook)
+        +on_shutdown(hook)
+        +run_init()
+        +run_warmup()
+        +run_shutdown()
+    }
+    class HostApplication
+    AgentRegistry "1" --> "*" Agent : lookup
+    HostApplication --> AgentLifecycle : invokes lifecycle phases
+    HostApplication --> Agent : invokes runs
+```
+
+---
+
+## Creating an Agent
+
+### Using the Decorator
+
+The simplest way to create and register an agent is with the `@agent` decorator:
+
+```python
+from pyfly.agentic.agents import agent
+
+@agent(name="writer")
+def writer_instructions(ctx):
+    return "You are a writer."
+```
+
+The decorator creates a `Agent`, registers the decorated function as its
+dynamic instructions provider, and registers the agent in the active runtime’s `AgentRegistry`.
+
+### Using the Class Directly
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.agents.registry import agent_registry
+
+agent = Agent(name="analyst")  # Uses PYFLY_AGENTIC_DEFAULT_MODEL.
+agent_registry.register(agent)
+```
+
+### Synchronous and asynchronous execution
+
+Use `await agent.run(...)` and streaming APIs within your application's event loop.
+In ordinary synchronous code, `agent.run_sync(...)` uses a persistent background
+loop so repeated calls can reuse provider HTTP connections. Each invocation carries
+the caller's context variables through middleware, model execution, and cleanup.
+
+Keep an agent and its loop-bound tools or provider clients in one execution mode.
+An async client already used on an application loop cannot be moved into the
+synchronous runner. In notebooks, prefer top-level `await`; a tool running inside
+the synchronous runner must call child agents with `await child.run(...)` rather
+than trying to block that same loop with `run_sync()`.
+
+### Framework model options
+
+Use `ModelOptions` for application-level configuration. PyFly Agentic translates the
+options for the selected model and API, including provider-specific reasoning,
+storage, and output settings:
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import ModelOptions
+
+agent = Agent(
+    name="assistant",
+    model_options=ModelOptions(max_tokens=4096),
+)
+result = await agent.run("Explain bounded retries.", model_options=ModelOptions(max_tokens=1024))
+```
+
+`model_options=` also works with `run_sync()` and `run_stream()`. Ordinary agent,
+tool, and memory code imports PyFly Agentic, with Pydantic models for structured outputs;
+provider selection stays in `PYFLY_AGENTIC_DEFAULT_MODEL` or the agent's `model=`
+configuration. See the complete [model-agnostic example](https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/examples/agentic/model_agnostic_agent.py).
+
+Per-run options override only fields explicitly set on that call; setting a field
+to `None` clears an inherited option. Native model defaults are applied first, then constructor `model_settings`,
+merged `ModelOptions`, and finally native per-run `model_settings`. Clearing a
+portable option with `None` does not erase an independently supplied native setting. The `@agent` decorator
+accepts the same `model_options=` parameter.
+
+Options do not make model capabilities interchangeable. An explicitly unsupported
+request raises `ModelOptionsError`, so choose compatible options when changing
+models. See the [option reference](models.md#typed-model-options). Existing native
+`model_settings=` remains available for advanced integrations.
+
+### Application-managed credentials
+
+Use PyFly Agentic's [`Credential`, `ModelSpec`, and `ModelFactory`](models.md) to configure
+credentials and endpoints without provider SDK imports:
+
+```python
+import os
+
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import Credential, ModelFactory, ModelOptions, ModelSpec
+
+spec = ModelSpec(
+    provider="openai-responses",
+    model="gpt-6-luna",
+    credential=Credential.api_key(os.environ["OPENAI_API_KEY"]),
+    options=ModelOptions(reasoning="low", max_tokens=4096),
+)
+agent = Agent(
+    name="catalogue-analyst",
+    model=await ModelFactory().build(spec),
+    model_options=spec.options,
+)
+```
+
+The [tutorial](tutorial.md#model-providers-authentication) covers Azure, Bedrock,
+and local endpoints using the same factory interface.
+
+### Advanced: native model objects
+
+Existing preconfigured Pydantic AI `Model` instances remain supported, including
+custom provider clients. Use this escape hatch when you need a native SDK feature
+that `ModelSpec` does not expose:
+
+```python
+import os
+
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+from pyfly.agentic.agents import Agent
+
+model = OpenAIChatModel("gpt-4o", provider=OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"]))
+agent = Agent(name="native-analyst", model=model)
+```
+
+### OpenAI Chat Completions and Responses
+
+Existing `Agent(model="openai:...")` and `model="azure:..."` configurations
+continue to use Chat Completions. Select the API explicitly for new integrations:
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import ModelOptions
+
+# Both read OPENAI_API_KEY from the environment.
+chat = Agent(name="chat", model="openai-chat:gpt-4o")
+responses = Agent(
+    name="responses",
+    model="openai-responses:gpt-6-luna",
+    model_options=ModelOptions(reasoning="low", store_responses=False),
+)
+```
+
+The same `run()`, `run_sync()`, `run_stream()`, `tools`, `output_type`, and memory
+interfaces apply to both model classes, subject to the model's capabilities. Azure
+has matching `azure-chat:` and `azure-responses:` prefixes; its deployment and endpoint
+configuration must support the selected API. Passing an `OpenAIChatModel` or
+`OpenAIResponsesModel` object also selects the API explicitly and preserves your
+provider client. See [Models](models.md#openai-choose-the-api-explicitly) for factory
+configuration and GPT-6 tool/reasoning constraints, and the runnable
+[Responses example](https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/examples/agentic/openai_responses.py).
+
+### Native capabilities
+
+For advanced SDK integrations, pass Pydantic AI 2.x capabilities through `capabilities=`. For example, the
+Responses API can use provider-hosted web search:
+
+```python
+from pydantic_ai.capabilities import WebSearch
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import ModelOptions
+
+agent = Agent(
+    name="researcher",
+    model="openai-responses:gpt-6-luna",
+    capabilities=[WebSearch()],
+    model_options=ModelOptions(reasoning="low"),
+)
+```
+
+Capabilities are combined with PyFly Agentic's configured instrumentation and approval
+handling. Provider-hosted tools depend on the chosen model/API; regular Python
+functions and framework tools continue to go in `tools=`. See
+[Pydantic AI's native tools](https://pydantic.dev/docs/ai/native-tools/).
+
+PyFly Agentic keeps `end_strategy="early"` as its default: once a final output is
+available, additional function tools are not executed. Use `end_strategy="graceful"`
+or `"exhaustive"` only when your application deliberately needs the corresponding
+Pydantic AI tool-completion behavior. Review side effects before changing it.
+
+### Responses conversation state
+
+By default, you can manage history through `message_history=result.all_messages()`
+or a PyFly Agentic `MemoryManager`, just as with Chat Completions. For optional server-side
+chaining, enable storage and pass history containing the previous response:
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import ModelOptions
+
+agent = Agent(
+    name="stored-conversation",
+    model="openai-responses:gpt-6-luna",
+    model_options=ModelOptions(reasoning="low", store_responses=True),
+    model_settings={"openai_previous_response_id": "auto"},
+)
+first = await agent.run("Remember the project name: Lantern.")
+second = await agent.run("What is the project name?", message_history=first.all_messages())
+```
+
+Pydantic AI selects the latest response ID from the history and sends subsequent
+messages. This requires stored responses; if `openai_store=False` or your account
+disables storage, leave `openai_previous_response_id` unset and send the full history.
+See [Pydantic AI's conversation-state guidance](https://pydantic.dev/docs/ai/models/openai/#referencing-earlier-responses).
+
+### Model settings & default temperature
+
+Prefer `model_options=` for typed framework settings. `model_settings=` accepts a
+native Pydantic AI `ModelSettings` dictionary as an advanced escape hatch and
+remains backward compatible. The framework merges a
+**default temperature** from config when you don't supply one:
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import ModelOptions
+
+agent = Agent(name="precise", model="openai:gpt-4o", model_options=ModelOptions(temperature=0.2))
+```
+
+`config.default_temperature` (env `PYFLY_AGENTIC_DEFAULT_TEMPERATURE`) defaults
+to `None`, meaning **no temperature is forced** — each provider uses its own
+default. This matters because some models (e.g. OpenAI `o1`/`o3` reasoning
+models) reject an explicit temperature. When you *do* set
+`default_temperature`, it is filled into an agent's settings only when the caller
+omits `temperature` (a caller-supplied value always wins).
+
+---
+
+## Tool Auto-Conversion
+
+`Agent` automatically converts framework tool types when passed in the `tools`
+parameter:
+
+- **`AgentTool`** instances are wrapped into `pydantic_ai.Tool` objects.
+- **`ToolKit`** instances are expanded into their individual `pydantic_ai.Tool` objects.
+- **Plain async functions** and **`pydantic_ai.Tool`** objects pass through unchanged.
+
+This means you can mix and match all tool types freely:
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.tools.builtins import DateTimeTool, CalculatorTool
+
+async def custom_lookup(query: str) -> str:
+    glossary = {"retry": "Repeat a failed operation within a bounded attempt limit."}
+    return glossary.get(query.strip().lower(), "No glossary entry for that term.")
+
+agent = Agent(
+    name="smart-assistant",
+    tools=[DateTimeTool(), CalculatorTool(), custom_lookup],
+)
+```
+
+---
+
+## Human-in-the-Loop Tool Approval
+
+When a tool declares `requires_approval=True` (or an `ApprovalRequiredToolset` gates the
+toolset), `run()` / `run_sync()` **pause before the tool executes** and return a
+`DeferredToolRequests` as `result.output`. Detect this with `is_deferred(result)`, then
+resume by calling the agent again with the paused messages and the human's decision:
+
+```python
+from pyfly.agentic.agents import Agent, is_deferred
+from pyfly.agentic.tools import DeferredToolResults
+
+result = await agent.run("Delete record 42.")
+if is_deferred(result):
+    approvals = {c.tool_call_id: True for c in result.output.approvals}  # True / ToolApproved / ToolDenied
+    result = await agent.run(
+        message_history=result.all_messages(),
+        deferred_tool_results=DeferredToolResults(approvals=approvals),
+    )
+```
+
+`Agent` auto-detects HITL from approval-requiring tools/toolsets (widening its output
+union only then); force it with `hitl=True`, or resolve approvals inline without pausing via
+`approval_handler=`. Post-run middleware (output guard, validation, cache) and memory all skip
+a paused result — it is a control object, not a final answer. See
+[Human-in-the-Loop Tool Approval](tools.md#human-in-the-loop-tool-approval) for the full guide.
+
+---
+
+## Agent Registry
+
+The `AgentRegistry` is owned by the active runtime that maps agent names to `Agent` instances.
+Any part of your application -- delegation routers, reasoning pipelines, or your own
+host service -- can look up an agent by name.
+
+```python
+from pyfly.agentic.agents.registry import agent_registry
+
+agent = agent_registry.get("writer")
+result = await agent.run("Write a haiku about Python.")
+```
+
+---
+
+## Lifecycle Management
+
+`AgentLifecycle` lets you attach init, warmup, and shutdown hooks to agents. This is
+useful for initialising resources (database connections, caches) before the first
+invocation and cleaning up afterwards.
+
+```python
+from pyfly.agentic.agents.lifecycle import AgentLifecycle
+
+lifecycle = AgentLifecycle()
+lifecycle.on_init(lambda: print("Initialising"))
+lifecycle.on_warmup(lambda: print("Warming up"))
+lifecycle.on_shutdown(lambda: print("Shutting down"))
+await lifecycle.run_init()
+await lifecycle.run_warmup()
+```
+
+---
+
+## Multi-Agent Delegation
+
+When a task requires multiple specialised agents, the delegation system routes work
+to the right agent based on a configurable strategy. Strategies return a
+`RoutingDecision`: a ranked tuple of `Candidate` objects (each with an
+agent, a score in `[0.0, 1.0]`, and a short reason) plus free-form metadata.
+`DelegationRouter.decide()` is pure (runs the strategy and emits the
+`pyfly.agentic.routing.decision` OTel event); `execute()` runs the chosen agent
+and forks memory if attached; `route()` is the one-call convenience.
+
+```mermaid
+flowchart TD
+    PROMPT["Prompt and agent pool"] --> DECIDE["DelegationRouter.decide"]
+    DECIDE --> STRATEGY["Configured strategy or combinator"]
+    STRATEGY --> DECISION["RoutingDecision<br/>ranked Candidate entries"]
+    DECISION --> HOST["Caller inspects decision"]
+    HOST --> EXECUTE["DelegationRouter.execute"]
+    EXECUTE --> MEMORY["Fork memory if configured"]
+    MEMORY --> AGENT["Selected Agent.run"]
+```
+
+### Round Robin
+
+Distributes requests evenly across a pool of agents:
+
+```python
+from pyfly.agentic.agents.delegation import RoundRobinStrategy, DelegationRouter
+
+strategy = RoundRobinStrategy()
+router = DelegationRouter([agent_a, agent_b, agent_c], strategy)
+result = await router.route("Summarise this document.")
+```
+
+### Capability-Based
+
+Returns every agent whose tags include the required capability, each
+scored `1.0`. No-match yields an empty decision (so it composes with
+`FallbackStrategy`):
+
+```python
+from pyfly.agentic.agents.delegation import CapabilityStrategy, DelegationRouter
+
+strategy = CapabilityStrategy(required_tag="translation")
+router = DelegationRouter([agent_a, agent_b], strategy)
+result = await router.route("Translate this text to French.")
+```
+
+### Content-Based (LLM Routing)
+
+Uses a lightweight LLM call to analyse the prompt and pick the best-suited
+agent from the pool. Ideal when agents have overlapping capabilities and
+simple tag matching is insufficient. On LLM failure it returns an empty
+decision (so `FallbackStrategy` can take over) — it does not silently
+return the first agent.
+
+```python
+from pyfly.agentic.agents.delegation import ContentBasedStrategy, DelegationRouter
+
+from pyfly.agentic import get_config
+
+strategy = ContentBasedStrategy(model=get_config().default_model)
+router = DelegationRouter([agent_a, agent_b, agent_c], strategy)
+result = await router.route("Translate this legal document to French.")
+```
+
+### Cost-Aware
+
+Ranks agents by per-call cost via the project's cost resolver chain
+(`resolve_cost` / `genai-prices`). Scores are pool-relative linear
+normalisations: `score = 1.0 - (cost - min) / (max - min)`. Ties (or a
+single agent) score `1.0`. Unknown models are handled per `on_unknown`
+(`"skip"`, `"lowest"`, or `"raise"`).
+
+```python
+from pyfly.agentic.agents.delegation import CostAwareStrategy, DelegationRouter
+
+strategy = CostAwareStrategy()  # uses DEFAULT_RESOLVERS.
+router = DelegationRouter([expensive_agent, cheap_agent], strategy)
+result = await router.route("Simple classification task.")
+```
+
+### Composing Strategies
+
+Three combinators nest strategies without subclassing:
+
+- `ChainStrategy(stage1, stage2, ...)` — sequential narrowing; each
+  stage receives the surviving candidates from the previous one.
+- `FallbackStrategy(s1, s2, ...)` — first non-empty decision wins;
+  also recovers from `DelegationError`.
+- `WeightedStrategy((s, w), ..., min_score=0.0)` —
+  parallel score blend; weights normalised internally; agents missing
+  from a strategy's candidates contribute `0`.
+
+```python
+from pyfly.agentic.agents.delegation import (
+    CapabilityStrategy, CostAwareStrategy, ChainStrategy, FallbackStrategy,
+    ContentBasedStrategy, RoundRobinStrategy,
+)
+
+# Keep only vision-capable agents, then rank survivors by cost.
+chain = ChainStrategy(CapabilityStrategy("vision"), CostAwareStrategy())
+
+# Try LLM routing first; fall back to round-robin on empty/error.
+fallback = FallbackStrategy(ContentBasedStrategy(), RoundRobinStrategy())
+```
+
+### Decide / Execute Split
+
+`route()` is shorthand for `decide()` + `execute()`. Splitting them
+lets callers inspect, cache, dry-run, or replay decisions:
+
+```python
+decision = await router.decide("Translate to French.")
+for c in decision.candidates:
+    print(c.agent.name, c.score, c.reason)
+result = await router.execute(decision, "Translate to French.")
+```
+
+---
+
+## Memory
+
+Conversation history is held in process. The configured memory backend stores
+working facts; use [conversation export/import](memory.md#conversation-export-import)
+when chat history must survive a restart.
+
+Attach a `MemoryManager` to an agent to enable multi-turn conversation history and a working-memory scratchpad. When you pass `conversation_id` to `run()`/`run_sync()`/`run_stream()`, the agent automatically loads and persists `message_history`.
+
+Streaming turns are persisted after successful completion in both buffered and
+incremental modes. The stored messages retain provider metadata, tool results, and
+Responses reasoning state for follow-up turns and conversation export/import.
+An interrupted stream does not save an incomplete turn.
+
+```python
+from pyfly.agentic.memory import MemoryManager
+
+memory = MemoryManager(max_conversation_tokens=32_000)
+agent = Agent(name="assistant", memory=memory)
+
+cid = memory.new_conversation()
+result = await agent.run("Hello!", conversation_id=cid)
+result = await agent.run("What did I say?", conversation_id=cid)
+```
+
+## Reasoning Patterns
+
+Use `run_with_reasoning()` to execute a reasoning pattern through the agent.
+When memory is attached, it is automatically forwarded to the pattern and the
+final output is persisted as a conversation turn.
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.memory import MemoryManager
+from pyfly.agentic.reasoning import ReActPattern
+
+memory = MemoryManager()
+agent = Agent(name="thinker", memory=memory)
+cid = memory.new_conversation()
+
+result = await agent.run_with_reasoning(
+    ReActPattern(max_steps=5),
+    "What is the population of Tokyo?",
+    conversation_id=cid,
+)
+print(result.output)
+```
+
+See the [Reasoning Patterns Guide](reasoning.md) for all available patterns,
+structured output models, and prompt customisation.
+
+---
+
+## Template Agents
+
+The framework ships with five pre-built template agents as factory functions:
+
+- **`create_summarizer_agent`** -- Configurable text summarisation.
+- **`create_classifier_agent`** -- Categorise text into user-defined labels.
+- **`create_extractor_agent`** -- Extract structured data into a Pydantic model.
+- **`create_conversational_agent`** -- Multi-turn assistant with memory support.
+- **`create_router_agent`** -- Intent-based routing to child agents.
+
+See the [Template Agents Guide](templates.md) for full documentation and examples.
+
+```python
+from pyfly.agentic.agents.templates import create_summarizer_agent
+
+agent = create_summarizer_agent(max_length="short")
+result = await agent.run("Summarize this document: ...")
+```
+
+---
+
+## Logging & Debugging
+
+Every `Agent` automatically includes a `LoggingMiddleware` instance that
+emits structured log lines at the start and end of every `run()`, `run_sync()`,
+`run_stream()`, and `run_with_reasoning()` call — no configuration needed beyond
+enabling the framework logger.
+
+### Enabling Logging
+
+```python
+from pyfly.agentic import configure_logging
+
+configure_logging("INFO") # agent calls, reasoning progress, timing
+configure_logging("DEBUG") # + memory injection, turn persistence, LLM timing
+```
+
+Or use the shortcut:
+
+```python
+from pyfly.agentic import enable_debug
+
+enable_debug()
+```
+
+### Format Styles
+
+`configure_logging` supports three output formats via the `format_style` parameter:
+
+- **`"text"`** (default) — standard `logging.Formatter` output.
+- **`"json"`** — single-line JSON objects via `JsonFormatter` (for log aggregation).
+- **`"colored"`** — ANSI-coloured terminal output via `ColoredFormatter`. Falls
+  back to plain text automatically when the stream is not a TTY.
+
+```python
+# Coloured terminal output
+configure_logging("INFO", format_style="colored")
+
+# Structured JSON for production log pipelines
+configure_logging("INFO", format_style="json")
+```
+
+The `ColoredFormatter` applies the following colour scheme:
+
+- **Level names** — DEBUG dim, INFO green, WARNING yellow, ERROR red.
+- **Symbols** — `▸` (entry) cyan, `✓` (success) green, `✗` (failure) red.
+- **Agent name** (first word after a symbol) — bold cyan.
+- **Timing values** (e.g. `123.4ms`) — yellow.
+- **Token/cost brackets** (e.g. `[tokens=150, cost=$0.0023]`) — dim.
+
+### What Gets Logged
+
+At **INFO** level (from `LoggingMiddleware`):
+
+- **Entry**: `▸ agent-name.run(prompt=Hello, how...)` with a prompt preview.
+- **Completion**: `✓ agent-name.run completed in 1234.5ms [tokens=150, cost=$0.0023]`.
+- For `run_with_reasoning`, the completion line includes pattern and step count:
+  `✓ agent-name.run_with_reasoning completed in 5000ms (pattern=ReAct, steps=3)`.
+
+At **DEBUG** level:
+
+- Memory injection and turn persistence with conversation ID.
+- Usage tracking failures (when cost tracking is active).
+
+The logging uses the `pyfly.agentic` logger hierarchy, so it does
+not affect application-level or third-party loggers.
+
+---
+
+## Usage Tracking
+
+When cost tracking is enabled (the default), `Agent.run()` and `run_sync()`
+automatically extract token usage from Pydantic AI results, price it through the
+cost resolver chain (`resolve_cost` / `genai_prices_cost` / `provider_reported_cost`),
+and feed a `UsageRecord` to the active runtime’s `default_usage_tracker`. This happens
+transparently — no code changes are needed.
+
+```python
+from pyfly.agentic.observability import default_usage_tracker
+
+# After running agents, inspect usage
+summary = default_usage_tracker.get_summary()
+print(f"Total tokens: {summary.total_tokens}, Cost: ${summary.total_cost_usd:.4f}")
+
+# Filter by agent name
+agent_summary = default_usage_tracker.get_summary_for_agent("my-agent")
+```
+
+Configure via environment variables:
+
+```bash
+PYFLY_AGENTIC_COST_TRACKING_ENABLED=true # default
+PYFLY_AGENTIC_BUDGET_LIMIT_USD=10.00
+PYFLY_AGENTIC_COST_STRICT=false # when true, raise on unpriceable models instead of returning None
+```
+
+See the [Observability Guide](observability.md#usage-tracking) for full details.
+
+---
+
+## Middleware
+
+With `default_middleware=True`, the framework prepends logging and, when enabled,
+observability middleware unless the caller already supplied those types. User
+middleware follows in the given order. Guards, validation, cache, explainability,
+and retry-configuration middleware are opt-in.
+
+`Agent` supports a pluggable middleware system for cross-cutting concerns
+(validation, guardrails, cost tracking, retries) without modifying the agent
+itself. Middleware hooks run **before**, **after**, and — when a run raises —
+**on error**, across every execution path: `run()`, `run_sync()`, `run_stream()`,
+and `run_with_reasoning()`.
+
+```mermaid
+flowchart TD
+    PROMPT["Prompt"] --> LOG["LoggingMiddleware before_run"]
+    LOG --> OBS["ObservabilityMiddleware before_run<br/>when enabled"]
+    OBS --> USER["User middleware before_run<br/>registration order"]
+    USER --> RUN["Model execution"]
+    RUN -->|success| AFTER["after_run in reverse order"]
+    RUN -->|exception| ERROR["on_error in reverse order"]
+    AFTER --> RESULT["Return result"]
+    ERROR --> RAISE["Re-raise original exception"]
+```
+
+### Defining Middleware
+
+Implement the `AgentMiddleware` protocol — all three hooks (`before_run`,
+`after_run`, `on_error`) are optional:
+
+```python
+from pyfly.agentic.agents.middleware import AgentMiddleware, MiddlewareContext
+import time
+
+class AuditMiddleware:
+    async def before_run(self, context: MiddlewareContext) -> None:
+        context.metadata["audit_start"] = time.monotonic()
+
+    async def after_run(self, context: MiddlewareContext, result):
+        elapsed = time.monotonic() - context.metadata["audit_start"]
+        print(f"Agent {context.agent_name} took {elapsed*1000:.1f}ms")
+        return result
+
+    async def on_error(self, context: MiddlewareContext, exc: BaseException) -> None:
+        # Fires when the run raises. Release whatever before_run acquired
+        # (end a span, record a failure). Do NOT suppress the error — the
+        # framework always re-raises the original exception afterwards.
+        print(f"Agent {context.agent_name} failed: {exc}")
+```
+
+### Attaching Middleware
+
+Pass middleware at construction time, via the `@agent` decorator, or
+add to the chain dynamically:
+
+```python
+from pyfly.agentic.agents import Agent, agent
+
+# At construction
+agent = Agent(
+    name="audited",
+    middleware=[AuditMiddleware()],
+)
+
+# Via decorator
+@agent("qa-bot", middleware=[AuditMiddleware()])
+def qa_instructions(ctx):
+    return "Answer questions accurately."
+
+# Dynamically
+agent.middleware.add(AuditMiddleware())
+```
+
+`MiddlewareContext` carries the `agent_name`, `prompt`, `deps`, `kwargs`, the
+`method` being run (`"run"` / `"run_sync"` / `"run_stream"`), the resolved
+`model` identifier, an optional `context` (correlation/scope), and an arbitrary
+`metadata` dict for sharing state across the hooks. `before_run` hooks execute in
+order; `after_run` and `on_error` hooks execute in **reverse** order (LIFO), so
+cleanup unwinds symmetrically with setup.
+
+### Error Lifecycle
+
+When the wrapped execution raises an `Exception`, the chain's error hooks fire (each middleware's `on_error`,
+in reverse order) and then the original exception is **re-raised** — `on_error`
+is for cleanup, not for swallowing errors. A middleware that itself raises inside
+`on_error` is suppressed so cleanup can never mask the real failure. This lets a
+middleware release what `before_run` acquired: `ObservabilityMiddleware` ends the
+span it opened (recording the exception and marking the span status `ERROR`, so
+failed runs don't leak spans), and `CircuitBreakerMiddleware` records the failure
+(see below). The error lifecycle fires on `run()`, `run_sync()`, `run_stream()`
+(including a stream that raises mid-iteration), and `run_with_reasoning()`.
+
+This does not guarantee cleanup when a `before_run` or `after_run` hook itself
+fails, or when execution is cancelled. Custom middleware that acquires resources
+must account for those paths.
+
+### Built-in Middleware: RetryMiddleware
+
+`RetryMiddleware` injects rate limit retry configuration into the middleware
+context. It is **not** auto-wired — add it explicitly when you want to override
+the defaults read from configuration. (Rate-limit retry is applied inside
+`Agent.run()` regardless of whether this middleware is present; see below.)
+
+```python
+from pyfly.agentic.agents.builtin_middleware import RetryMiddleware
+
+# Custom retry settings
+agent = Agent(
+    name="high-retry",
+    middleware=[RetryMiddleware(max_retries=5, base_delay=2.0, max_delay=120.0)],
+)
+```
+
+The retry is applied inside `Agent.run()` — see
+[Automatic Rate Limit Retry](observability.md#automatic-rate-limit-retry) for
+full details on how 429 errors are handled.
+
+### Auto-Wired Default Middleware
+
+By default, every `Agent` prepends `LoggingMiddleware` to the middleware
+chain (always), plus `ObservabilityMiddleware` when `config.observability_enabled`
+is `True`. This provides structured logging and — when observability is on —
+OpenTelemetry spans, metrics, and events for every execution path without any
+explicit configuration. (Transparent rate-limit retry is handled directly inside
+`Agent.run()` and does not require a middleware.)
+
+Disable auto-wiring by passing `default_middleware=False`:
+
+```python
+agent = Agent(
+    name="silent-agent",
+    default_middleware=False,
+)
+```
+
+If you provide your own `LoggingMiddleware` instance in the `middleware` list,
+the framework will not add a second one (no duplication):
+
+```python
+from pyfly.agentic.agents import Agent, LoggingMiddleware
+import logging
+
+# Custom logging level — only one LoggingMiddleware ends up in the chain
+agent = Agent(
+    name="verbose-agent",
+    middleware=[LoggingMiddleware(level=logging.DEBUG, preview_length=120)],
+)
+```
+
+### Built-in Middleware
+
+The framework ships **eleven** built-in middleware classes: nine in
+`agents.builtin_middleware` (`LoggingMiddleware`, `PromptGuardMiddleware`,
+`CostGuardMiddleware`, `ObservabilityMiddleware`, `ExplainabilityMiddleware`,
+`CacheMiddleware`, `OutputGuardMiddleware`, `ValidationMiddleware`,
+`RetryMiddleware`), plus `PromptCacheMiddleware` in `agents.prompt_cache` and
+`CircuitBreakerMiddleware` in `resilience.circuit_breaker`:
+
+#### LoggingMiddleware
+
+Structured logging for every agent run. Auto-wired by default (see above).
+Emits an entry log line in `before_run` and a completion log line in `after_run`
+with elapsed time, token count, and estimated cost.
+
+Parameters:
+
+- **`level`** — Logging level for entry/completion lines (default: `INFO`).
+- **`preview_length`** — Maximum characters of prompt to include (default: 80).
+- **`include_usage`** — Whether to extract token/cost data from the result (default: `True`).
+
+```python
+from pyfly.agentic.agents import Agent, LoggingMiddleware
+import logging
+
+agent = Agent(
+    name="debug-agent",
+    middleware=[LoggingMiddleware(level=logging.DEBUG)],
+)
+```
+
+#### PromptGuardMiddleware
+
+Scans prompts for injection patterns before the agent runs. By default, unsafe
+prompts raise a `PromptGuardError`. Set `sanitise=True` to redact suspicious
+fragments instead of rejecting.
+
+```python
+from pyfly.agentic.agents import Agent, PromptGuardMiddleware
+
+agent = Agent(
+    name="safe-agent",
+    middleware=[PromptGuardMiddleware()], # reject mode
+)
+
+# Or sanitise mode — replaces matched patterns with [REDACTED]
+agent = Agent(
+    name="sanitised-agent",
+    middleware=[PromptGuardMiddleware(sanitise=True)],
+)
+```
+
+You can also supply a custom `PromptGuard` instance with extra patterns:
+
+```python
+from pyfly.agentic.security import PromptGuard
+
+guard = PromptGuard(custom_patterns=[r"(?i)drop\s+table"], sanitise=True)
+agent = Agent(
+    name="custom-guard",
+    middleware=[PromptGuardMiddleware(guard=guard, sanitise=True)],
+)
+```
+
+#### OutputGuardMiddleware
+
+Scans LLM output for PII, secrets, harmful content, and custom patterns
+**after** the agent runs. By default, unsafe outputs raise an
+`OutputGuardError`. Set `sanitise=True` to redact matches instead.
+
+```python
+from pyfly.agentic.agents.builtin_middleware import OutputGuardMiddleware
+
+agent = Agent(
+    name="safe-output",
+    middleware=[OutputGuardMiddleware()], # reject mode
+)
+
+# Or sanitise mode — replaces matched content with [REDACTED]
+agent = Agent(
+    name="redacted-output",
+    middleware=[OutputGuardMiddleware(sanitise=True)],
+)
+```
+
+Optionally restrict blocking to specific categories:
+
+```python
+OutputGuardMiddleware(block_categories=["secrets", "pii"]) # ignore "harmful"
+```
+
+See the [Security Guide](security.md#outputguard) for full pattern details.
+
+#### CostGuardMiddleware
+
+Enforces a cumulative cost budget. Before each run, it checks the runtime’s
+`UsageTracker` and raises `BudgetExceededError` if spending has reached the
+limit.
+
+Parameters:
+
+- **`budget_usd`** — Maximum cumulative spend in USD.
+- **`warn_only`** — When `True`, log a warning instead of raising on budget
+  overrun. Useful for soft enforcement / monitoring.
+- **`per_call_limit_usd`** — Optional per-call spending cap. After each run,
+  the middleware checks whether a single call exceeded this limit.
+
+```python
+from pyfly.agentic.agents import Agent, CostGuardMiddleware
+
+agent = Agent(
+    name="budget-agent",
+    middleware=[CostGuardMiddleware(budget_usd=5.0)],
+)
+
+# Soft enforcement with per-call limit
+agent = Agent(
+    name="monitored-agent",
+    middleware=[
+        CostGuardMiddleware(
+            budget_usd=10.0,
+            warn_only=True,
+            per_call_limit_usd=1.0,
+        ),
+    ],
+)
+```
+
+#### ObservabilityMiddleware
+
+Emits OpenTelemetry spans, metrics, and structured events for every agent run.
+Auto-wired by default when `config.observability_enabled` is `True`. On a **failed**
+run its `on_error` hook closes the span it opened, records the exception on it, and
+marks the span status `ERROR` — so a run that raises does not leak an unclosed span.
+
+#### ExplainabilityMiddleware
+
+Records decision traces via `TraceRecorder` for audit and explainability.
+Not auto-wired — enable it explicitly.
+
+```python
+from pyfly.agentic.agents.builtin_middleware import ExplainabilityMiddleware
+
+agent = Agent(
+    name="audited-agent",
+    middleware=[ExplainabilityMiddleware()],
+)
+```
+
+#### CacheMiddleware
+
+Caches agent results via a `ResultCache`. On `before_run`, checks the cache;
+on `after_run`, stores the result on miss.
+
+```python
+from pyfly.agentic.agents.cache import ResultCache
+from pyfly.agentic.agents.builtin_middleware import CacheMiddleware
+
+cache = ResultCache(ttl_seconds=300)
+agent = Agent(
+    name="cached-agent",
+    middleware=[CacheMiddleware(cache=cache)],
+)
+```
+
+#### ValidationMiddleware
+
+Validates agent output using an `OutputReviewer`. After the agent runs, the
+output is parsed and validated without re-running the agent.
+
+```python
+from pyfly.agentic.validation import OutputReviewer
+from pyfly.agentic.agents.builtin_middleware import ValidationMiddleware
+
+reviewer = OutputReviewer(output_type=MyModel, max_retries=0)
+agent = Agent(
+    name="validated-agent",
+    middleware=[ValidationMiddleware(reviewer=reviewer)],
+)
+```
+
+#### PromptCacheMiddleware
+
+Enables provider-specific prompt caching for significant cost savings (90-95%
+reduction on cached tokens). Supports Anthropic, OpenAI, and Gemini prompt
+caching features.
+
+Parameters (all keyword-only):
+
+- **`cache_system_prompt`** — Cache the system prompt block (default: `True`).
+- **`cache_last_message`** — Cache the last user message block; only takes effect
+  on multi-turn runs that pass a non-empty `message_history` (default: `True`).
+- **`cache_tool_definitions`** — Cache the tool-definitions block; valuable only
+  when the agent has many tools (default: `False`).
+- **`cache_ttl_seconds`** — Cache TTL in seconds (default: 300).
+- **`enabled`** — Enable/disable caching (default: `True`).
+- **`openai_cache_key`** — Static string or callable to derive the OpenAI cache key.
+- **`google_cached_content`** — Static string or callable to supply the Gemini
+  `cachedContent` resource name.
+
+```python
+from pyfly.agentic.agents.prompt_cache import PromptCacheMiddleware
+
+agent = Agent(
+    name="cached-agent",
+    model="anthropic:claude-opus-4",
+    instructions="Long system prompt here..." * 10, # Long prompt benefits from caching
+    middleware=[PromptCacheMiddleware(cache_system_prompt=True)],
+)
+```
+
+The middleware configures caching based on the **model family** (resolved via
+`detect_model_family()`), not the provider string:
+
+- **Anthropic** (the direct `AnthropicModel`): writes explicit `cache_control`
+  breakpoints into the request. **Claude via Bedrock or OpenRouter is skipped
+  with a warning** — those backends drive caching differently (Bedrock
+  `CachePoint` blocks), so the Anthropic settings would be a silent no-op; that
+  path is not yet wired.
+- **OpenAI** (including `azure:gpt-*`): OpenAI prompt caching is **automatic**
+  server-side, so the middleware only supplies a routing key
+  (`openai_cache_key`) to steer requests to the same cache — it does not inject
+  cache markers.
+- **Google**: supplies the Gemini `cachedContent` resource name for Gemini models.
+
+To monitor cache effectiveness, use the standalone `CacheStatistics` helper.
+Feed it the cache-creation / cache-read token counts from each result via
+`record_usage()`, then read the aggregates back (both are **methods**, called
+with parentheses):
+
+```python
+from pyfly.agentic.agents.prompt_cache import CacheStatistics
+
+stats = CacheStatistics()
+
+# After each request, record the cache tokens reported by the result
+stats.record_usage(cache_creation_tokens=2048, cache_read_tokens=0)
+stats.record_usage(cache_creation_tokens=0, cache_read_tokens=2048)
+
+print(f"Cache hit rate: {stats.cache_hit_rate():.1%}")
+print(f"Estimated savings: ${stats.estimated_savings_usd():.2f}")
+```
+
+#### CircuitBreakerMiddleware
+
+Implements the circuit breaker pattern to prevent cascading failures by
+monitoring agent execution health and fast-failing when issues are detected.
+It records each **failure through its `on_error` hook** (so the failure count
+only advances because the [error lifecycle](#error-lifecycle) fires) and each
+success in `after_run`; the circuit opens once `failure_threshold` failures
+accumulate. See the [Resilience guide](resilience.md) for the full state machine
+and direct (non-middleware) usage.
+
+Parameters:
+
+- **`failure_threshold`** — Number of failures before opening circuit (default: 5).
+- **`recovery_timeout`** — Seconds to wait before testing recovery (default: 60).
+- **`success_threshold`** — Consecutive successes needed to close circuit (default: 2).
+- **`enabled`** — Enable/disable circuit breaker (default: `True`).
+
+```python
+from pyfly.agentic.resilience.circuit_breaker import CircuitBreakerMiddleware
+
+agent = Agent(
+    name="resilient-agent",
+    middleware=[CircuitBreakerMiddleware(failure_threshold=3, recovery_timeout=30.0)],
+)
+```
+
+Circuit states:
+- **CLOSED**: Normal operation (healthy)
+- **OPEN**: Too many failures, rejecting requests
+- **HALF_OPEN**: Testing recovery with limited requests
+
+When the circuit is open, requests fail immediately with `CircuitBreakerOpenError`
+instead of waiting for timeouts. This protects downstream services and allows
+the failing service time to recover.
+
+```python
+from pyfly.agentic.resilience.circuit_breaker import CircuitBreakerOpenError
+
+try:
+    result = await agent.run("Question")
+except CircuitBreakerOpenError:
+    # Circuit is open, use fallback
+    result = get_cached_response()
+```
+
+#### Defence-in-Depth Example
+
+Combine multiple middleware for production:
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.agents.builtin_middleware import (
+    LoggingMiddleware,
+    PromptGuardMiddleware,
+    OutputGuardMiddleware,
+    CostGuardMiddleware,
+    ObservabilityMiddleware,
+)
+from pyfly.agentic.agents.prompt_cache import PromptCacheMiddleware
+from pyfly.agentic.resilience.circuit_breaker import CircuitBreakerMiddleware
+
+agent = Agent(
+    name="production-agent",
+    model="anthropic:claude-opus-4",
+    instructions="Long system prompt for production agent..." * 5,
+    middleware=[
+        LoggingMiddleware(), # Structured logging
+        ObservabilityMiddleware(), # Distributed tracing
+        PromptGuardMiddleware(sanitise=True), # Input validation
+        OutputGuardMiddleware(sanitise=True), # Output sanitization
+        CostGuardMiddleware(budget_usd=100.0), # Budget enforcement
+        PromptCacheMiddleware(cache_system_prompt=True), # 90%+ cost savings
+        CircuitBreakerMiddleware(failure_threshold=5), # Resilience
+    ],
+)
+```
+
+---
+
+## Streaming Modes
+
+`Agent` supports two streaming modes for real-time response delivery:
+**buffered** (default) and **incremental** (token-by-token).
+
+### Buffered Streaming (Default)
+
+Streams complete message chunks as they're generated. Best for most use cases
+with balanced latency and reliability.
+
+```python
+async with await agent.run_stream("Explain async/await") as stream:
+    async for chunk in stream.stream_text():
+        print(chunk, end="", flush=True)
+```
+
+### Incremental Streaming
+
+Streams individual tokens as they're generated for lowest possible latency.
+Useful for real-time applications where immediate feedback is critical.
+
+```python
+async with await agent.run_stream(
+    "Explain async/await",
+    streaming_mode="incremental"
+) as stream:
+    async for token in stream.stream_tokens():
+        print(token, end="", flush=True)
+```
+
+Parameters:
+
+- **`streaming_mode`** — Either `"buffered"` (default) or `"incremental"`.
+- **`debounce_ms`** — For incremental mode, minimum milliseconds between tokens (default: 0).
+
+The incremental mode provides access to `stream_tokens()` which yields individual
+tokens, while buffered mode provides `stream_text()` for complete chunks.
+
+### Streaming with Middleware
+
+All middleware work seamlessly with both streaming modes:
+
+```python
+from pyfly.agentic.agents.prompt_cache import PromptCacheMiddleware
+from pyfly.agentic.resilience.circuit_breaker import CircuitBreakerMiddleware
+
+agent = Agent(
+    name="streaming-agent",
+    middleware=[
+        PromptCacheMiddleware(),
+        CircuitBreakerMiddleware(failure_threshold=3),
+    ],
+)
+
+# Middleware applies to both modes
+async with await agent.run_stream("Question", streaming_mode="incremental") as stream:
+    async for token in stream.stream_tokens(debounce_ms=50):
+        print(token, end="", flush=True)
+```
+
+---
+
+## Run Timeout
+
+`Agent.run()` and `run_sync()` accept an optional `timeout` parameter
+(in seconds) that wraps the underlying LLM call in `asyncio.wait_for`. If the
+call exceeds the timeout, an `asyncio.TimeoutError` is raised.
+
+```python
+# Timeout after 30 seconds
+result = await agent.run("Summarise this document.", timeout=30.0)
+```
+
+This is useful for enforcing SLAs and preventing runaway LLM calls in
+production pipelines.
+
+---
+
+## Model Fallback
+
+The `FallbackModelWrapper` provides automatic retry with backup models when
+the primary model is unavailable or returns an error. The fallback chain
+accepts both `"provider:model"` strings **and** pre-configured `Model` objects,
+so you can mix providers freely (e.g. fall from Azure to direct OpenAI to a
+local Ollama instance).
+
+This example evaluates two explicitly selected Responses models. Both support
+reasoning with tools; configure credentials for every provider in a fallback chain.
+
+```mermaid
+flowchart LR
+    TRY1["openai-responses:gpt-6-sol"] -->|fails| TRY2["openai-responses:gpt-6-luna"]
+    TRY2 -->|fails| ERR([Raise last error])
+```
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.agents.fallback import FallbackModelWrapper, run_with_fallback
+from pyfly.agentic.models import ModelOptions
+
+fallback = FallbackModelWrapper(
+    models=["openai-responses:gpt-6-sol", "openai-responses:gpt-6-luna"],
+)
+agent = Agent(
+    name="resilient", model=fallback.primary,
+    model_options=ModelOptions(reasoning="low", max_tokens=4096),
+)
+result = await run_with_fallback(agent, "Explain bounded retries.", fallback)
+```
+
+`run_with_fallback()` tries the current model, advances through the fallback
+chain on failure, and resets to the primary after completion. The
+`max_fallback_attempts` parameter limits how many models are tried; when left
+as `None` it defaults to the number of models in the chain.
+
+When falling back, the framework automatically updates the agent's public
+`model_identifier` attribute so that cost tracking and rate-limit backoff keys
+remain accurate for whichever model is currently active.
+
+### Cross-Provider Fallback
+
+You can mix `Model` objects and strings for cross-provider failover:
+
+```python
+import os
+
+from pyfly.agentic.agents.fallback import FallbackModelWrapper
+from pyfly.agentic.models import Credential, ModelFactory, ModelSpec
+
+azure_model = await ModelFactory().build(ModelSpec(
+    provider="azure-responses",
+    model=os.environ["AZURE_OPENAI_DEPLOYMENT"],
+    base_url=os.environ["AZURE_OPENAI_ENDPOINT"],
+    api_version=os.environ.get("OPENAI_API_VERSION"),
+    credential=Credential.api_key(os.environ["AZURE_OPENAI_API_KEY"]),
+))
+fallback = FallbackModelWrapper(
+    models=[azure_model, "openai-responses:gpt-6-luna", "anthropic:claude-sonnet-5"],
+)
+```
+
+Choose `ModelOptions` supported by every model in the chain. PyFly Agentic resolves the
+options against each active model; incompatible options fail before that request.
+
+---
+
+## Result Caching
+
+`ResultCache` provides an in-memory LRU cache keyed by a SHA-256 hash of
+the model name and prompt text. Useful for deduplicating identical requests
+in batch pipelines or high-traffic workloads.
+
+```python
+from pyfly.agentic.agents.cache import ResultCache
+
+cache = ResultCache(ttl_seconds=300, max_size=100)
+
+# Check cache before running
+cached = cache.get(agent.model_identifier, prompt)
+if cached is None:
+    result = await agent.run(prompt)
+    cache.put(agent.model_identifier, prompt, result)
+else:
+    result = cached
+
+# Inspect hit/miss stats
+print(cache.stats) # {"hits": 5, "misses": 2, "size": 2}
+```
+
+Parameters:
+
+- **ttl_seconds** -- Time-to-live for entries (0 = no expiry). Default: 300.
+- **max_size** -- Maximum entries before LRU eviction (0 = unlimited). Default: 256.
+
+The cache is thread-safe and suitable for use in async web servers.
+
+---
+
+## Agent Context
+
+`AgentContext` carries request-scoped data (correlation ID, experiment ID, trace IDs)
+through an agent's invocation chain. It is available to tools and reasoning patterns
+during execution.
+
+```python
+from pyfly.agentic.agents.context import AgentContext
+
+ctx = AgentContext(correlation_id="req-123", metadata={"user": "alice"})
+```
+
+---
+
+## Examples
+
+The `examples/` directory contains runnable scripts for agents and templates:
+
+- `basic_agent.py` — Agent basics
+- `conversational_memory.py` — Multi-turn conversation with memory
+- `summarizer.py` — Summarizer template
+- `classifier.py` — Classifier template with structured output
+- `extractor.py` — Extractor template with custom Pydantic model
+- `router.py` — Router template with routing decisions
+
+Run any example with:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+uv run python examples/basic_agent.py
+```
+
+See [examples/README.md](https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/examples/agentic/catalogue.md) for the full list.

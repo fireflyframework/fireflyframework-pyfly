@@ -69,3 +69,27 @@ gradient-y and clipped paths that WeasyPrint otherwise simplifies. Diagram
 labels and technical shapes remain selectable text and vectors. Public SVGs
 and EPUBs keep the outlined vector logo. Gradients whose stops are the same
 color use identical solid paint so WeasyPrint does not drop header backgrounds.
+
+## Native Agentic part (local source edition)
+
+The six `figures/19-agentic-runtime*.svg`, `20-agentic-knowledge*.svg` and
+`21-agentic-operations*.svg` files are newly authored editable vector diagrams.
+English and Spanish pairs share geometry and use localized labels. They depict
+application ownership, scoped evidence flow and operational boundaries. They do
+not reuse third-party artwork or generated raster illustrations. Each uses the
+same canonical outlined framework lockup and palette described above; its layout
+fingerprint is recorded in `diagram-branding.json`. These add six figures to the
+previous inventory, without replacing historical release artwork.
+
+### Native admin screenshot
+
+`art/screenshots/21-agentic-admin.png` is an unmodified browser capture of this
+checkout's actual local admin console running a deterministic offline TestModel.
+Both editions use the same English UI capture with localized captions and prose.
+The console embeds the canonical Python family assets from
+`fireflyframework/brand-kit` commit
+`b64a50e289b853cab54e5d59bc1b092b48c5eec4` (version 0.2.0); its own
+`src/pyfly/admin/static/assets/brand-origin.json` records the upstream generator,
+fonts, notices and asset hashes. No logo was reconstructed for the screenshot.
+Screenshot SHA-256: `a298f803f91c7810dfd126a20384232cdbbd4bc860c2dff31740ef55af302f3a`.
+The canonical generator's banner is byte-identical to `assets/banner.svg`.

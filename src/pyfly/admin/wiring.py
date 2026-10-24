@@ -46,6 +46,7 @@ def build_admin_routes(
     """
     from pyfly.admin.adapters.starlette import AdminRouteBuilder
     from pyfly.admin.config import AdminProperties, AdminServerProperties
+    from pyfly.admin.providers.agentic_provider import AgenticProvider
     from pyfly.admin.providers.beans_provider import BeansProvider
     from pyfly.admin.providers.cache_provider import CacheProvider
     from pyfly.admin.providers.config_provider import ConfigProvider
@@ -137,6 +138,7 @@ def build_admin_routes(
         observability=ObservabilityProvider(context=context),
         instance_registry=admin_instance_registry,
         flags=FlagsProvider(context),
+        agentic=AgenticProvider(context),
     )
     from pyfly.admin.data.wiring import build_data_routes
 

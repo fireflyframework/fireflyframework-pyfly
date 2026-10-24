@@ -22,7 +22,7 @@ class TestAdminProperties:
         props = AdminProperties()
         assert props.enabled is True
         assert props.path == "/admin"
-        assert props.title == "PyFly Admin"
+        assert props.title == "pyfly admin"
         assert props.theme == "auto"
         assert props.require_auth is False
         assert props.allowed_roles == ["ADMIN"]

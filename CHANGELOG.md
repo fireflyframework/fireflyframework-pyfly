@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.08 (2026-10-24)
+
+### Added
+
+- Integrate the complete Agentic framework as the optional native `pyfly.agentic`
+  module, with agents, tools, memory, content ingestion, embeddings, vector stores,
+  reasoning, pipelines, workflows, evaluation, security and observability.
+- Add application-owned configuration, dependency injection, `AgentFactory`,
+  registries, usage/quota accounting and provider/resource lifecycle management.
+  Agent beans must come from their application's factory or receive its runtime
+  explicitly; unmanaged and foreign beans fail startup with guidance.
+- Add namespaced `agentic` and `agentic-*` extras. Existing framework extras keep
+  their meanings; the base installation does not require an AI SDK.
+- Compose relational, PostgreSQL, MongoDB and pgvector persistence with native
+  `pyfly.data` datasources, clients and transaction managers. Memory operations
+  join the application's unit of work and preserve rollback and resource ownership.
+- Add agents, tools, workflows and usage/quota views to the admin console, with
+  per-application inventories and the console's existing authorization controls.
+- Apply the canonical `fireflyframework/brand-kit` logos, Manrope font, colors and
+  favicon throughout `pyfly admin`, including light, dark and mobile layouts.
+- Publish downloadable SHA-256 checksums for every package and book release asset.
+
+### Changed
+
+- Require migration from `fireflyframework_agentic` to `pyfly.agentic` without
+  legacy aliases. Public APIs use `Agent`, `AgentTool`, `AgenticConfig`, `agent`
+  and `agent_tool`; see the native migration guide for the complete name map.
+- Isolate provider credentials and HTTP-client ownership between applications,
+  preserve owner-loop affinity, and close/reopen owned model resources on runtime
+  shutdown/restart. Blocking on the owner loop and cross-loop streaming fail
+  clearly rather than reusing a client on the wrong loop.
+- Exclude nested virtual environments, caches and generated book review artifacts
+  from source distributions.
+- Await native application events and async memory operations, route managed HTTP
+  tools through `HttpClientPort`, and initialize plugins through native DI and lifecycle.
+- Encrypt typed memory content when configured and reject ambiguous legacy
+  namespace/schema layouts with explicit migration guidance. Conversation history
+  remains process-local; persistent working facts use the configured memory store.
+- Reject removed standalone configuration controls instead of accepting settings
+  that no longer affect native behavior.
+- Keep PostgreSQL JSONB variants executable in Alembic revisions generated on
+  SQLite by importing their nested text type.
+
+### Documentation
+
+- Integrate every standalone guide and example into the framework documentation,
+  with native configuration, DI/lifecycle, migration and local Ollama tutorials.
+- Add matching English and Spanish book chapters and runnable companions covering
+  agents/tools, knowledge/reasoning and workflow operations.
+
+Standalone repository archival remains gated on publication and verification of
+this replacement release and its migration notice.
+
 ## v26.10.07 (2026-10-21)
 
 ### Fixed

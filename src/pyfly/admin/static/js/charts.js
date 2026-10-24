@@ -28,9 +28,9 @@ export function hexToRgba(hex, alpha) {
 }
 
 function resolveColor(colorVar) {
-    if (!colorVar) return cssVar('--admin-primary') || '#5fbf2e';
+    if (!colorVar) return cssVar('--admin-primary') || '#ffb34a';
     if (colorVar.startsWith('#')) return colorVar;
-    return cssVar(colorVar) || cssVar('--admin-primary') || '#5fbf2e';
+    return cssVar(colorVar) || cssVar('--admin-primary') || '#ffb34a';
 }
 
 function themeDefaults() {
@@ -117,7 +117,7 @@ export function createLineChart(canvas, options = {}) {
  */
 export function createBarChart(canvas, options = {}) {
     const theme = themeDefaults();
-    const defaultColor = cssVar('--admin-primary') || '#5fbf2e';
+    const defaultColor = cssVar('--admin-primary') || '#ffb34a';
     const colors = (options.colors || []).map(c => resolveColor(c));
 
     const chart = new Chart(canvas, {

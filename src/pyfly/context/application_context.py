@@ -1981,13 +1981,30 @@ class ApplicationContext:
         """Check if an instance conforms to CommandLineRunner or ApplicationRunner."""
         try:
             from pyfly.shell.ports.outbound import ShellRunnerPort
-            from pyfly.shell.runner import ApplicationRunner, CommandLineRunner
+            from pyfly.shell.runner import ApplicationArguments, ApplicationRunner, CommandLineRunner
 
             # Exclude ShellRunnerPort adapters — they satisfy CommandLineRunner
             # structurally (both have async run()) but are not lifecycle runners.
             if isinstance(instance, ShellRunnerPort):
                 return False
-            return isinstance(instance, (CommandLineRunner, ApplicationRunner))
+            if not isinstance(instance, (CommandLineRunner, ApplicationRunner)):
+                return False
+            # Runtime protocols check attribute names, not signatures. An injected
+            # agent or workflow also has run(), but must never execute at startup.
+            run = instance.run
+            parameters = list(inspect.signature(run).parameters.values())
+            if not parameters:
+                return False
+            first = parameters[0]
+            if first.kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                return False
+            try:
+                hint = typing.get_type_hints(run).get(first.name, first.annotation)
+            except (NameError, TypeError):
+                hint = first.annotation
+            return hint in (list[str], ApplicationArguments) or (
+                hint is inspect.Parameter.empty and first.name == "args"
+            )
         except ImportError:
             return False
 

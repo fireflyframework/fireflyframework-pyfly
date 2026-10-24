@@ -1,0 +1,124 @@
+"""Tests for SqliteVecVectorStore (sqlite-vec backend)."""
+
+from __future__ import annotations
+
+import pytest
+
+from pyfly.agentic.vectorstores.types import VectorDocument
+
+
+@pytest.fixture
+async def store(tmp_path):
+    from pyfly.agentic.vectorstores.sqlite_vec_store import SqliteVecVectorStore
+
+    instance = SqliteVecVectorStore(db_path=tmp_path / "test.sqlite", dimension=4)
+    try:
+        yield instance
+    finally:
+        await instance.close()
+
+
+async def test_upsert_and_search_returns_closest_first(store):
+    docs = [
+        VectorDocument(id="a", text="alpha", embedding=[1.0, 0.0, 0.0, 0.0]),
+        VectorDocument(id="b", text="beta", embedding=[0.0, 1.0, 0.0, 0.0]),
+        VectorDocument(id="c", text="gamma", embedding=[0.0, 0.0, 1.0, 0.0]),
+    ]
+    await store.upsert(docs)
+    results = await store.search([0.99, 0.01, 0.0, 0.0], top_k=3)
+    assert len(results) == 3
+    assert results[0].document.id == "a"
+
+
+async def test_search_scores_decrease(store):
+    docs = [
+        VectorDocument(id="x", text="x", embedding=[1.0, 0.0, 0.0, 0.0]),
+        VectorDocument(id="y", text="y", embedding=[0.0, 1.0, 0.0, 0.0]),
+    ]
+    await store.upsert(docs)
+    results = await store.search([1.0, 0.0, 0.0, 0.0], top_k=2)
+    assert results[0].score >= results[1].score
+
+
+async def test_search_empty_store_returns_empty(store):
+    results = await store.search([1.0, 0.0, 0.0, 0.0], top_k=5)
+    assert results == []
+
+
+async def test_upsert_overwrites_existing_id(store):
+    doc = VectorDocument(id="dup", text="v1", embedding=[1.0, 0.0, 0.0, 0.0])
+    await store.upsert([doc])
+    doc2 = VectorDocument(id="dup", text="v2", embedding=[0.0, 1.0, 0.0, 0.0])
+    await store.upsert([doc2])
+    results = await store.search([0.0, 1.0, 0.0, 0.0], top_k=5)
+    ids = [r.document.id for r in results]
+    assert ids.count("dup") == 1
+    assert results[0].document.id == "dup"
+
+
+async def test_delete_removes_document(store):
+    docs = [
+        VectorDocument(id="keep", text="k", embedding=[1.0, 0.0, 0.0, 0.0]),
+        VectorDocument(id="drop", text="d", embedding=[0.9, 0.1, 0.0, 0.0]),
+    ]
+    await store.upsert(docs)
+    await store.delete(["drop"])
+    results = await store.search([1.0, 0.0, 0.0, 0.0], top_k=5)
+    ids = [r.document.id for r in results]
+    assert "drop" not in ids
+    assert "keep" in ids
+
+
+async def test_delete_nonexistent_id_is_silent(store):
+    await store.delete(["ghost"])
+
+
+async def test_namespace_isolation(store):
+    s = store
+    await s.upsert(
+        [VectorDocument(id="ns_a_doc", text="", embedding=[1.0, 0.0, 0.0, 0.0])],
+        namespace="ns_a",
+    )
+    await s.upsert(
+        [VectorDocument(id="ns_b_doc", text="", embedding=[1.0, 0.0, 0.0, 0.0])],
+        namespace="ns_b",
+    )
+    results_a = await s.search([1.0, 0.0, 0.0, 0.0], top_k=5, namespace="ns_a")
+    ids_a = [r.document.id for r in results_a]
+    assert "ns_a_doc" in ids_a
+    assert "ns_b_doc" not in ids_a
+
+    results_b = await s.search([1.0, 0.0, 0.0, 0.0], top_k=5, namespace="ns_b")
+    ids_b = [r.document.id for r in results_b]
+    assert "ns_b_doc" in ids_b
+    assert "ns_a_doc" not in ids_b
+
+
+async def test_import_error_when_sqlite_vec_not_installed(tmp_path):
+    from unittest.mock import patch
+
+    from pyfly.agentic.exceptions import VectorStoreError
+    from pyfly.agentic.vectorstores import sqlite_vec_store as m
+
+    with patch.object(m, "sqlite_vec", None):
+        store = m.SqliteVecVectorStore(db_path=tmp_path / "x.sqlite", dimension=4)
+        # ImportError from _initialise_sync is wrapped by BaseVectorStore.upsert
+        with pytest.raises(VectorStoreError, match="sqlite-vec"):
+            await store.upsert([VectorDocument(id="x", text="", embedding=[1.0, 0.0, 0.0, 0.0])])
+
+
+async def test_sqlite_vec_store_accepts_database_store(tmp_path):
+    from pyfly.agentic.storage import DatabaseStore, LocalBackend
+    from pyfly.agentic.vectorstores.sqlite_vec_store import SqliteVecVectorStore
+
+    store = DatabaseStore(
+        LocalBackend(tmp_path / "vec.sqlite"),
+        store_id="ut-vec",
+        cache_root=tmp_path / "cache",
+    )
+    s = SqliteVecVectorStore(store, dimension=4)
+    docs = [VectorDocument(id="a", text="x", metadata={}, embedding=[0.1, 0.2, 0.3, 0.4])]
+    await s.upsert(docs, namespace="default")
+    hits = await s.search([0.1, 0.2, 0.3, 0.4], top_k=1, namespace="default")
+    assert hits and hits[0].document.id == "a"
+    await s.close()

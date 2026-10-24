@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../../assets/pyfly-logo.png" alt="PyFly Logo" width="600" />
+  <img src="../assets/pyfly-logo-dark.svg" alt="PyFly Logo" width="600" />
 </p>
 
 <p align="center">
@@ -177,6 +177,12 @@ Cross-cutting concerns, testing patterns, and aspect-oriented programming.
 
 ---
 
+## Agentic
+
+[Agentic](agentic.md) adds opt-in agents, tools, model configuration, knowledge retrieval, reasoning, validation, pipelines and workflows. [Native DI/lifecycle](agentic/native-runtime.md), [all capability guides](agentic/catalogue.md), [installation/extras](agentic/getting-started/installation.md) and [migration](agentic/migration.md) cover its application-owned runtime.
+
+---
+
 ## Architecture Quick Reference
 
 ```
@@ -224,6 +230,7 @@ pyfly/
 
 ---
 
-<p align="center">
-  <a href="../README.md">Back to Documentation Home</a> · <a href="../../README.md">Back to PyFly README</a>
-</p>
+[Back to Documentation Home](../index.md) · [Back to PyFly README](https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/README.md)
+
+Native Agentic memory/pgvector participate in PyFly Data units of work; the
+[admin console](admin.md#agentic-application-runtime-only) exposes guarded read-only inventory/accounting.

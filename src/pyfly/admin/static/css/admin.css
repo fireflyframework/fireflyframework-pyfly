@@ -1,7 +1,12 @@
 /* PyFly Admin Dashboard — Main Stylesheet */
 
-/* ── Google Fonts ───────────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Maven+Pro:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@font-face {
+    font-family: 'Manrope';
+    src: url('../assets/Manrope-variable.woff2') format('woff2');
+    font-weight: 200 800;
+    font-style: normal;
+    font-display: swap;
+}
 
 /* ── Reset / Base ───────────────────────────────────────────────── */
 *,
@@ -88,16 +93,17 @@ a:hover {
     align-items: center;
     gap: 10px;
     padding: 0 20px;
-    /* Exactly the navbar height so the two top bars line up across the split. */
-    height: var(--admin-navbar-height);
+    /* The endorsed lockup retains its original aspect ratio and clear space. */
+    height: 154px;
     flex-shrink: 0;
     border-bottom: 1px solid var(--admin-border-subtle);
     overflow: hidden;
 }
 
 .admin-sidebar-brand img {
-    height: 30px;
-    width: auto;
+    height: auto;
+    width: 220px;
+    max-width: 100%;
     object-fit: contain;
     flex-shrink: 0;
 }
@@ -289,12 +295,12 @@ a:hover {
     position: relative;
     background:
         linear-gradient(
-            rgba(95, 191, 46, 0.018) 1px,
+            rgba(255, 179, 74, 0.018) 1px,
             transparent 1px
         ),
         linear-gradient(
             90deg,
-            rgba(95, 191, 46, 0.018) 1px,
+            rgba(255, 179, 74, 0.018) 1px,
             transparent 1px
         );
     background-size: 40px 40px;
@@ -2265,3 +2271,29 @@ body.has-fullscreen {
 .data-dialog p { margin-top: 14px; overflow-wrap: anywhere; }
 .data-dialog .data-actions { justify-content: flex-end; margin-bottom: 0; }
 @media (max-width: 640px) { .data-heading { align-items: flex-start; flex-direction: column; gap: 8px; } .data-toolbar input { width: 100%; } .data-details { grid-template-columns: 100px 1fr; gap: 12px; } }
+
+/* Canonical identity: square actions and quiet, readable operational surfaces. */
+.btn-primary { background: var(--admin-action); color: #10110f; border-color: var(--admin-action); border-radius: 0; }
+.btn-primary:hover { background: #fcc271; color: #10110f; border-color: #fcc271; }
+:is(a, button, input, select, textarea, [tabindex]):focus-visible { outline: 2px solid var(--admin-primary); outline-offset: 3px; }
+.admin-sidebar :focus-visible { outline-color: #ffb34a; }
+.agentic-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.agentic-metrics strong { font-size: 1.35rem; font-weight: 600; }
+.agentic-view .admin-card-header h2 { font-size: 1.05rem; font-weight: 600; }
+.agentic-view .btn { overflow-wrap: anywhere; }
+.agentic-view .page-subtitle { max-width: 70ch; }
+@media (max-width: 640px) {
+    .agentic-metrics, .agentic-view .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .page-header { flex-wrap: wrap; gap: 12px; }
+}
+
+.admin-navbar-title, .admin-sidebar-section, .navbar-status, .stat-card-value,
+.stat-card-label, .admin-table th, .page-header .page-subtitle, .admin-card-header h3 {
+    font-family: var(--admin-font-sans);
+}
+.admin-sidebar-section, .stat-card-label, .admin-table th {
+    text-transform: none;
+    letter-spacing: 0;
+}
+.admin-sidebar-section { font-size: 0.8rem; font-weight: 650; }
+.stat-card-label { font-size: 0.88rem; }

@@ -28,7 +28,7 @@ class AdminProperties:
 
     enabled: bool = True
     path: str = "/admin"
-    title: str = "PyFly Admin"
+    title: str = "pyfly admin"
     theme: str = "auto"
     require_auth: bool = False
     allowed_roles: list[str] = field(default_factory=lambda: ["ADMIN"])

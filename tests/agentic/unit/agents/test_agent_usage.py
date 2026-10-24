@@ -1,0 +1,259 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for usage tracking wired into Agent."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from pyfly.agentic.agents.base import Agent
+from pyfly.agentic.config import reset_config
+from pyfly.agentic.observability.usage import UsageTracker
+
+
+class _FakeUsage:
+    """Simulates pydantic_ai RunUsage."""
+
+    def __init__(self, *, input_tokens=10, output_tokens=5, total_tokens=15, requests=1):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.total_tokens = total_tokens
+        self.requests = requests
+        self.cache_creation_tokens = 0
+        self.cache_read_tokens = 0
+
+
+class _FakeResult:
+    """Simulates a pydantic_ai RunResult."""
+
+    def __init__(self, output="hello", usage=None):
+        self.output = output
+        self._usage = usage or _FakeUsage()
+
+    def usage(self):
+        return self._usage
+
+    def new_messages(self):
+        return []
+
+
+class TestAgentRecordUsage:
+    def test_record_usage_creates_record(self):
+        agent = Agent(name="test-usage", model="test", auto_register=False)
+        tracker = UsageTracker()
+        fake_result = _FakeResult(usage=_FakeUsage(input_tokens=100, output_tokens=50, total_tokens=150))
+
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(fake_result, 42.0)
+
+        summary = tracker.get_summary()
+        assert summary.record_count == 1
+        assert summary.total_input_tokens == 100
+        assert summary.total_output_tokens == 50
+        assert summary.total_tokens == 150
+        assert summary.total_latency_ms == 42.0
+
+    def test_record_usage_with_correlation_id(self):
+        agent = Agent(name="corr-test", model="test", auto_register=False)
+        tracker = UsageTracker()
+        fake_result = _FakeResult(usage=_FakeUsage(total_tokens=50))
+
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(fake_result, 10.0, correlation_id="pipe-123")
+
+        records = tracker.records
+        assert len(records) == 1
+        assert records[0].correlation_id == "pipe-123"
+
+    def test_record_usage_cost_calculation(self):
+        agent = Agent(name="cost-test", model="test", auto_register=False)
+        agent.model_identifier = "openai:gpt-4o"  # exercise real pricing path without API key
+        tracker = UsageTracker()
+        fake_result = _FakeResult(usage=_FakeUsage(input_tokens=1000, output_tokens=500, total_tokens=1500))
+
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(fake_result, 100.0)
+
+        records = tracker.records
+        assert len(records) == 1
+        assert records[0].cost_usd > 0  # cost should be calculated
+
+    def test_record_usage_disabled(self, monkeypatch):
+        monkeypatch.setenv("PYFLY_AGENTIC_COST_TRACKING_ENABLED", "false")
+        reset_config()
+
+        agent = Agent(name="disabled-test", model="test", auto_register=False)
+        tracker = UsageTracker()
+        fake_result = _FakeResult()
+
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(fake_result, 10.0)
+
+        reset_config()
+        assert tracker.get_summary().record_count == 0
+
+    def test_record_usage_no_usage_method(self):
+        """Should not raise if result has no usage() method."""
+        agent = Agent(name="no-usage", model="test", auto_register=False)
+        tracker = UsageTracker()
+
+        class _NoUsageResult:
+            output = "hi"
+
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(_NoUsageResult(), 10.0)
+
+        assert tracker.get_summary().record_count == 0
+
+    def test_record_usage_agent_name_in_record(self):
+        agent = Agent(name="named-agent", model="test", auto_register=False)
+        tracker = UsageTracker()
+        fake_result = _FakeResult(usage=_FakeUsage(total_tokens=10))
+
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(fake_result, 5.0)
+
+        records = tracker.records
+        assert records[0].agent == "named-agent"
+
+
+class TestCacheTokensFieldFallback:
+    """Pin the ``cache_write_tokens`` / ``cache_creation_tokens`` fallback.
+
+    pydantic-ai's ``Usage`` exposes cache-write counts under
+    ``cache_write_tokens`` (current) and previously under
+    ``cache_creation_tokens`` (older versions). ``Agent._record_usage``
+    reads ``cache_write_tokens`` and falls back to ``cache_creation_tokens``.
+    These tests prevent a silent zeroing of cache savings on either a
+    pydantic-ai rename or a regression of the fallback.
+    """
+
+    def test_reads_cache_write_tokens(self):
+        """Current pydantic-ai field name: ``cache_write_tokens``."""
+
+        class _Usage:
+            def __init__(self):
+                self.input_tokens = 100
+                self.output_tokens = 50
+                self.requests = 1
+                self.cache_write_tokens = 4096
+                self.cache_read_tokens = 2048
+                # cache_creation_tokens deliberately absent
+
+        class _Result:
+            def __init__(self):
+                self._usage = _Usage()
+
+            def usage(self):
+                return self._usage
+
+            def new_messages(self):
+                return []
+
+        agent = Agent(name="cache-write-name", model="test", auto_register=False)
+        tracker = UsageTracker()
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(_Result(), 10.0)
+
+        rec = tracker.records[0]
+        assert rec.cache_creation_tokens == 4096
+        assert rec.cache_read_tokens == 2048
+
+    def test_falls_back_to_cache_creation_tokens(self):
+        """Legacy pydantic-ai field name: ``cache_creation_tokens``."""
+
+        class _Usage:
+            def __init__(self):
+                self.input_tokens = 100
+                self.output_tokens = 50
+                self.requests = 1
+                self.cache_creation_tokens = 4096
+                self.cache_read_tokens = 2048
+                # cache_write_tokens deliberately absent
+
+        class _Result:
+            def __init__(self):
+                self._usage = _Usage()
+
+            def usage(self):
+                return self._usage
+
+            def new_messages(self):
+                return []
+
+        agent = Agent(name="cache-creation-name", model="test", auto_register=False)
+        tracker = UsageTracker()
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(_Result(), 10.0)
+
+        rec = tracker.records[0]
+        assert rec.cache_creation_tokens == 4096
+        assert rec.cache_read_tokens == 2048
+
+    def test_cache_write_tokens_wins_when_both_present(self):
+        """If both names are exposed, prefer the current name."""
+
+        class _Usage:
+            def __init__(self):
+                self.input_tokens = 100
+                self.output_tokens = 50
+                self.requests = 1
+                self.cache_write_tokens = 4096
+                self.cache_creation_tokens = 9999  # should be ignored
+                self.cache_read_tokens = 0
+
+        class _Result:
+            def __init__(self):
+                self._usage = _Usage()
+
+            def usage(self):
+                return self._usage
+
+            def new_messages(self):
+                return []
+
+        agent = Agent(name="both-names", model="test", auto_register=False)
+        tracker = UsageTracker()
+        with patch(
+            "pyfly.agentic.agents.base.default_usage_tracker",
+            tracker,
+        ):
+            agent._record_usage(_Result(), 10.0)
+
+        assert tracker.records[0].cache_creation_tokens == 4096

@@ -28,9 +28,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev
-      - run: uv run ruff check src/ tests/
-      - run: uv run ruff format --check src/ tests/
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv run ruff check src/ tests/ examples/ scripts/
+      - run: uv run ruff format --check src/ tests/ examples/ scripts/
+      - run: uv run python scripts/verify_agentic_migration.py
 
   typecheck:
     name: Type Check
@@ -43,7 +44,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
       - run: uv run mypy src/pyfly --strict
 
   test:
@@ -63,12 +64,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --all-extras --no-extra pii --group dev
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
       - name: Run tests
         run: >
           uv run pytest tests/
           -q --tb=short
           --cov=src/pyfly --cov-report=term-missing --cov-report=xml
+      - name: Native Agentic book companion
+        run: PYTHONPATH=samples/agentic-book/src uv run pytest samples/agentic-book/tests -q
       - name: Upload coverage
         if: matrix.python-version == '3.13'
         uses: actions/upload-artifact@v7
@@ -92,7 +95,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: uv sync --all-extras --no-extra pii --group dev
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
       - name: Install the SQLAlchemy 2.0 line
         run: |
           uv pip install "sqlalchemy[asyncio]>=2.0.50,<2.1"
@@ -119,7 +122,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: uv sync --all-extras --no-extra pii --group dev
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
       - name: Install the SQLAlchemy 2.0 line
         run: |
           uv pip install "sqlalchemy[asyncio]>=2.0.50,<2.1"
@@ -142,11 +145,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
       - name: Run integration tests (Docker required — fail, don't skip)
         env:
           PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
-        run: uv run pytest -m integration tests/integration -q --tb=short
+        run: uv run pytest -m integration tests/integration tests/agentic/integration -q --tb=short
 
   integration-lanes:
     name: Integration lane (${{ matrix.lane }})
@@ -175,11 +178,41 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
       - name: Run the ${{ matrix.lane }} lane (Docker required — fail, don't skip)
         env:
           PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
         run: uv run pytest -m "integration and ${{ matrix.marker }}" tests/ -q --tb=short
+
+  agentic-benchmarks:
+    name: Agentic offline benchmarks (Python ${{ matrix.python-version }})
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - name: Measure offline HTTP and TestModel streaming overhead
+        run: >
+          uv run pytest tests/agentic/performance -m nightly -q --benchmark-only
+          --benchmark-json="${{ runner.temp }}/agentic-benchmarks.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: agentic-benchmarks-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/agentic-benchmarks.json
 
   build:
     name: Build
@@ -209,9 +242,42 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-docs.txt -r book/requirements.txt pytest
       - run: python -m mkdocs build --strict
+      - run: python scripts/check_agentic_docs.py --site-dir site
       - run: python -m pytest book/tests -q
       - run: python book/build/verify_code.py book/manuscript
       - run: python book/build/verify_code.py book/manuscript-es
+
+  agentic-distributions:
+    name: Agentic distributions (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Isolated base and Agentic wheel/sdist installs
+        run: >
+          python scripts/check_agentic_distribution.py
+          --dist-dir dist --python "$(command -v python)"
+          --work-dir "$RUNNER_TEMP/agentic-distributions"
+          --json "$RUNNER_TEMP/agentic-distributions.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: agentic-distributions-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/agentic-distributions.json
 
   webapp:
     name: Webapp browser and installed distributions
@@ -227,7 +293,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: uv sync --all-extras --no-extra pii --group dev --group browser
+      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev --group browser
       - run: uv run playwright install --with-deps chromium
       - uses: actions/download-artifact@v8
         with:

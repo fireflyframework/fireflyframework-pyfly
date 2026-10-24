@@ -1,0 +1,176 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Agent middleware: pluggable before/after hooks for agent runs.
+
+Middleware allows cross-cutting concerns -- logging, validation,
+guardrails, cost tracking, retries, etc. -- to be composed
+without modifying the agent itself.
+
+Usage::
+
+    class AuditMiddleware:
+        async def before_run(self, context):
+            context.metadata["audit_start"] = time.monotonic()
+
+        async def after_run(self, context, result):
+            elapsed = time.monotonic() - context.metadata["audit_start"]
+            logger.info("Audit: agent=%s elapsed=%.1fms", context.agent_name, elapsed * 1000)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MiddlewareContext:
+    """Context passed to middleware hooks.
+
+    Attributes:
+        agent_name: Name of the agent being run.
+        prompt: The user prompt.
+        method: The execution path (``"run"``, ``"run_sync"``,
+            ``"run_stream"``, or ``"run_with_reasoning"``).
+        deps: The dependencies object.
+        kwargs: Extra keyword arguments passed to ``run()``.
+        metadata: Arbitrary dict for middleware to share state across hooks.
+        model: The model identifier the agent will call (e.g.
+            ``"anthropic:claude-sonnet-4-6"``). Populated by
+            :meth:`Agent.run` so middleware can detect the
+            provider without reaching back into the agent.
+        context: Optional :class:`AgentContext` carrying correlation /
+            experiment ids.
+    """
+
+    agent_name: str
+    prompt: Any
+    method: str = ""
+    deps: Any = None
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    model: str = ""
+    context: Any = None
+    _error_dispatched: bool = field(default=False, init=False, repr=False, compare=False)
+
+
+@runtime_checkable
+class AgentMiddleware(Protocol):
+    """Protocol for agent middleware.
+
+    Middleware may implement either or both hooks.  Both are optional;
+    a middleware that only defines ``before_run`` is perfectly valid.
+    """
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """Called before the agent runs.
+
+        May mutate *context* (e.g. modify prompt, add metadata).
+        Raising an exception here aborts the run.
+        """
+        ...
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Called after the agent runs successfully.
+
+        May inspect or transform *result*.  The return value replaces
+        the original result (return *result* unchanged to pass through).
+        """
+        ...
+
+    async def on_error(self, context: MiddlewareContext, exc: BaseException) -> None:
+        """Called when the agent run raises (optional).
+
+        Use it to release resources acquired in ``before_run`` — end an
+        observability span, record a circuit-breaker failure. It must not
+        suppress the error: the original exception is always re-raised after
+        the error hooks run.
+        """
+
+
+class MiddlewareChain:
+    """Ordered chain of middleware that wraps an agent run."""
+
+    def __init__(self, middlewares: list[AgentMiddleware] | None = None) -> None:
+        self._middlewares: list[AgentMiddleware] = list(middlewares or [])
+
+    def add(self, middleware: AgentMiddleware) -> None:
+        """Append a middleware to the chain."""
+        self._middlewares.append(middleware)
+
+    def remove(self, middleware: AgentMiddleware) -> None:
+        """Remove a middleware from the chain."""
+        self._middlewares.remove(middleware)
+
+    async def run_before(self, context: MiddlewareContext) -> None:
+        """Execute all ``before_run`` hooks in order."""
+        try:
+            for mw in self._middlewares:
+                if hasattr(mw, "before_run"):
+                    await mw.before_run(context)
+        except BaseException as exc:
+            await self.run_error(context, exc)
+            raise
+
+    async def run_after(self, context: MiddlewareContext, result: Any) -> Any:
+        """Execute all ``after_run`` hooks in reverse order."""
+        try:
+            for mw in reversed(self._middlewares):
+                if hasattr(mw, "after_run"):
+                    result = await mw.after_run(context, result)
+        except BaseException as exc:
+            await self.run_error(context, exc)
+            raise
+        return result
+
+    async def run_error(self, context: MiddlewareContext, exc: BaseException) -> None:
+        """Execute all error hooks in reverse order (mirrors :meth:`run_after`).
+
+        Each middleware's ``on_error`` (or a legacy ``run_error``) is invoked so
+        it can release what ``before_run`` acquired. A hook that itself raises is
+        suppressed so cleanup never masks the original exception. A context's
+        error hooks run once, including when an outer caller reports the same failure.
+        New caller cancellation propagates after the remaining cleanup hooks run.
+        """
+        if context._error_dispatched:
+            return
+        context._error_dispatched = True
+        task = asyncio.current_task()
+        cancellations = task.cancelling() if task is not None else 0
+        pending_cancellation: asyncio.CancelledError | None = None
+        for mw in reversed(self._middlewares):
+            hook = getattr(mw, "on_error", None) or getattr(mw, "run_error", None)
+            if hook is not None:
+                try:
+                    with contextlib.suppress(Exception):
+                        await hook(context, exc)
+                except asyncio.CancelledError as cancelled:
+                    if task is not None and task.cancelling() > cancellations:
+                        pending_cancellation = cancelled
+        if pending_cancellation is not None:
+            raise pending_cancellation
+
+    def __len__(self) -> int:
+        return len(self._middlewares)
+
+    def __iter__(self) -> Iterator[AgentMiddleware]:
+        """The middleware in call order (``before_run`` order)."""
+        return iter(list(self._middlewares))

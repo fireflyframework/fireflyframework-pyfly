@@ -256,6 +256,30 @@
     "book/art/webapps-es.svg": {
       "structure": "f07dc970b193887bf1734a5f77d69647767eb7de1f2bd9ab54ae4198ff1f48be",
       "originalViewBox": "0 0 600 352"
+    },
+    "book/art/figures/19-agentic-runtime.svg": {
+      "structure": "bf990f082bcbaee7e7f3ddd5c49f8edbd4c65cd01ecf004a5bf4b36f50f2b88b",
+      "originalViewBox": "0 0 900 440"
+    },
+    "book/art/figures/19-agentic-runtime-es.svg": {
+      "structure": "6741f2bcb4b0b5f4dd40cc949b6501666ae0adc7a31da538ca9e1bb221a9fb7c",
+      "originalViewBox": "0 0 900 440"
+    },
+    "book/art/figures/20-agentic-knowledge.svg": {
+      "structure": "d4c68d9bb5cdedc1eb9e46325494e6b7a46ab8d6ae057fc6cb63651c48fa80d5",
+      "originalViewBox": "0 0 900 440"
+    },
+    "book/art/figures/20-agentic-knowledge-es.svg": {
+      "structure": "94cfa45eea052cbd7f23747ec92cc731f469800605835c5888d9935e61062a1b",
+      "originalViewBox": "0 0 900 440"
+    },
+    "book/art/figures/21-agentic-operations.svg": {
+      "structure": "4b7c50994e09d49f1a3a9d79ea0e721d129018d7ce0ff77668c4a76d4d55dce8",
+      "originalViewBox": "0 0 900 440"
+    },
+    "book/art/figures/21-agentic-operations-es.svg": {
+      "structure": "6cfb6f5e7dec517d6008d6c4938cbba07a4f194304865384a78d934e4e137bc2",
+      "originalViewBox": "0 0 900 440"
     }
   }
 }

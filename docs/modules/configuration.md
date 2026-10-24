@@ -1670,3 +1670,12 @@ Final effective values:
 
 
 The [webapp configuration reference](webapps.md) documents `pyfly.web.templates`, `pyfly.web.static`, `pyfly.web.forms`, `pyfly.web.errors`, and `pyfly.admin.data`. These use the same typed binding, profile overlays, and environment precedence described here; templates, static resources, HTML errors, and data administration are disabled by default.
+
+
+## Agentic configuration
+
+Enable the optional module with `pyfly.agentic.enabled: true`. Native settings live under `pyfly.agentic`; the typed model is `AgenticConfig`. Fields retain underscores, for example `default_model` and `budget_limit_usd`. Environment overrides use `PYFLY_AGENTIC_*`, including `PYFLY_AGENTIC_DEFAULT_MODEL` and `PYFLY_AGENTIC_ENABLED`. Provider credential environment keys are unchanged. See [native configuration and ownership](agentic/native-runtime.md#configuration-and-environment) and [migration](agentic/migration.md).
+
+The exhaustive [Agentic reference](agentic/configuration.md) lists all 44 typed
+fields, defaults and environment keys, including the removed-control migration
+map. Native Data/client settings replace Agentic URL/pool configuration.

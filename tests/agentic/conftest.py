@@ -1,0 +1,42 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Shared test fixtures for the pyfly test suite."""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+# Provide a dummy key so that modules using pydantic-ai Anthropic agents can
+# be imported during test collection without a real API key.  Tests that mock
+# the agent never make real calls, so the value is irrelevant.
+os.environ.setdefault("ANTHROPIC_API_KEY", "test")
+
+
+@pytest.fixture(autouse=True)
+def _clear_registries():
+    """Reset global registries between tests to avoid cross-test contamination."""
+    from pyfly.agentic.agents.registry import agent_registry
+    from pyfly.agentic.reasoning.registry import reasoning_registry
+    from pyfly.agentic.tools.registry import tool_registry
+
+    agent_registry._agents.clear()
+    tool_registry.clear()
+    reasoning_registry.clear()
+    yield
+    agent_registry._agents.clear()
+    tool_registry.clear()
+    reasoning_registry.clear()

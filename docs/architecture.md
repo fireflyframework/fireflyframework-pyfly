@@ -1203,3 +1203,14 @@ Security middleware must live in the web adapter module (e.g., `web/adapters/sta
 6. [ ] Run `uv sync` to register the entry point
 7. [ ] Write tests that verify: bean production, condition gating, user-bean precedence
 8. [ ] Verify: `grep -r "my_subsystem" src/pyfly/context/ src/pyfly/core/` returns **zero** results
+
+
+## Agentic runtime ownership
+
+The opt-in [Agentic module](modules/agentic.md) owns state per application through `AgenticRuntime`. Its config, registries, usage/quotas, telemetry helpers and managed resources are integrated through conditional auto-configuration. Inject `AgentFactory` into services; create agents through that factory so nested work and streams remain bound to the correct runtime. The application context closes its runtime at shutdown. See [native DI and lifecycle](modules/agentic/native-runtime.md) for configuration, resource ownership and explicit script lifetimes.
+
+Database-backed Agentic memory and pgvector borrow the application Data
+datasource/client and join its unit of work. Host events, generic HTTP tools and
+entry-point plugin construction use native publisher/client/Container services.
+Read-only Agentic admin inventory resolves the owning context. Specialized
+provider SDKs, artifact leases and file journals retain their distinct contracts.

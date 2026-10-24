@@ -1,0 +1,754 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Built-in agent middleware implementations.
+
+The framework ships ready-to-use middleware classes:
+
+* :class:`LoggingMiddleware` -- structured logging for every agent run
+  (auto-wired by default).
+* :class:`PromptGuardMiddleware` -- prompt-injection detection/sanitisation.
+* :class:`CostGuardMiddleware` -- budget enforcement before an LLM call.
+* :class:`RetryMiddleware` -- automatic retry with backoff on rate limit errors.
+
+Usage::
+
+    from pyfly.agentic.agents.builtin_middleware import (
+        LoggingMiddleware,
+        PromptGuardMiddleware,
+        CostGuardMiddleware,
+        RetryMiddleware,
+    )
+
+    agent = Agent(
+        "safe-agent",
+        model="openai:gpt-4o",
+        middleware=[PromptGuardMiddleware(), CostGuardMiddleware(budget_usd=5.0)],
+    )
+"""
+
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import json
+import logging
+import time
+from typing import Any
+
+from opentelemetry import context as _otel_context
+from opentelemetry import trace as _trace
+from pydantic_ai import DeferredToolRequests
+
+from pyfly.agentic.agents.middleware import MiddlewareContext
+from pyfly.agentic.exceptions import BudgetExceededError, OutputReviewError
+from pyfly.agentic.explainability.trace_recorder import (
+    default_trace_recorder,
+)
+from pyfly.agentic.observability.budget import (
+    BudgetGate,
+    BudgetMode,
+    BudgetRule,
+    ScopeContext,
+)
+from pyfly.agentic.observability.events import default_events
+from pyfly.agentic.observability.usage import (
+    UsageRecord,
+    default_usage_tracker,
+    resolve_run_usage,
+)
+from pyfly.agentic.security.output_guard import OutputGuard
+from pyfly.agentic.security.prompt_guard import PromptGuard
+
+logger = logging.getLogger(__name__)
+
+
+def _is_deferred_output(result: Any) -> bool:
+    """Whether a run paused (output is a ``DeferredToolRequests``) rather than
+    completing. Output-consuming ``after_run`` hooks must skip such a result:
+    it is a HITL control object, not a final answer — scanning, validating, or
+    caching it is wrong (and would raise on a type mismatch)."""
+    return isinstance(getattr(result, "output", None), DeferredToolRequests)
+
+
+# -- Errors ------------------------------------------------------------------
+
+
+class PromptGuardError(RuntimeError):
+    """Raised when :class:`PromptGuardMiddleware` detects unsafe input."""
+
+
+class OutputGuardError(RuntimeError):
+    """Raised when :class:`OutputGuardMiddleware` detects unsafe output."""
+
+
+# ``BudgetExceededError`` is re-exported above from
+# :mod:`pyfly.agentic.exceptions` for backward compatibility
+# with the historical ``builtin_middleware`` import path.
+
+
+# -- LoggingMiddleware -------------------------------------------------------
+
+
+class LoggingMiddleware:
+    """Structured logging for every agent run.
+
+    Auto-wired by default into every :class:`Agent`.  Emits an
+    **entry** log line in ``before_run`` and a **completion** log line in
+    ``after_run`` with elapsed time, token count, and estimated cost.
+
+    The middleware uses the standard Python logger under the
+    ``pyfly.agentic`` hierarchy so that
+    :func:`~pyfly.agentic.logging.configure_logging` controls
+    its output (including the ``colored`` and ``json`` format styles).
+
+    Parameters:
+        level: Logging level for the entry/completion lines.
+        preview_length: Maximum characters of the prompt to include.
+        include_usage: Whether to extract token/cost data from the result.
+    """
+
+    def __init__(
+        self,
+        *,
+        level: int = logging.INFO,
+        preview_length: int = 80,
+        include_usage: bool = True,
+    ) -> None:
+        self._level = level
+        self._preview_length = preview_length
+        self._include_usage = include_usage
+
+    @classmethod
+    def for_config(cls, config: Any) -> LoggingMiddleware:
+        """The default instance for an agent: the prompt preview follows the content switch.
+
+        ``instrumentation_include_content`` decides whether prompt and response text reach
+        spans; until 26.06.15 the entry log line carried the first 80 characters of the prompt
+        regardless, so a host that had opted out of content in telemetry still had room text
+        in its logs. One privacy switch: content excluded means ``preview_length=0``.
+        """
+        include = bool(getattr(config, "instrumentation_include_content", False))
+        return cls(preview_length=80 if include else 0)
+
+    # -- hooks ---------------------------------------------------------------
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """Log the start of an agent run."""
+        context.metadata["_log_t0"] = time.monotonic()
+        preview = str(context.prompt)[: self._preview_length] if context.prompt is not None else "<none>"
+        method = context.method or "run"
+        logger.log(
+            self._level,
+            "\u25b8 %s.%s(prompt=%s...)",
+            context.agent_name,
+            method,
+            preview,
+        )
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Log completion with timing, tokens and cost."""
+        t0 = context.metadata.get("_log_t0")
+        elapsed_ms = (time.monotonic() - t0) * 1000 if t0 is not None else 0.0
+        method = context.method or "run"
+
+        if _is_deferred_output(result):
+            logger.log(
+                self._level,
+                "⏸ %s.%s paused after %.1fms awaiting tool approval",
+                context.agent_name,
+                method,
+                elapsed_ms,
+            )
+            return result
+
+        suffix = self._usage_suffix(result) if self._include_usage else ""
+        reasoning = self._reasoning_suffix(result)
+
+        logger.log(
+            self._level,
+            "\u2713 %s.%s completed in %.1fms%s%s",
+            context.agent_name,
+            method,
+            elapsed_ms,
+            suffix,
+            reasoning,
+        )
+        return result
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _usage_suffix(result: Any) -> str:
+        """Extract token/cost info from the result, if available."""
+        usage = resolve_run_usage(result)
+        if usage is None:
+            return ""
+        tokens = getattr(usage, "total_tokens", 0) or 0
+        if tokens == 0:
+            return ""
+        parts = [f" [tokens={tokens}"]
+        # Cost may have been recorded on the result by the framework.
+        cost = getattr(result, "_pyfly_agentic_cost_usd", None)
+        if cost is not None and cost > 0:
+            parts.append(f", cost=${cost:.4f}")
+        parts.append("]")
+        return "".join(parts)
+
+    @staticmethod
+    def _reasoning_suffix(result: Any) -> str:
+        """Append reasoning info if the result is a ReasoningResult."""
+        steps = getattr(result, "steps_taken", None)
+        if steps is None:
+            return ""
+        pattern = getattr(getattr(result, "trace", None), "pattern_name", None) or ""
+        if pattern:
+            return f" (pattern={pattern}, steps={steps})"
+        return f" (steps={steps})"
+
+
+# -- PromptGuardMiddleware ---------------------------------------------------
+
+
+class PromptGuardMiddleware:
+    """Scans prompts for injection patterns before the agent runs.
+
+    By default, unsafe prompts cause a :class:`PromptGuardError`.  When
+    *sanitise* is ``True``, the prompt is sanitised (suspicious fragments
+    replaced with ``[REDACTED]``) and execution continues.
+
+    Parameters:
+        guard: A :class:`~pyfly.agentic.security.prompt_guard.PromptGuard`
+            instance.  Defaults to the module-level ``default_prompt_guard``.
+        sanitise: When *True*, sanitise the prompt instead of rejecting.
+    """
+
+    def __init__(
+        self,
+        *,
+        guard: Any | None = None,
+        sanitise: bool = False,
+    ) -> None:
+        if guard is not None:
+            self._guard = guard
+        else:
+            self._guard = PromptGuard(sanitise=sanitise)
+        self._sanitise = sanitise
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """Scan the prompt; reject or sanitise if unsafe."""
+        text = str(context.prompt) if context.prompt is not None else ""
+        if not text:
+            return
+
+        scan_result = self._guard.scan(text)
+        if scan_result.safe:
+            return
+
+        if self._sanitise and scan_result.sanitised_input is not None:
+            logger.warning(
+                "PromptGuardMiddleware: sanitised prompt for agent '%s' (%d pattern(s) matched)",
+                context.agent_name,
+                len(scan_result.matched_patterns),
+            )
+            context.prompt = scan_result.sanitised_input
+        else:
+            raise PromptGuardError(f"Prompt blocked for agent '{context.agent_name}': {scan_result.reason}")
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Pass-through (no post-processing needed)."""
+        return result
+
+
+# -- CostGuardMiddleware -----------------------------------------------------
+
+
+class CostGuardMiddleware:
+    """Enforces a cumulative cost budget before each agent run.
+
+    Backed internally by
+    :class:`~pyfly.agentic.observability.budget.BudgetGate`.
+    The public constructor signature is unchanged.
+
+    Parameters:
+        budget_usd: Maximum cumulative spend in USD.
+        tracker: A :class:`UsageTracker` whose ``cumulative_cost_usd`` is
+            consulted.  Defaults to the module-level
+            ``default_usage_tracker``.
+        warn_only: When *True*, log a warning instead of raising.
+        per_call_limit_usd: Optional per-call spending cap.
+    """
+
+    def __init__(
+        self,
+        budget_usd: float,
+        *,
+        tracker: Any | None = None,
+        warn_only: bool = False,
+        per_call_limit_usd: float | None = None,
+    ) -> None:
+        self._budget = budget_usd
+        self._tracker = tracker
+        self._warn_only = warn_only
+        self._per_call_limit = per_call_limit_usd
+        mode = BudgetMode.SOFT if warn_only else BudgetMode.HARD
+        self._gate = BudgetGate([BudgetRule(name="costguard", limit_usd=budget_usd, mode=mode)])
+
+    def _get_tracker(self) -> Any:
+        if self._tracker is not None:
+            return self._tracker
+        return default_usage_tracker
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        tracker = self._get_tracker()
+        current = tracker.cumulative_cost_usd
+        context.metadata["_cost_before"] = current
+        # Seed the gate's lifetime accumulator with the tracker's current spend
+        # so it raises consistently with the legacy semantics.
+        self._gate.reset()
+        self._gate.commit(
+            UsageRecord(cost_usd=current),
+            ScopeContext(agent=context.agent_name),
+        )
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        if self._per_call_limit is None:
+            return result
+        cost_before = context.metadata.get("_cost_before", 0.0)
+        cost_after = self._get_tracker().cumulative_cost_usd
+        call_cost = cost_after - cost_before
+        if call_cost > self._per_call_limit:
+            msg = (
+                f"Per-call cost limit exceeded for agent '{context.agent_name}': "
+                f"${call_cost:.4f} > ${self._per_call_limit:.4f}"
+            )
+            if self._warn_only:
+                logger.warning("CostGuardMiddleware (warn-only): %s", msg)
+            else:
+                raise BudgetExceededError(
+                    msg,
+                    rule_name="costguard.per_call",
+                    spend_usd=call_cost,
+                    limit_usd=self._per_call_limit,
+                )
+        return result
+
+
+# -- ObservabilityMiddleware -------------------------------------------------
+
+
+class NativeEventsMiddleware:
+    """Publish one awaited run lifecycle to the application's event publisher."""
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        context.metadata["_native_event_started"] = time.perf_counter()
+        await default_events.aagent_started(context.agent_name, model=context.model)
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        started = context.metadata.pop("_native_event_started", None)
+        if started is not None:
+            usage = resolve_run_usage(result)
+            await default_events.aagent_completed(
+                context.agent_name,
+                model=context.model,
+                tokens=getattr(usage, "total_tokens", 0),
+                latency_ms=(time.perf_counter() - started) * 1000,
+                cost_usd=getattr(result, "_pyfly_agentic_cost_usd", 0),
+            )
+        return result
+
+    async def on_error(self, context: MiddlewareContext, exc: BaseException) -> None:
+        if context.metadata.pop("_native_event_started", None) is not None:
+            await default_events.aagent_error(context.agent_name, type(exc).__name__, model=context.model)
+
+
+class ObservabilityMiddleware:
+    """Owns the agent-run OpenTelemetry span.
+
+    Auto-wired by default when ``config.observability_enabled`` is ``True``.
+    Opens a span covering the entire agent run (`agent.{name}`, carrying
+    `firefly.agent.name` / `firefly.agent.method` / `firefly.correlation_id`),
+    **activates it in the OTel context** so pydantic-ai's native instrumentation
+    spans (model requests, tool calls) nest under it, emits the ``agent.started``
+    event, and ends the span on success or error. Metrics (tokens, latency, cost)
+    and the ``agent.completed`` event are the sole responsibility of the
+    usage/cost-sink path (``UsageTracker`` → ``OTelMetricsSink`` / ``EventBusSink``)
+    — a single source of truth, so nothing is double-counted.
+    """
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """Open an OTel span, make it the current context, and emit agent-started."""
+        from pyfly.agentic.observability.tracer import default_tracer
+
+        tracer = default_tracer._tracer
+        attributes: dict[str, Any] = {
+            "pyfly.agentic.agent.name": context.agent_name,
+            "pyfly.agentic.agent.method": context.method or "run",
+        }
+        # Stamp the correlation id so native child spans (and any cost record keyed
+        # by the same id) can be joined back to this agent run.
+        correlation_id = getattr(getattr(context, "context", None), "correlation_id", None)
+        if correlation_id:
+            attributes["pyfly.agentic.correlation_id"] = correlation_id
+
+        span = tracer.start_span(f"agent.{context.agent_name}", attributes=attributes)
+        context.metadata["_otel_span"] = span
+
+        # Activate the span in the OTel context so spans created *during* the run
+        # — notably pydantic-ai's native instrumentation (SP-10), which uses
+        # ``start_as_current_span`` — nest UNDER this agent span instead of
+        # becoming disjoint roots in a separate trace. ``start_span`` (not
+        # ``start_as_current_span``) is kept because the span's lifetime straddles
+        # before/after/on_error and a context manager cannot. The attach token is
+        # detached in after_run and on_error (every exit path) to avoid leaking it.
+        context.metadata["_otel_ctx_token"] = _otel_context.attach(_trace.set_span_in_context(span))
+
+        from pyfly.agentic._runtime_context import selected_runtime
+
+        if selected_runtime() is None:
+            default_events.agent_started(context.agent_name)
+
+    @staticmethod
+    def _detach_context(context: MiddlewareContext) -> None:
+        """Detach the OTel context token attached in :meth:`before_run`, if any."""
+        token = context.metadata.pop("_otel_ctx_token", None)
+        if token is not None:
+            with contextlib.suppress(Exception):
+                _otel_context.detach(token)
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Close the agent span (detaching the OTel context first).
+
+        Metrics (tokens, latency, cost) and the ``agent.completed`` event are the
+        sole responsibility of the usage/cost-sink path
+        (``UsageTracker`` → ``OTelMetricsSink`` / ``EventBusSink``), which has the
+        full picture (model, cost, per-token breakdown). Emitting them here too
+        double-counted ``firefly.tokens.total`` and ``firefly.latency`` in every
+        metrics backend, so this hook now owns only the span lifecycle — a single
+        source of truth, matching the existing ``agent.completed`` de-dup.
+        """
+        self._detach_context(context)
+        span = context.metadata.pop("_otel_span", None)
+        if span is not None:
+            span.end()
+
+        return result
+
+    async def on_error(self, context: MiddlewareContext, exc: BaseException) -> None:
+        """End the span on a failed run so it does not leak; mark it errored.
+
+        Without this, a span opened in :meth:`before_run` would never be closed
+        when the model call raises (``after_run`` runs only on success).
+        """
+        self._detach_context(context)
+        span = context.metadata.pop("_otel_span", None)
+        if span is not None:
+            with contextlib.suppress(Exception):
+                span.record_exception(exc)
+                span.set_status(_trace.Status(_trace.StatusCode.ERROR, str(exc)))
+            span.end()
+
+
+# -- ExplainabilityMiddleware ------------------------------------------------
+
+
+class ExplainabilityMiddleware:
+    """Records decision traces for explainability and audit.
+
+    Captures :class:`DecisionRecord` entries via the
+    :class:`~pyfly.agentic.explainability.trace_recorder.TraceRecorder`.
+
+    Unlike :class:`ObservabilityMiddleware`, this middleware is **not**
+    auto-wired.  Enable it explicitly via the agent's ``middleware`` list.
+
+    Parameters:
+        recorder: A :class:`TraceRecorder`.  Defaults to the module-level
+            ``default_trace_recorder``.
+    """
+
+    def __init__(self, *, recorder: Any | None = None) -> None:
+        self._recorder = recorder
+
+    def _get_recorder(self) -> Any:
+        if self._recorder is not None:
+            return self._recorder
+        return default_trace_recorder
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """Record a decision at the start of the run."""
+        self._get_recorder().record(
+            "llm_call",
+            agent=context.agent_name,
+            input_summary=str(context.prompt)[:200] if context.prompt else "",
+        )
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Record a decision with output information."""
+        output_text = ""
+        if _is_deferred_output(result):
+            output_text = "<paused: awaiting tool approval>"
+        elif hasattr(result, "output"):
+            output_text = str(result.output)[:200]
+        self._get_recorder().record(
+            "llm_call",
+            agent=context.agent_name,
+            output_summary=output_text,
+            detail={"method": context.method},
+        )
+        return result
+
+
+# -- CacheMiddleware ---------------------------------------------------------
+
+
+class CacheMiddleware:
+    """Caches agent results via a :class:`ResultCache`.
+
+    On ``before_run``, checks the cache.  If a hit is found the cached
+    result is stored in ``context.metadata["_cache_result"]`` so that the
+    agent run can be skipped.  On ``after_run``, stores the result on miss.
+
+    Parameters:
+        cache: A :class:`~pyfly.agentic.agents.cache.ResultCache`.
+    """
+
+    def __init__(self, *, cache: Any) -> None:
+        self._cache = cache
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """Check the cache; on hit, store result in metadata."""
+        # Native settings and model objects may contain non-serializable state.
+        # Such overrides must not reuse or populate the default result cache.
+        if "model" in context.kwargs or "model_settings" in context.kwargs:
+            context.metadata["_cache_bypass"] = True
+            return
+        namespace = context.agent_name
+        options = dict(context.metadata.get("_portable_model_options", {}))
+        override = context.kwargs.get("model_options")
+        if override is not None:
+            options.update(override.model_dump(mode="json", exclude_unset=True))
+        if options:
+            namespace += ":" + json.dumps(
+                {"model": context.model, "api": context.metadata.get("_cache_model_api"), "options": options},
+                sort_keys=True,
+            )
+        context.metadata["_cache_namespace"] = namespace
+        prompt_str = str(context.prompt) if context.prompt is not None else ""
+        cached = self._cache.get(namespace, prompt_str)
+        if cached is not None:
+            context.metadata["_cache_result"] = cached
+            logger.debug("CacheMiddleware: hit for agent '%s'", context.agent_name)
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Store the result in the cache on miss."""
+        if _is_deferred_output(result):
+            # Never cache a paused run — a later identical prompt would be served
+            # a stale ``DeferredToolRequests`` instead of running for real.
+            return result
+        if context.metadata.get("_cache_bypass"):
+            return result
+        if "_cache_result" not in context.metadata:
+            prompt_str = str(context.prompt) if context.prompt is not None else ""
+            self._cache.put(context.metadata.get("_cache_namespace", context.agent_name), prompt_str, result)
+        return result
+
+
+# -- OutputGuardMiddleware ---------------------------------------------------
+
+
+def _replace_output(result: Any, new_output: Any) -> Any:
+    """Return ``result`` with its ``output`` swapped, preserving the result type.
+
+    Handles NamedTuple results (``_replace``), dataclass results
+    (``dataclasses.replace`` — e.g. pydantic-ai's ``AgentRunResult``), and plain
+    mutable objects (in-place assignment); degrades to the bare value only as a
+    last resort. The previous ``hasattr(result, "_replace")`` guard silently
+    failed for the dataclass ``AgentRunResult``, returning the *unwrapped* output
+    (a bare ``str``) and dropping usage/messages/type from the result.
+    """
+    if hasattr(result, "_replace"):  # NamedTuple
+        try:
+            return result._replace(output=new_output)
+        except (TypeError, ValueError):
+            pass
+    if dataclasses.is_dataclass(result) and not isinstance(result, type):
+        try:
+            return dataclasses.replace(result, output=new_output)
+        except (TypeError, ValueError):
+            pass
+    obj: Any = result
+    try:
+        obj.output = new_output
+        return obj
+    except (AttributeError, TypeError):
+        return new_output
+
+
+class OutputGuardMiddleware:
+    """Scans LLM output for PII, secrets, harmful content, and custom patterns.
+
+    When the guard detects unsafe content, the middleware either raises
+    :class:`OutputGuardError` (default) or sanitises the output by replacing
+    matched fragments with ``[REDACTED]``.
+
+    Parameters:
+        guard: An :class:`~pyfly.agentic.security.output_guard.OutputGuard`
+            instance.  Defaults to the module-level ``default_output_guard``.
+        sanitise: When *True*, sanitise the output instead of rejecting.
+        block_categories: Only block on these categories (e.g. ``["secrets", "pii"]``).
+            When empty (default), all categories trigger blocking.
+    """
+
+    def __init__(
+        self,
+        *,
+        guard: Any | None = None,
+        sanitise: bool = False,
+        block_categories: list[str] | None = None,
+    ) -> None:
+        if guard is not None:
+            self._guard = guard
+        else:
+            self._guard = OutputGuard(sanitise=sanitise)
+        self._sanitise = sanitise
+        self._block_categories = block_categories
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """No pre-processing needed."""
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Scan the output; reject or sanitise if unsafe."""
+        if _is_deferred_output(result):
+            return result
+        output_text = ""
+        if hasattr(result, "output"):
+            output_text = str(result.output)
+        elif isinstance(result, str):
+            output_text = result
+        else:
+            output_text = str(result)
+
+        if not output_text:
+            return result
+
+        scan_result = self._guard.scan(output_text)
+        if scan_result.safe:
+            return result
+
+        # If block_categories is set, only block on matching categories
+        if self._block_categories:
+            blocking = [c for c in scan_result.matched_categories if c in self._block_categories]
+            if not blocking:
+                return result
+
+        if self._sanitise and scan_result.sanitised_output is not None:
+            logger.warning(
+                "OutputGuardMiddleware: sanitised output for agent '%s' (%d pattern(s) matched in %s)",
+                context.agent_name,
+                len(scan_result.matched_patterns),
+                scan_result.matched_categories,
+            )
+            # Preserve the result object's contract (usage, messages, type);
+            # only swap the sanitised output field.
+            if hasattr(result, "output"):
+                return _replace_output(result, scan_result.sanitised_output)
+            return scan_result.sanitised_output
+
+        raise OutputGuardError(f"Output blocked for agent '{context.agent_name}': {scan_result.reason}")
+
+
+class ValidationMiddleware:
+    """Validates agent output using an :class:`OutputReviewer`.
+
+    After the agent runs, the output is parsed and validated without
+    re-running the agent.  If validation fails, an
+    :class:`~pyfly.agentic.exceptions.OutputReviewError` is raised.
+
+    Parameters:
+        reviewer: An :class:`OutputReviewer` whose parsing and validation
+            logic is applied to the result.
+    """
+
+    def __init__(self, *, reviewer: Any) -> None:
+        self._reviewer = reviewer
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """No pre-processing needed."""
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Validate the output; raise on failure."""
+        if _is_deferred_output(result):
+            return result
+        raw = result.output if hasattr(result, "output") else result
+
+        parsed, parse_errors = self._reviewer._parse_output(raw)
+        if parse_errors:
+            raise OutputReviewError(f"Output validation failed: {parse_errors}")
+
+        validated = parsed if parsed is not None else raw
+        report = self._reviewer._validate_output(validated)
+        if report is not None and not report.valid:
+            rule_errors = [r.message for r in report.errors if r.message]
+            raise OutputReviewError(f"Validation rules failed: {rule_errors}")
+
+        return result
+
+
+# -- RetryMiddleware ---------------------------------------------------------
+
+
+class RetryMiddleware:
+    """Retries agent runs on rate limit errors with adaptive backoff.
+
+    When added to the middleware chain, stores retry configuration in
+    ``context.metadata`` so that :meth:`Agent.run` can wrap the
+    underlying pydantic-ai call with automatic retry logic.
+
+    The middleware protocol (``before_run`` / ``after_run``) cannot itself
+    wrap the LLM call, so retry *execution* lives in ``Agent.run()``.
+    This middleware is the **policy declaration** that activates and
+    configures that retry loop.
+
+    Parameters:
+        max_retries: Maximum number of retry attempts after the initial call.
+        base_delay: Initial backoff delay in seconds.
+        max_delay: Maximum backoff delay in seconds.
+        backoff_multiplier: Exponential backoff multiplier.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_retries: int = 3,
+        base_delay: float = 2.0,
+        max_delay: float = 120.0,
+        backoff_multiplier: float = 2.0,
+    ) -> None:
+        self._max_retries = max_retries
+        self._base_delay = base_delay
+        self._max_delay = max_delay
+        self._backoff_multiplier = backoff_multiplier
+
+    async def before_run(self, context: MiddlewareContext) -> None:
+        """Store retry configuration in metadata for Agent.run()."""
+        context.metadata["_retry_config"] = {
+            "max_retries": self._max_retries,
+            "base_delay": self._base_delay,
+            "max_delay": self._max_delay,
+            "backoff_multiplier": self._backoff_multiplier,
+        }
+
+    async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
+        """Pass-through (no post-processing needed)."""
+        return result

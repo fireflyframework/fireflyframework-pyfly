@@ -1,0 +1,141 @@
+---
+title: Agentic installation
+description: Install PyFly's opt-in agentic module and only the integrations your application uses.
+---
+
+# Agentic installation
+
+PyFly Agentic lives in the **`pyfly` distribution**, under **`pyfly.agentic`**.
+Use Python **3.12 or 3.13**. Provider SDKs, databases and binary converters have
+additional platform requirements; a universal framework wheel does not qualify
+those dependencies on every operating system.
+
+## From a release
+
+The native module targets the staged **v26.10.08** candidate (package version
+`26.10.8`). Publication is a separate release gate: confirm the release and its
+assets exist before using the candidate URLs below. Until then use the source
+checkout. PyFly is distributed through
+[GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases),
+not PyPI. Install the wheel and select the optional module explicitly:
+
+```bash
+python -m pip install "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-26.10.8-py3-none-any.whl"
+# In a uv-managed application:
+uv add "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-26.10.8-py3-none-any.whl"
+```
+
+Add namespaced extras such as `agentic-postgres` or `agentic-ollama-embeddings`
+to the same bracketed selection when needed. Earlier PyFly releases do not include
+this module. Preserve the selected release URL and your resolved dependency lock.
+
+## From source
+
+From the PyFly checkout containing `src/pyfly/agentic`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[agentic]"
+```
+
+With uv, use `uv sync --extra agentic`. Add each required integration by its full
+namespaced extra. For example:
+
+```bash
+python -m pip install -e ".[agentic,agentic-postgres,agentic-openai-embeddings]"
+# Equivalent dependency selection with uv:
+uv sync --extra agentic --extra agentic-postgres --extra agentic-openai-embeddings
+```
+
+These commands run from the framework source root, not a fresh application folder.
+For a separate application, install that reviewed checkout as a local dependency
+or build and install its wheel. Record its commit and lock the resolved graph.
+The former standalone installer installs the former distribution; use PyFly's
+[installer guidance](../../../installation.md) for the framework, or the explicit
+source commands above for this opt-in module.
+
+## Optional extras
+
+| Extra | Adds / use |
+| --- | --- |
+| `agentic` | Agents, tools, typed model configuration, reasoning, memory, orchestration, telemetry and Pydantic AI provider integrations |
+| `agentic-relational` | Agentic plus native PyFly Data relational support, including SQLite |
+| `agentic-postgres` | Agentic plus native Data relational support and PostgreSQL driver |
+| `agentic-mongodb` | Agentic plus native Data document support using async PyMongo, without Motor |
+| `agentic-security` | cryptography for at-rest encryption |
+| `agentic-script-execution` | pydantic-monty sandbox |
+| `agentic-embeddings` | NumPy for in-memory vector math |
+| `agentic-openai-embeddings` | OpenAI embedding client |
+| `agentic-azure-embeddings` | Azure embedding client |
+| `agentic-cohere-embeddings` | Cohere embedding client |
+| `agentic-google-embeddings` | Google embedding client |
+| `agentic-mistral-embeddings` | Mistral embedding client |
+| `agentic-voyage-embeddings` | Voyage embedding client |
+| `agentic-bedrock-embeddings` | AWS Bedrock embedding client |
+| `agentic-ollama-embeddings` | Ollama HTTP embedding client |
+| `agentic-vectorstores-chroma` | Chroma vector-store client |
+| `agentic-vectorstores-sqlite-vec` | sqlite-vec local store |
+| `agentic-vectorstores-pinecone` | Pinecone vector-store client |
+| `agentic-vectorstores-qdrant` | Qdrant vector-store client |
+| `agentic-vectorstores-pgvector` | Agentic plus native Data relational/PostgreSQL dependencies for borrowed pgvector sessions |
+| `agentic-watch` | watchfiles source watching |
+| `agentic-binary` | PDF, image, HEIF, archive and Outlook-message normalization |
+| `agentic-reasoning-eval` | NumPy / pandas reasoning comparisons |
+| `agentic-evaluation` | Ragas / LangChain evaluation adapters; see [constraints](../migration.md#optional-evaluation-dependencies) |
+| `agentic-dev` | Migrated Agentic development tools |
+| `agentic-all` | Runtime integrations; excludes reasoning-eval, evaluation and dev |
+
+PyFly's existing extras such as `postgres`, `security`, `full`, and `dev` retain
+their existing meanings. Use the `agentic-` prefix for Agentic integrations. Full
+framework installation does not enable Agentic; installation and activation are
+separate choices. Optional external tools such as LibreOffice and Gotenberg are
+still required only by the binary converter that uses them.
+
+## Activate and verify
+
+For a PyFly application, enable the module explicitly:
+
+```yaml
+pyfly:
+  agentic:
+    enabled: true
+    default_model: openai-responses:gpt-6-luna
+```
+
+Provider credentials stay in environment variables such as `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY`. Test models need no credentials. The module is disabled by
+default. Enabling it without the `agentic` dependencies produces a startup error
+that identifies the missing installation.
+
+```bash
+python -c "from importlib.metadata import version; from pyfly.agentic.agents import Agent; print(version('pyfly'))"
+```
+
+## Uninstall
+
+Remove the `pyfly` distribution from this environment with
+`python -m pip uninstall pyfly`, or remove the local dependency from your application
+manifest and resolve again. This removes the whole framework package; individual
+extras are dependency selections, not separately uninstallable distributions.
+Preserve application data and external resources according to your retention policy.
+
+Next: [native DI and lifecycle](../native-runtime.md),
+[quick start](quickstart.md), or [migration](../migration.md).
+
+## Monty interpreter compatibility
+
+The native `agentic-script-execution` extra pins **`pydantic-monty==0.0.18`**, the
+interpreter API used by the preserved sandbox implementation. Later Monty 1.x
+releases expose a worker-pool constructor and remove the `run_async` interpreter
+API; they are not drop-in replacements. Retain the declared pin when resolving
+dependencies and qualify any future adapter upgrade with the execution contracts.
+
+## Qualified dependency baseline
+
+Native Agentic pins **Pydantic AI 2.55.0**, matching the source-qualified API and
+provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.18**.
+The optional `agentic-evaluation` extra requires **datasets >=5.0.1** so resolution
+does not fall back to an incompatible older dependency graph. Preserve these
+constraints when locking an application; a dependency change needs its own
+compatibility qualification.

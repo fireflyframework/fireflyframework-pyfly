@@ -29,6 +29,7 @@ from starlette.types import Scope
 if TYPE_CHECKING:
     from pyfly.admin.config import AdminProperties
     from pyfly.admin.middleware.trace_collector import TraceCollectorFilter
+    from pyfly.admin.providers.agentic_provider import AgenticProvider
     from pyfly.admin.providers.beans_provider import BeansProvider
     from pyfly.admin.providers.cache_provider import CacheProvider
     from pyfly.admin.providers.config_provider import ConfigProvider
@@ -97,6 +98,7 @@ class AdminRouteBuilder:
         observability: ObservabilityProvider | None = None,
         instance_registry: InstanceRegistry | None = None,
         flags: FlagsProvider | None = None,
+        agentic: AgenticProvider | None = None,
     ) -> None:
         self._props = properties
         self._overview = overview
@@ -120,6 +122,7 @@ class AdminRouteBuilder:
         self._observability = observability
         self._instance_registry = instance_registry
         self._flags = flags
+        self._agentic = agentic
 
     def _auth_failure(self) -> JSONResponse | None:
         """Return a 401/403 response when require_auth is on and the caller lacks
@@ -195,6 +198,9 @@ class AdminRouteBuilder:
             (f"{api}/caches/keys", self._handle_cache_keys, ["GET"]),
             (f"{api}/caches/{{name}}/evict", self._handle_cache_evict, ["POST"]),
             (f"{api}/cqrs", self._handle_cqrs, ["GET"]),
+            (f"{api}/agentic", self._handle_agentic, ["GET"]),
+            (f"{api}/agentic/agents/{{name:path}}", self._handle_agentic_agent, ["GET"]),
+            (f"{api}/agentic/tools/{{name:path}}", self._handle_agentic_tool, ["GET"]),
             (f"{api}/transactions", self._handle_transactions, ["GET"]),
             (f"{api}/traces", self._handle_traces, ["GET"]),
             (f"{api}/logfile", self._handle_logfile, ["GET"]),
@@ -363,6 +369,23 @@ class AdminRouteBuilder:
         status, payload = await self._flags.execute(request.path_params["key"], body)
         return JSONResponse(payload, status_code=status)
 
+    async def _handle_agentic(self, request: Request) -> JSONResponse:
+        if self._agentic is None or not self._agentic.available:
+            return JSONResponse({"available": False}, status_code=404)
+        return JSONResponse(await self._agentic.get_overview())
+
+    async def _handle_agentic_agent(self, request: Request) -> JSONResponse:
+        detail = await self._agentic.get_agent(request.path_params["name"]) if self._agentic is not None else None
+        if detail is None:
+            return JSONResponse({"error": "Agent not found"}, status_code=404)
+        return JSONResponse(detail)
+
+    async def _handle_agentic_tool(self, request: Request) -> JSONResponse:
+        detail = await self._agentic.get_tool(request.path_params["name"]) if self._agentic is not None else None
+        if detail is None:
+            return JSONResponse({"error": "Tool not found"}, status_code=404)
+        return JSONResponse(detail)
+
     async def _handle_cqrs(self, request: Request) -> JSONResponse:
         return JSONResponse(await self._cqrs.get_handlers())
 
@@ -413,6 +436,7 @@ class AdminRouteBuilder:
                 "theme": self._props.theme,
                 "refreshInterval": self._props.refresh_interval,
                 "serverMode": self._instance_registry is not None,
+                "agenticEnabled": self._agentic is not None and self._agentic.available,
                 "dataEnabled": str(self._props.data.get("enabled", False)).lower() in ("true", "1", "yes"),
             }
         )

@@ -1,0 +1,321 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from pyfly.agentic.storage import (
+    DatabaseStore,
+    RetryPolicy,
+    StorageLeaseError,
+    StorageTransientError,
+    StorageUploadError,
+)
+from pyfly.agentic.storage.database_store import _checkpoint_wal
+from tests.agentic.unit.storage._fakes import InMemoryBackend
+
+
+@pytest.fixture
+def store_factory(tmp_path: Path):
+    def _make(*, retry_policy: RetryPolicy | None = None) -> tuple[DatabaseStore, InMemoryBackend]:
+        backend = InMemoryBackend()
+        store = DatabaseStore(
+            backend,
+            store_id="t",
+            cache_root=tmp_path,
+            retry_policy=retry_policy,
+        )
+        return store, backend
+
+    return _make
+
+
+def _write_sample(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE IF NOT EXISTS t (v BLOB)")
+    conn.execute("INSERT INTO t VALUES (?)", (payload,))
+    conn.commit()
+    conn.close()
+
+
+async def test_for_write_first_run_uploads(store_factory) -> None:
+    store, backend = store_factory()
+    async with store.for_write() as session:
+        _write_sample(session.path, b"hello")
+    assert backend.uploads == 1
+    assert backend.downloads == 0
+
+
+async def test_for_write_skips_download_when_etag_matches(store_factory) -> None:
+    store, backend = store_factory()
+    async with store.for_write() as session:
+        _write_sample(session.path, b"v1")
+    # Second batch from same store: cached etag matches remote.
+    async with store.for_write() as session:
+        _write_sample(session.path, b"v2")
+    assert backend.downloads == 0
+    assert backend.uploads == 2
+
+
+async def test_for_write_downloads_when_remote_changed(tmp_path: Path) -> None:
+    backend = InMemoryBackend()
+    store_a = DatabaseStore(backend, store_id="a", cache_root=tmp_path / "a")
+    store_b = DatabaseStore(backend, store_id="b", cache_root=tmp_path / "b")
+    async with store_a.for_write() as session:
+        _write_sample(session.path, b"x")
+    # store_b has never seen the blob — must download.
+    async with store_b.for_write() as session:
+        _write_sample(session.path, b"y")
+    assert backend.downloads == 1
+
+
+async def test_for_write_exception_does_not_upload(store_factory) -> None:
+    store, backend = store_factory()
+    raised = False
+    try:
+        async with store.for_write() as _session:
+            raise RuntimeError("boom")
+    except RuntimeError:
+        raised = True
+    assert raised, "for_write must propagate RuntimeError from the body"
+    assert backend.uploads == 0
+
+
+async def test_terminal_upload_failure_repulls_and_raises(store_factory) -> None:
+    store, backend = store_factory(retry_policy=RetryPolicy(max_attempts=2, initial_backoff_s=0.0))
+    # First batch succeeds — establishes a remote blob.
+    async with store.for_write() as session:
+        _write_sample(session.path, b"ok")
+    # Next batch's uploads all fail terminally.
+    backend.upload_failures = [
+        StorageTransientError("503"),
+        StorageTransientError("503"),
+    ]
+    with pytest.raises(StorageUploadError):
+        async with store.for_write() as session:
+            _write_sample(session.path, b"will-be-discarded")
+    # Cache was re-pulled to remote state.
+    assert backend.downloads == 1
+
+
+async def test_ensure_fresh_returns_path_and_generation(store_factory, tmp_path: Path) -> None:
+    store, backend = store_factory()
+    async with store.for_write() as session:
+        _write_sample(session.path, b"hello")
+    path1, gen1 = await store.ensure_fresh()
+    path2, gen2 = await store.ensure_fresh()
+    assert path1 == path2
+    assert gen1 == gen2  # within freshness window, no HEAD
+
+
+async def test_ensure_fresh_bumps_generation_when_remote_moves(tmp_path: Path) -> None:
+    backend = InMemoryBackend()
+    writer = DatabaseStore(backend, store_id="w", cache_root=tmp_path / "w", read_freshness_seconds=0.0)
+    reader = DatabaseStore(backend, store_id="r", cache_root=tmp_path / "r", read_freshness_seconds=0.0)
+    async with writer.for_write() as session:
+        _write_sample(session.path, b"v1")
+    _, g1 = await reader.ensure_fresh()
+    async with writer.for_write() as session:
+        _write_sample(session.path, b"v2")
+    _, g2 = await reader.ensure_fresh()
+    assert g2 > g1
+
+
+async def test_dirty_recovery_redownloads_on_next_for_write(store_factory, tmp_path: Path) -> None:
+    store, backend = store_factory()
+    async with store.for_write() as session:
+        _write_sample(session.path, b"ok")
+    # Simulate a crash: leave dirty=True in the sidecar.
+    sidecar = tmp_path / "t" / "metadata.json"
+    data = json.loads(sidecar.read_text())
+    data["dirty"] = True
+    sidecar.write_text(json.dumps(data))
+    # Local cache also locally-mutated to ensure download overwrites it.
+    cache_path = tmp_path / "t" / "db.sqlite"
+    cache_path.write_bytes(b"local-only-garbage")
+    async with store.for_write() as session:
+        # Inside the with block, the file should be the remote contents,
+        # not the garbage we wrote.
+        assert session.path.read_bytes() != b"local-only-garbage"
+        _write_sample(session.path, b"ok2")
+    assert backend.downloads == 1
+
+
+async def test_retry_policy_eventual_success(store_factory) -> None:
+    store, backend = store_factory(retry_policy=RetryPolicy(max_attempts=3, initial_backoff_s=0.0))
+    backend.upload_failures = [StorageTransientError("503"), StorageTransientError("503")]
+    async with store.for_write() as session:
+        _write_sample(session.path, b"v")
+    assert backend.uploads == 1
+
+
+async def test_close_is_idempotent(store_factory) -> None:
+    store, _ = store_factory()
+    await store.close()
+    await store.close()
+
+
+async def test_for_write_surfaces_lease_renew_failure(tmp_path: Path) -> None:
+    """When a backend records a lease-renew failure, the next operation
+    must surface it as StorageLeaseError, not silently proceed."""
+    backend = InMemoryBackend()
+    # Simulate the error that AzureBlobBackend._renew_loop would surface:
+    # inject a StorageLeaseError into the upload-failures queue so the
+    # backend raises it on the upload step of for_write().
+    # StorageLeaseError is not in RetryPolicy.retry_on, so it
+    # short-circuits the retry loop and surfaces as StorageUploadError.
+    backend.upload_failures = [StorageLeaseError("lease renewal failed mid-operation")]
+    store = DatabaseStore(
+        backend,
+        store_id="lf",
+        cache_root=tmp_path,
+        retry_policy=RetryPolicy(max_attempts=1, initial_backoff_s=0.0),
+    )
+    with pytest.raises(StorageUploadError) as exc_info:
+        async with store.for_write() as session:
+            session.path.touch()
+    # The terminal upload failure wraps the original lease error
+    assert isinstance(exc_info.value.__cause__, StorageLeaseError)
+
+
+# ---------- _checkpoint_wal direct tests ----------
+
+
+def test_checkpoint_wal_flushes_uncommitted_frames(tmp_path: Path) -> None:
+    """_checkpoint_wal must move WAL contents into the main DB file so a
+    later reader that ignores the WAL sidecar (e.g. a shutil.copyfile that
+    only copies the main file) sees the committed rows."""
+    db_path = tmp_path / "x.sqlite"
+    # Write some data via WAL, then close (leaving sidecars on disk).
+    writer = sqlite3.connect(db_path, isolation_level=None)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    writer.execute("BEGIN")
+    writer.execute("INSERT INTO t VALUES (1)")
+    writer.execute("INSERT INTO t VALUES (2)")
+    writer.execute("COMMIT")
+    writer.close()
+
+    # Simulate the upload path: copy ONLY the main DB file (no -wal/-shm).
+    copied = tmp_path / "uploaded.sqlite"
+    import shutil
+
+    shutil.copyfile(db_path, copied)
+
+    # Without _checkpoint_wal, the copy may be missing rows.
+    # Run _checkpoint_wal on the source first, then re-copy.
+    _checkpoint_wal(db_path)
+    shutil.copyfile(db_path, copied)
+
+    reader = sqlite3.connect(copied)
+    rows = reader.execute("SELECT id FROM t ORDER BY id").fetchall()
+    reader.close()
+    assert rows == [(1,), (2,)]
+
+
+def test_checkpoint_wal_returns_silently_on_missing_path(tmp_path: Path) -> None:
+    """No file at the path is a no-op, not an error."""
+    _checkpoint_wal(tmp_path / "does-not-exist.sqlite")  # must not raise
+
+
+def test_checkpoint_wal_logs_error_on_non_sqlite_file(tmp_path: Path, caplog) -> None:
+    """A non-SQLite file should produce an ERROR-level log, not raise.
+
+    The docstring promises 'failures are logged but not raised' so the upload
+    can still proceed; the log level is ERROR because checkpoint failure
+    means silent data loss in the uploaded artifact.
+    """
+    bogus = tmp_path / "bogus.sqlite"
+    bogus.write_bytes(b"not a sqlite database")
+    with caplog.at_level("ERROR"):
+        _checkpoint_wal(bogus)  # must not raise
+    assert any("WAL checkpoint failed" in rec.message and rec.levelname == "ERROR" for rec in caplog.records)
+
+
+# ---- Co-location with LocalBackend --------------------------------------
+#
+# When the backend exposes a ``local_path``, ``DatabaseStore``'s working
+# copy MUST live at that same path. The whole point is that operations on
+# the backend file (``rm``, ``cp``, ``tar``) reach the state the running
+# Python process actually reads and writes. The user-visible bug this
+# guards: "I deleted my CORPUS_ROOT but the dedup ledger still skipped
+# every file."
+
+
+async def test_database_store_co_locates_with_local_backend(tmp_path: Path) -> None:
+    """No ``cache_path`` and no ``cache_root`` → cache lives at
+    backend.local_path, not in ``~/.cache/``.
+    """
+    from pyfly.agentic.storage import LocalBackend
+
+    backing = tmp_path / "kg" / "corpus.sqlite"
+    backing.parent.mkdir(parents=True)
+    backend = LocalBackend(backing)
+    store = DatabaseStore(backend, store_id="t")
+    assert store.cache_path == backing
+    # Sidecar pairs with the SQLite by basename so multiple stores in the
+    # same dir don't fight over metadata.json.
+    expected_sidecar = backing.parent / "corpus.sqlite.metadata.json"
+    assert store._sidecar._path == expected_sidecar  # type: ignore[attr-defined]
+
+
+async def test_database_store_explicit_cache_path_wins(tmp_path: Path) -> None:
+    """Explicit ``cache_path`` overrides the backend's hint."""
+    from pyfly.agentic.storage import LocalBackend
+
+    backing = tmp_path / "backend.sqlite"
+    override = tmp_path / "override.sqlite"
+    backend = LocalBackend(backing)
+    store = DatabaseStore(backend, store_id="t", cache_path=override)
+    assert store.cache_path == override
+
+
+async def test_database_store_falls_back_to_cache_root_for_remote_backend(tmp_path: Path) -> None:
+    """Remote backends (no ``local_path``) keep the legacy cache-dir layout.
+
+    This is load-bearing for AzureBlobBackend: its remote storage isn't a
+    local file, so the working copy MUST be a separate local cache.
+    """
+    backend = InMemoryBackend()
+    assert backend.local_path is None  # default from StorageBackend
+    store = DatabaseStore(backend, store_id="t", cache_root=tmp_path)
+    assert store.cache_path == tmp_path / "t" / "db.sqlite"
+    assert store._sidecar._path == tmp_path / "t" / "metadata.json"  # type: ignore[attr-defined]
+
+
+async def test_co_located_first_write_succeeds(tmp_path: Path) -> None:
+    """First-write path doesn't trip the ``if_none_match=*`` check.
+
+    With co-location, ``for_write``'s ``first_write`` branch touches the
+    cache file, which IS the backend file. The subsequent
+    ``upload(if_none_match='*')`` would historically fail because the
+    file now exists. The same-inode short-circuit in
+    ``LocalBackend._upload_sync`` makes the conditional vacuous and the
+    write succeeds.
+    """
+    from pyfly.agentic.storage import LocalBackend
+
+    backing = tmp_path / "corpus.sqlite"
+    backend = LocalBackend(backing)
+    store = DatabaseStore(backend, store_id="t")
+    async with store.for_write() as session:
+        _write_sample(session.path, b"hello")
+    assert backing.exists()
+    assert session.path == backing

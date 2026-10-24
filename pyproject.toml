@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.10.7"
+version = "26.10.8"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -37,6 +37,124 @@ Organization = "https://github.com/fireflyframework"
 Issues = "https://github.com/fireflyframework/fireflyframework-pyfly/issues"
 
 [project.optional-dependencies]
+
+# Native Agentic runtime and opt-in provider/storage integrations.
+agentic = [
+    "pydantic-ai[ag-ui,bedrock,cohere,groq,huggingface,mistral,retries,spec,temporal,ui,xai]==2.55.0",
+    "pydantic>=2.13,<3",
+    "pydantic-settings>=2.14.2,<3",
+    "jinja2>=3.1.0",
+    "httpx>=0.28.0",
+    "opentelemetry-api>=1.29.0",
+    "opentelemetry-sdk>=1.29.0",
+    "genai-prices>=0.1.9,<0.2",
+    "markdown-it-py>=3.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+]
+agentic-relational = [
+    "pyfly[agentic,data-relational]",
+]
+agentic-postgres = [
+    "pyfly[agentic,data-relational,postgresql]",
+]
+agentic-mongodb = [
+    "pyfly[agentic,data-document]",
+]
+agentic-security = [
+    "pyfly[agentic]",
+    "cryptography>=50.0.0",
+]
+agentic-script-execution = [
+    "pyfly[agentic]",
+    "pydantic-monty==0.0.18",
+]
+agentic-embeddings = [
+    "pyfly[agentic]",
+    "numpy>=1.26.0",
+]
+agentic-openai-embeddings = [
+    "pyfly[agentic]",
+    "openai>=1.0.0",
+]
+agentic-cohere-embeddings = [
+    "pyfly[agentic]",
+    "cohere>=5.0.0",
+]
+agentic-google-embeddings = [
+    "pyfly[agentic]",
+    "google-generativeai>=0.8.0",
+]
+agentic-mistral-embeddings = [
+    "pyfly[agentic]",
+    "mistralai>=1.0.0",
+]
+agentic-voyage-embeddings = [
+    "pyfly[agentic]",
+    "voyageai>=0.3.0",
+]
+agentic-azure-embeddings = [
+    "pyfly[agentic]",
+    "openai>=1.0.0",
+]
+agentic-bedrock-embeddings = [
+    "pyfly[agentic]",
+    "boto3>=1.35.0",
+]
+agentic-ollama-embeddings = [
+    "pyfly[agentic]",
+    "httpx>=0.28.0",
+]
+agentic-reasoning-eval = [
+    "pyfly[agentic]",
+    "numpy>=2.0.0",
+    "pandas>=2.2.0",
+]
+agentic-vectorstores-chroma = [
+    "pyfly[agentic]",
+    "chromadb>=0.5.0",
+]
+agentic-vectorstores-sqlite-vec = [
+    "pyfly[agentic]",
+    "sqlite-vec>=0.1.6",
+]
+agentic-vectorstores-pinecone = [
+    "pyfly[agentic]",
+    "pinecone>=5.0.0",
+]
+agentic-vectorstores-qdrant = [
+    "pyfly[agentic]",
+    "qdrant-client>=1.12.0",
+]
+agentic-vectorstores-pgvector = [
+    "pyfly[agentic,data-relational,postgresql]",
+]
+agentic-watch = [
+    "pyfly[agentic]",
+    "watchfiles>=0.24.0",
+]
+agentic-binary = [
+    "pyfly[agentic]",
+    "pypdf>=6.19.0",
+    "Pillow>=12.3.0",
+    "pillow-heif>=0.18",
+    "cairosvg>=2.9.1",
+    "py7zr>=1.1.4",
+    "extract-msg>=0.51",
+]
+agentic-all = [
+    "pyfly[agentic,agentic-postgres,agentic-mongodb,agentic-security,agentic-embeddings,agentic-openai-embeddings,agentic-cohere-embeddings,agentic-google-embeddings,agentic-mistral-embeddings,agentic-voyage-embeddings,agentic-azure-embeddings,agentic-bedrock-embeddings,agentic-ollama-embeddings,agentic-vectorstores-chroma,agentic-vectorstores-pinecone,agentic-vectorstores-qdrant,agentic-vectorstores-pgvector,agentic-vectorstores-sqlite-vec,agentic-watch,agentic-binary,agentic-script-execution]",
+]
+agentic-evaluation = [
+    "pyfly[agentic]",
+    "numpy>=1.26.0",
+    "ragas>=0.2.6,<0.2.7",
+    "datasets>=5.0.1",
+    "langchain-community>=0.3.31,<0.4",
+    "langchain-anthropic>=0.3",
+    "langchain-ollama>=0.3",
+    "langchain-openai>=0.3",
+]
 templates = ["jinja2>=3.1.6"]
 webapp = ["pyfly[web,templates,security]"]
 web = [
@@ -182,6 +300,18 @@ full = [
 ]
 
 [dependency-groups]
+agentic-dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "pytest-benchmark>=5.0.0",
+    "testcontainers>=4.10.0",
+    "ruff>=0.9.0",
+    "pyright>=1.1.0",
+    "httpx>=0.28.0",
+    "pdfplumber>=0.11.0",
+    "pre-commit>=3.8.0",
+]
 browser = ["playwright>=1.63.0"]
 dev = [
     "pytest>=9.1.1",
@@ -204,6 +334,7 @@ dev = [
 ]
 
 [project.entry-points."pyfly.auto_configuration"]
+agentic = "pyfly.agentic.auto_configuration:AgenticAutoConfiguration"
 templates = "pyfly.web.templating.auto_configuration:TemplateAutoConfiguration"
 web = "pyfly.web.auto_configuration:WebAutoConfiguration"
 cache = "pyfly.cache.auto_configuration:CacheAutoConfiguration"
@@ -272,13 +403,28 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyfly"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "**/.venv*/**",
+    "**/venv/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "/book/dist/**",
+    "/book/release-output/**",
+    "/book/release-qa/**",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 # Integration tests (tests/integration/, marker auto-applied) are deselected by default so the
 # fast suite stays mock/fake-based. Run them explicitly with: pytest -m integration
-addopts = "-v --tb=short -m 'not integration and not browser'"
+addopts = "-v --tb=short -m 'not integration and not browser and not nightly and not ollama'"
 markers = [
+    "ollama: explicitly requested live tests against a local Ollama server and installed models.",
+    "nightly: agentic live-provider, long-running or benchmark tests; run explicitly.",
     "browser: live browser and isolated application tests; install the browser dependency group and Chromium.",
     "integration: real-backend test via testcontainers or a real transport; needs Docker. Deselected by default — run with -m integration.",
     "docker: informational marker for Docker-backed tests; apply ALONGSIDE 'integration' (it does not by itself control default selection).",

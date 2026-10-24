@@ -203,3 +203,16 @@ pyfly:
 |-----------|---------------|
 | `ExtensionRegistry` | `extension_registry()` |
 | `PluginManager` | `plugin_manager(registry)` |
+
+
+## Agentic plugin groups
+
+Agentic extensions use `pyfly.agentic.agents`, `pyfly.agentic.tools` and `pyfly.agentic.reasoning_patterns`. Run discovery inside the intended runtime activation scope. These groups are distinct from the framework `pyfly.auto_configuration` group and this general plugin SPI. See [native plugin ownership](agentic/native-runtime.md#telemetry-and-plugins) and the [migration checklist](agentic/migration.md).
+
+Managed Agentic startup constructs exported classes/factories through the native
+Container with typed constructor/factory injection. Registered beans are borrowed;
+new plugin resources receive post-construct/start and pre-destroy/close lifecycle
+once. Agent factories must return an Agent bound to the injected `AgentFactory`.
+Static tools/patterns are copied for application isolation; use classes/factories
+for managed resource lifetime. Raw discovery alone loads entry points and does
+not perform this managed composition.

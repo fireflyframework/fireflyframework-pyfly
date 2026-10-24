@@ -517,7 +517,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.10.07
+    ✓ pyfly v26.10.08
 
   All checks passed!
 ```
@@ -606,3 +606,8 @@ uv remove pyfly
 # Or with pip:
 pip uninstall pyfly
 ```
+
+
+## Agentic extras
+
+Agentic is opt-in: from a native source checkout use `python -m pip install -e ".[agentic]"`, then set `pyfly.agentic.enabled: true`. Add namespaced integrations such as `agentic-relational`, `agentic-postgres`, `agentic-binary` or `agentic-all`; existing PyFly extras keep their meanings. See the [complete extras table and source-installation status](modules/agentic/getting-started/installation.md). The standalone Agentic installer does not install this native module.

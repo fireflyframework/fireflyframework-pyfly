@@ -57,6 +57,11 @@ parts:
       - {id: ch16, file: 16-testing.md, num: 16, title: "Pruebas de Aplicaciones PyFly", opener: art/openers/ch16.svg}
       - {id: ch17, file: 17-scheduling-notifications.md, num: 17, title: "Programación, Notificaciones, Webhooks y Callbacks", opener: art/openers/ch17.svg}
       - {id: ch18, file: 18-production.md, num: 18, title: "Extender PyFly y Llevarlo a Producción", opener: art/openers/ch18.svg}
+  - title: "Parte VI — Asistencia Agéntica Nativa"
+    chapters:
+      - {id: ch19, file: 19-agentic-agents.md, num: 19, title: "Agentes y Herramientas en Lumen"}
+      - {id: ch20, file: 20-agentic-knowledge.md, num: 20, title: "Conocimiento y Razonamiento"}
+      - {id: ch21, file: 21-agentic-workflows.md, num: 21, title: "Workflows Agénticos y Operación"}
   - title: "Apéndices"
     chapters:
       - {id: appa, file: 90-appendix-a-spring.md,  num: "A", title: "Chuleta de Spring Boot → PyFly"}

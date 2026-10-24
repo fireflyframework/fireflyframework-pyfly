@@ -1,0 +1,193 @@
+{
+  "source_repository": "https://github.com/fireflyframework/fireflyframework-agentic",
+  "source_commit": "f4234f9e481dd9c54e10048a2d67f7216a75f9e1",
+  "license": "Apache-2.0; vendored font and icon notices retained beside sources",
+  "pages": [
+    {
+      "source": "docs/README.md",
+      "target": "docs/modules/agentic/catalogue.md",
+      "source_sha256": "3aeb10aad9fc47261c4debf6249455c693280ea3c7705d4e598743549421166d"
+    },
+    {
+      "source": "docs/agents.md",
+      "target": "docs/modules/agentic/agents.md",
+      "source_sha256": "54364b8824675a807e4c12448c900e2d249fdf167a684c6df179b7b75fce51fe"
+    },
+    {
+      "source": "docs/architecture.md",
+      "target": "docs/modules/agentic/architecture.md",
+      "source_sha256": "4b3b7f60333c43567c740c6d01f718ef1abe7c1ac4eec933f92473cf74c8234b"
+    },
+    {
+      "source": "docs/changelog.md",
+      "target": "docs/modules/agentic/changelog.md",
+      "source_sha256": "2b13b5c9158106d906400d7c98de6bbe69f023ddc2b489f38b912195d273f672"
+    },
+    {
+      "source": "docs/content.md",
+      "target": "docs/modules/agentic/content.md",
+      "source_sha256": "0bf8aefe1d4c3e44b5c65fe31453d3a12a4978b28448f962661757862a24aa7c"
+    },
+    {
+      "source": "docs/dependency-upgrade-26101.md",
+      "target": "docs/modules/agentic/dependency-upgrade-26101.md",
+      "source_sha256": "2b37e0fe1ece3807e8389d8511950a3aeb0cded293b345e1570a4da8100c0855"
+    },
+    {
+      "source": "docs/diagrams.md",
+      "target": "docs/modules/agentic/diagrams.md",
+      "source_sha256": "a086b3049ceb879596a866675e20f9e7995afe3674ab2e7df8d9ea3c0964bdfd"
+    },
+    {
+      "source": "docs/embeddings.md",
+      "target": "docs/modules/agentic/embeddings.md",
+      "source_sha256": "c5bcf05e91d714aea4372bcf106b5ece87a0f12bf3148cb68f3c2ff96aac1f51"
+    },
+    {
+      "source": "docs/evaluation.md",
+      "target": "docs/modules/agentic/evaluation.md",
+      "source_sha256": "bbcc44710b038f177898a858bb8407e4a78ee67198819481ac472b091f75dc93"
+    },
+    {
+      "source": "docs/execution.md",
+      "target": "docs/modules/agentic/execution.md",
+      "source_sha256": "647d3942ecc39c6b63c9092ab60820418820fc163f410d5724b863bf0799b664"
+    },
+    {
+      "source": "docs/experiments.md",
+      "target": "docs/modules/agentic/experiments.md",
+      "source_sha256": "ccdd4021a4bd833523f71656a08a330a4db5b454a739686f4c1eed154ceb7968"
+    },
+    {
+      "source": "docs/explainability.md",
+      "target": "docs/modules/agentic/explainability.md",
+      "source_sha256": "3147c9f06fcf0c1beb98b17af215f6a169e2867d5698a32afa88ad1df1223937"
+    },
+    {
+      "source": "docs/getting-started/installation.md",
+      "target": "docs/modules/agentic/getting-started/installation.md",
+      "source_sha256": "4284eb05f66e8043a74b389cc989a6d4936fe59dff0c4dae904a78a29cef0ef0"
+    },
+    {
+      "source": "docs/getting-started/jupyter.md",
+      "target": "docs/modules/agentic/getting-started/jupyter.md",
+      "source_sha256": "c88f04f1a827f0d48f216096691091c9ca7a68f5d1abd44067c287011aa759ce"
+    },
+    {
+      "source": "docs/getting-started/quickstart.md",
+      "target": "docs/modules/agentic/getting-started/quickstart.md",
+      "source_sha256": "7f4808c64ff0fae07bf1cf8b76cf5e5625d2c4120090b799141e10a687e24591"
+    },
+    {
+      "source": "docs/index.md",
+      "target": "docs/modules/agentic/index.md",
+      "source_sha256": "6a06a210de11f7d6bd4f112ef583ee948b3bd77bfb22be290bd5d3904e5bdeb3"
+    },
+    {
+      "source": "docs/lab.md",
+      "target": "docs/modules/agentic/lab.md",
+      "source_sha256": "a4f4ab6993aa4e7e422a1943f2c65341140012647a802688963de7e0a195720f"
+    },
+    {
+      "source": "docs/memory.md",
+      "target": "docs/modules/agentic/memory.md",
+      "source_sha256": "462c225abf8e73db8a00d7d777a2c309401af4bef2800f9904c8aa182fd8a1b6"
+    },
+    {
+      "source": "docs/migration.md",
+      "target": "docs/modules/agentic/migration.md",
+      "source_sha256": "c9e28815da79f39982d65e828a2e273ce407fa282dd3c7dfa437ec2a8def20f1"
+    },
+    {
+      "source": "docs/models.md",
+      "target": "docs/modules/agentic/models.md",
+      "source_sha256": "ec25f42d49dec1acb554eeb1727027040428b48c9bf453326e611e0ff38cc74c"
+    },
+    {
+      "source": "docs/observability.md",
+      "target": "docs/modules/agentic/observability.md",
+      "source_sha256": "3e07ce7375dd16dc5e4535c159262284217176bfeb1f5dfe9aa0460dae9d8a68"
+    },
+    {
+      "source": "docs/pg-vectorsearch-evaluation.md",
+      "target": "docs/modules/agentic/pg-vectorsearch-evaluation.md",
+      "source_sha256": "050786e62f1c64f60532afd6e6c6f427e67ddc20141786d8e961510e87f61e81"
+    },
+    {
+      "source": "docs/pipeline.md",
+      "target": "docs/modules/agentic/pipeline.md",
+      "source_sha256": "e91e96979356092480db4dbad71d869b959e1755deffb7e09c5066b35768cb9d"
+    },
+    {
+      "source": "docs/prompts.md",
+      "target": "docs/modules/agentic/prompts.md",
+      "source_sha256": "b9fcf134512dbfedb044e660862ad107736cba721df5258da43b8669d63c1d8c"
+    },
+    {
+      "source": "docs/reasoning.md",
+      "target": "docs/modules/agentic/reasoning.md",
+      "source_sha256": "60bc000989ceb54d14aa0b84a103494e845cc9e3ba9e16583b4f56a93478c680"
+    },
+    {
+      "source": "docs/resilience.md",
+      "target": "docs/modules/agentic/resilience.md",
+      "source_sha256": "f4d5545612e32504956fca1adfe10bfdc01110461f6916fb78a3fabef31e2700"
+    },
+    {
+      "source": "docs/security.md",
+      "target": "docs/modules/agentic/security.md",
+      "source_sha256": "593af1c91bedfa6cca93acacd9b797fad4623e13247b22db60724e66550a4531"
+    },
+    {
+      "source": "docs/skills.md",
+      "target": "docs/modules/agentic/skills.md",
+      "source_sha256": "fc0be89ed228ab7ea208db1a9ee7208b4d8c00b920852d659b9751a44d5feeef"
+    },
+    {
+      "source": "docs/storage.md",
+      "target": "docs/modules/agentic/storage.md",
+      "source_sha256": "52bf0df63cb0cfb921bd47f228216fd19fe674c4f097ea5ee3a6a4837823bf7b"
+    },
+    {
+      "source": "docs/templates.md",
+      "target": "docs/modules/agentic/templates.md",
+      "source_sha256": "7d2dda4d63ce71105fd454f059fd0cd316c759b8610ab2e123398c043cbf25c9"
+    },
+    {
+      "source": "docs/tools.md",
+      "target": "docs/modules/agentic/tools.md",
+      "source_sha256": "4741d466d4cf4acca7e95f02523847775550c600bf72b90fda2ad16493792c42"
+    },
+    {
+      "source": "docs/tutorial.md",
+      "target": "docs/modules/agentic/tutorial.md",
+      "source_sha256": "6c9bfe1b8c26a017b9f8f65bba2b79202cc9d91f78571b248e4c47b19c7ead6d"
+    },
+    {
+      "source": "docs/use-case-idp.md",
+      "target": "docs/modules/agentic/use-case-idp.md",
+      "source_sha256": "7ca3fce5adfe24ed4da3dff27340ac8c0675ac11dd863211af49e43b4401f839"
+    },
+    {
+      "source": "docs/validation.md",
+      "target": "docs/modules/agentic/validation.md",
+      "source_sha256": "75ab22295102333375e6a63f88d5dab8728ea3298afa75b0acdeb35f81e0c42f"
+    },
+    {
+      "source": "docs/vectorstores.md",
+      "target": "docs/modules/agentic/vectorstores.md",
+      "source_sha256": "a89cd1b4d67d0142db3c652c1bfb958b34fc4a4959d1e69467a7c088da512b6f"
+    },
+    {
+      "source": "docs/workflows.md",
+      "target": "docs/modules/agentic/workflows.md",
+      "source_sha256": "850dc074ea9e4dd2595b4c80be4a374422392d0a22b4a50bce51ee97a90f54df"
+    }
+  ],
+  "asset_adaptations": [
+    "Generator writes inside docs/modules/agentic/assets only; original palette, geometry, canonical marks and font/icon attribution retained.",
+    "Generated capability diagram repository label is pyfly.agentic instead of the historical standalone distribution name.",
+    "Source font and vendored identity notices are preserved; PyFly site header/theme remain unchanged.",
+    "Capability figures use native Agent, AgentTool, ManagedAgentRunner and agent/agent_tool API labels, with PyFly Agentic product wording."
+  ]
+}

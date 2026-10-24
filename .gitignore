@@ -12,7 +12,7 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
-.venv/
+.venv*/
 venv/
 .env
 *.db
@@ -48,3 +48,4 @@ book/dist/**
 !book/dist/pyfly-by-example-es.pdf
 !book/dist/pyfly-by-example-es.epub
 book/release-output/
+book/release-qa/

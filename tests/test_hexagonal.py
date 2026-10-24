@@ -86,7 +86,10 @@ class TestVendorIsolation:
                 # So does the rollback transaction of data tests (for type checking only).
                 "and '/testing/rollback' not in l "
                 # The feature-flag store is its SQL adapter, not the flag domain.
-                "and '/feature_flags/store/sqlalchemy.py:' not in l]; "
+                "and '/feature_flags/store/sqlalchemy.py:' not in l "
+                # Agentic's native persistence adapters join PyFly Data units of work.
+                "and '/agentic/memory/relational_store.py:' not in l "
+                "and '/agentic/vectorstores/pgvector_store.py:' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],
@@ -118,7 +121,11 @@ class TestVendorIsolation:
                 "and '/ecm/adapters/' not in l "
                 "and 'web/converters' not in l "
                 # The remote feature-flag source is its HTTP adapter, not the flag domain.
-                "and '/feature_flags/sources/http.py:' not in l]; "
+                "and '/feature_flags/sources/http.py:' not in l "
+                # Agentic provider/tool/converter modules are their outbound HTTP adapters.
+                "and '/agentic/embeddings/providers/ollama.py:' not in l "
+                "and '/agentic/tools/builtins/http.py:' not in l "
+                "and '/agentic/content/binary/office_converter.py:' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
                 "sys.exit(len(bad))",
             ],

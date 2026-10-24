@@ -2448,3 +2448,14 @@ This example demonstrates:
 - **@order** (initialization ordering)
 - **Application events** (`ApplicationReadyEvent`, `ContextClosedEvent`)
 - **Component scanning** (via `scan_packages` with auto-binding)
+
+
+## Injecting Agentic services
+
+With the `agentic` extra installed and `pyfly.agentic.enabled: true`, inject `AgentFactory`, `AgenticRuntime`, `AgentRegistry`, `MemoryManager`, `UsageTracker` or `AgenticConfig` using ordinary constructor injection. Each context resolves its own runtime-owned services. User beans can override conditional defaults. See the [complete native service example](agentic/native-runtime.md#inject-the-factory-into-an-application-service).
+
+Agentic can borrow `MemoryStore`, `HttpClientPort`, `ApplicationEventPublisher`,
+`AgentEvents` and `EncryptionProvider` beans. A custom `MemoryManager` overrides
+its entire memory composition, including encryption policy. Native Data retains
+ownership of injected engines/clients; managed Agentic shutdown closes its owned
+adapters and wrappers before Data shutdown.

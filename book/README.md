@@ -1,6 +1,6 @@
 # pyfly by example
 
-The English and Spanish editions follow Lumen through 18 chapters and five parts.
+The English and Spanish editions follow Lumen through 21 chapters and six parts.
 Appendix E adds the [native catalog webapp](../samples/webapp/README.md). Appendix F
 adds [feature flags in Lumen](manuscript/96-appendix-f-feature-flags.md): an optional
 wallet offer route, shared targeting fixture, runtime gates and operator workflow.
@@ -16,6 +16,13 @@ retains its original assets. For other editions, open the
 [tagged releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
 and download the books attached to that tag.
 
+The checkout adds a final native Agentic part (Chapters 19–21): agents and tools,
+knowledge and reasoning, workflows and operations. The current native refresh adds
+async working facts in the application Data unit, encryption/migration boundaries,
+native HTTP/events/plugins and the guarded Agentic admin console. The release links above remain
+historical; they do not contain the new chapters. Locally rebuilt editions must
+record the checkout commit and dirty source hashes until a new release is published.
+
 ## Sources and examples
 
 `book.yaml` and `book.es.yaml` define chapter order and navigation. Manuscripts
@@ -24,6 +31,8 @@ and typography. Keep both editions aligned when changing behavior or examples.
 The original Lumen chapters retain their historical version references; Appendices E
 and F describe implementations in the accompanying source checkout.
 
+- [Agentic book companion](../samples/agentic-book/README.md): deterministic native agents, tools, streaming, approval, scoped retrieval, real SQLite commit/rollback and bounded workflows.
+- [Native Agentic guide](../docs/modules/agentic.md): complete API, optional adapters, configuration and migration.
 - [Lumen](../samples/lumen/README.md): wallet, ledger, domain commands, and events.
 - [Catalog](../samples/webapp/README.md): browser forms and administration sharing `Product`.
 - [Webapp reference](../docs/modules/webapps.md): APIs, configuration, security, and provider contracts.
@@ -39,6 +48,8 @@ uv pip install --python book/.venv/bin/python -r book/requirements.txt pytest
 book/.venv/bin/python book/build/verify_code.py book/manuscript
 book/.venv/bin/python book/build/verify_code.py book/manuscript-es
 book/.venv/bin/python -m pytest book/tests -q
+uv sync --project samples/agentic-book --extra dev --python 3.12
+samples/agentic-book/.venv/bin/python -m pytest samples/agentic-book/tests -q
 bash book/build/run.sh --out-dir book/release-output
 bash book/build/run.sh --config book.es.yaml --out-dir book/release-output
 book/.venv/bin/python book/build/release_assets.py create --dir book/release-output --commit "$(git rev-parse HEAD)"
@@ -47,7 +58,9 @@ book/.venv/bin/python book/build/release_assets.py verify --dir book/release-out
 
 WeasyPrint requires native Pango libraries. On macOS install the Homebrew `pango`
 package; the wrapper adds Homebrew's library directory to the process environment.
-On Linux use the distribution's Pango packages. `--out-dir` directs the four
+For direct test commands on macOS, export
+`DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib:/usr/local/lib"` first (use your
+Homebrew prefix if different). On Linux use the distribution's Pango packages. `--out-dir` directs the four
 deliverables to an isolated directory; omitting it keeps the interactive default
 of `book/dist/`. The release workflow builds both editions from the checked-out
 tag, validates their structure, and publishes them with a SHA256 manifest that

@@ -1164,6 +1164,11 @@ Las subrutas separadas te permiten agrupar indicadores de forma independiente: u
 
 El **panel de administración** es una interfaz de navegador sin build y sin dependencias servida directamente desde el paquete `pyfly.admin`. Una sola línea de configuración la habilita; navega a `/admin`: sin servidor aparte, sin paso de build de `npm`.
 
+La consola actual usa la identidad Python canónica de Firefly, con Manrope
+local y colores carbón, papel y ámbar. Un runtime Agentic nativo añade su vista
+protegida de inventario y uso, de solo lectura; el Capítulo 21 muestra la consola
+real y su frontera de acceso.
+
 ### Habilitar el panel
 
 ```yaml
@@ -1175,7 +1180,7 @@ pyfly:
     refresh_interval: 5000
 ```
 
-El panel autodescubre beans, indicadores de salud, loggers, tareas programadas, mapeos HTTP, cachés, manejadores CQRS, sagas y métricas del `ApplicationContext` en ejecución. Los presenta en **15 vistas integradas** con actualizaciones en tiempo real mediante Server-Sent Events (SSE): sin WebSocket, sin bucle de sondeo en tu código.
+El panel autodescubre beans, indicadores de salud, loggers, tareas programadas, mapeos HTTP, cachés, manejadores CQRS, sagas y métricas del `ApplicationContext` en ejecución. Los presenta en **vistas operativas integradas** con actualizaciones en tiempo real mediante Server-Sent Events (SSE): sin WebSocket, sin bucle de sondeo en tu código.
 
 !!! note "Dónde encontrarlo: el puerto de gestión"
     Como el actuator, el panel se sirve en el **puerto de gestión**. Con los
@@ -1649,7 +1654,7 @@ capítulo Lumen:
   autodescubiertos, incluido un `WalletRepositoryHealthIndicator` que sondea el
   almacén de monederos.
 - Muestra todo lo anterior en el **panel de administración embebido** en `/admin`,
-  con 15 vistas integradas, flujos SSE en tiempo real, una cola de logs en vivo,
+  con vistas operativas integradas, flujos SSE en tiempo real, una cola de logs en vivo,
   un panel de analítica de trazas HTTP y gestión de niveles de logger en tiempo de
   ejecución.
 - Aplica logging y métricas de forma **transversal** mediante `@aspect`,

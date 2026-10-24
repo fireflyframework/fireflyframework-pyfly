@@ -59,7 +59,7 @@ pre.code,.code pre{
 /* ============ figures ============ */
 figure.fig{ margin:1.45rem auto; text-align:center; }
 figure.fig svg{ max-width:100%; height:auto; }
-figure.fig img.fig-img{ max-width:240px; height:auto; }
+figure.fig img.fig-img{ width:100%; max-width:100%; height:auto; }
 figcaption{ font-size:.78rem; color:var(--muted); margin-top:.55rem; line-height:1.45; }
 figcaption b,figcaption strong{ color:var(--ink-soft); }
 

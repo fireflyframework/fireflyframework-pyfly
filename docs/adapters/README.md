@@ -54,6 +54,4 @@ For the shared port APIs (`RepositoryPort`, `Page`, `Pageable`, `QueryMethodPars
 
 ---
 
-<p align="center">
-  <a href="../README.md">Back to Documentation Home</a> · <a href="../modules/README.md">Module Guides</a>
-</p>
+[Back to Documentation Home](../index.md) · [Module Guides](../modules/README.md)

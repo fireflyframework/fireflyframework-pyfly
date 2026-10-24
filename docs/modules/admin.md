@@ -4,7 +4,7 @@ PyFly's admin module provides a Spring Boot Admin-inspired embedded management
 dashboard for monitoring and introspecting PyFly applications at runtime. It
 ships as a zero-build vanilla JavaScript frontend served directly from the
 `pyfly.admin` package, with a JSON REST API and real-time Server-Sent Event
-(SSE) streams backing every view. The module follows the same hexagonal
+(SSE) streams for live views. The module follows the same hexagonal
 architecture as the rest of the framework: data providers are injected via the
 DI container, the Starlette adapter mounts routes, and an `AdminViewExtension`
 protocol allows you to plug in custom views without touching framework code.
@@ -69,8 +69,8 @@ This is the default separate management port. If management and application port
 
 The dashboard auto-discovers beans, health indicators, loggers,
 scheduled tasks, HTTP mappings, caches, CQRS handlers, transactions, and
-metrics from the running `ApplicationContext` and presents them in 16 built-in
-views with real-time updates.
+metrics from the running `ApplicationContext` and presents them in built-in
+views, with real-time updates where available.
 
 ---
 
@@ -155,7 +155,7 @@ Prefix: `pyfly.admin`
 |-----|------|---------|-------------|
 | `enabled` | `bool` | `true` | Enable or disable the admin dashboard. When `false`, no routes are mounted. |
 | `path` | `str` | `"/admin"` | Base URL path for the dashboard and API. |
-| `title` | `str` | `"PyFly Admin"` | Title displayed in the sidebar header and browser tab. |
+| `title` | `str` | `"pyfly admin"` | Title displayed in the sidebar header and browser tab. |
 | `theme` | `str` | `"auto"` | Color theme: `"auto"`, `"light"`, or `"dark"`. `"auto"` follows the OS preference. |
 | `require_auth` | `bool` | `false` | When `true`, the dashboard requires authentication. |
 | `allowed_roles` | `list[str]` | `["ADMIN"]` | Roles permitted to access the dashboard when `require_auth` is enabled. |
@@ -253,6 +253,43 @@ stream for live updates.
 | **CQRS** | `cqrs` | Registered command and query handlers with bus pipeline introspection (validation, authorization, metrics, event publishing). |
 | **Transactions** | `transactions` | Saga definitions with step DAGs, TCC transactions with participant phase coverage, and in-flight execution count. |
 | **Log Viewer** | `logfile` | Real-time log viewer with SSE live tail, level-based color-coded badges (ERROR red, WARNING yellow, INFO blue, DEBUG grey), filter toolbar (All / ERROR / WARNING / INFO / DEBUG), search, pause/resume streaming, clear log buffer, and auto-scroll. Structlog `ConsoleRenderer` output is parsed to extract event names and key-value context; ANSI escape codes are stripped. Ring buffer of 2000 records. |
+
+### Agentic (Application Runtime Only)
+
+The **Agentic** view (`#agentic`) appears in the sidebar and command palette when this
+application owns a registered `AgenticRuntime`. Install `pyfly[agentic,web]` and enable
+`pyfly.agentic.enabled` alongside the admin dashboard to use the native runtime.
+The page resolves the runtime from its own `ApplicationContext` on each request,
+including when admin routes are created before application startup. An application
+without an Agentic runtime keeps the section hidden and imports no AI dependencies
+through admin introspection.
+
+The page lists registered agents (name, version and tags), tools (name, tags and
+parameter count), and workflow definitions. Select an agent or tool with the keyboard
+or pointer for details; agent details include its own usage totals. **Refresh** fetches
+a new snapshot. Usage reports input/output/total tokens, model requests, estimated cost,
+latency and retained calls from this runtime's `UsageTracker`. Retention limits affect
+these totals, and models without price data can report zero estimated cost.
+
+Quota information shows whether management is enabled, the configured daily budget,
+and remaining requests in configured per-minute rate limits. Model/provider identifiers
+are omitted from quota labels. Workflow status is **registered**; this page does not
+collect execution history. Every endpoint is read-only and uses the existing admin
+`require-auth` and `allowed-roles` policy. Agent instructions, prompts, messages,
+correlation IDs, tool arguments/defaults, model configuration and credentials are not
+included in these responses.
+
+### Dashboard Identity
+
+The dashboard uses the canonical lowercase **pyfly by Firefly** outlined family SVG,
+Manrope interface typography, charcoal/paper surfaces and amber actions from
+[`fireflyframework/brand-kit`](https://github.com/fireflyframework/brand-kit). Small
+links use gold on light backgrounds. The charcoal sidebar preserves the endorsed
+logo's contrast in both themes. Logos and the font are served locally with their
+notice and SIL Open Font License; `static/assets/brand-origin.json` pins the upstream
+commit and SHA-256 inventory. Refreshing the framework updates versioned shell assets
+and revalidates imported modules. The light/dark control, command palette, mobile
+navigation and visible keyboard focus retain the same navigation and authorization.
 
 ### Fleet (Server Mode Only)
 
@@ -359,6 +396,9 @@ All API endpoints return JSON responses. The base path defaults to `/admin/api`
 | `GET` | `/admin/api/caches` | Cache stats: adapter type, entry count, key list. |
 | `GET` | `/admin/api/caches/keys` | List all cache keys (filtered from stats). |
 | `POST` | `/admin/api/caches/{name}/evict` | Evict a cache key. Body: `{"key": "specific-key"}`. Omit `key` to evict all. |
+| `GET` | `/admin/api/agentic` | Application-owned agent/tool/workflow metadata, aggregate usage and quota snapshot. Returns 404 without a runtime. |
+| `GET` | `/admin/api/agentic/agents/{name}` | Agent metadata and its aggregate usage; 404 for an unknown agent. |
+| `GET` | `/admin/api/agentic/tools/{name}` | Tool metadata and parameter count; 404 for an unknown tool. |
 | `GET` | `/admin/api/cqrs` | List CQRS command/query handlers and bus pipeline status. |
 | `GET` | `/admin/api/transactions` | List saga and TCC definitions with in-flight count. |
 | `GET` | `/admin/api/traces` | List HTTP traces. Optional query param: `?limit=100`. |
@@ -646,7 +686,7 @@ automatically by the wheel build target (`packages = ["src/pyfly"]`).
 
 ## Spring Boot Admin Comparison
 
-| Spring Boot Admin (Java) | PyFly Admin (Python) |
+| Spring Boot Admin (Java) | pyfly admin (Python) |
 |--------------------------|---------------------|
 | `spring-boot-admin-server` | `pyfly.admin` with `server.enabled=true` |
 | `spring-boot-admin-client` | `pyfly.admin.client.url` configuration |

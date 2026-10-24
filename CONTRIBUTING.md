@@ -66,3 +66,8 @@ version in your PR — just add the changelog entry.
 
 Open a [discussion or issue](https://github.com/fireflyframework/fireflyframework-pyfly/issues).
 Thank you for contributing! 🐍✨
+
+
+## Agentic documentation
+
+Agentic guides live under `docs/modules/agentic/`; preserve source licensing, fonts and the [asset provenance](docs/modules/agentic/assets/provenance.json). Source history is explicitly dated. Update native runtime examples when factory/lifecycle contracts change. Install `requirements-docs.txt`, then run `python -m mkdocs build --strict`, `python scripts/check_agentic_docs.py`, and `python scripts/check_agentic_docs.py --browser`. The browser check additionally requires Playwright and its Chromium browser (`python -m playwright install chromium`); run it against the built site. It checks actual Mermaid rendering and keyboard expand/fit behavior at desktop and mobile widths. [Guide contributor notes](docs/modules/agentic/catalogue.md#contributing-documentation) cover diagrams and local preview.

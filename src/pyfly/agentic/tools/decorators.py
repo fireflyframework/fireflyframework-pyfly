@@ -1,0 +1,192 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Decorator-driven API for defining tools with minimal boilerplate.
+
+The :func:`agent_tool` decorator transforms an async function into a
+registered :class:`~pyfly.agentic.tools.base.AgentTool` instance::
+
+    @agent_tool("word_count", tags=["text"])
+    async def word_count(text: str) -> int:
+        '''Count whitespace-separated words in text.'''
+        return len(text.split())
+
+:func:`guarded` and :func:`retryable` add cross-cutting concerns to any
+:class:`~pyfly.agentic.tools.base.AgentTool`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import functools
+import logging
+from collections.abc import Callable, Coroutine, Sequence
+from typing import Any
+
+from pyfly.agentic.tools.base import AgentTool, GuardProtocol
+from pyfly.agentic.tools.registry import tool_registry
+
+logger = logging.getLogger(__name__)
+
+# Type alias
+AsyncHandler = Callable[..., Coroutine[Any, Any, Any]]
+
+
+class _DecoratedTool(AgentTool):
+    """Concrete tool created by the :func:`agent_tool` decorator."""
+
+    def __init__(
+        self,
+        name: str,
+        handler: AsyncHandler,
+        *,
+        description: str = "",
+        tags: Sequence[str] = (),
+        guards: Sequence[GuardProtocol] = (),
+        requires_approval: bool = False,
+    ) -> None:
+        super().__init__(name, description=description, tags=tags, guards=guards, requires_approval=requires_approval)
+        self._handler = handler
+
+    async def _execute(self, **kwargs: Any) -> Any:
+        return await self._handler(**kwargs)
+
+    def pydantic_handler(self) -> Any:
+        """Return a wrapper preserving the original handler's signature.
+
+        Pydantic AI inspects the function signature to generate JSON
+        schemas for LLM tool calls.  :meth:`AgentTool.execute` uses
+        ``**kwargs`` which hides the real parameter names.  This method
+        returns a thin wrapper whose ``__wrapped__`` attribute points to
+        the original handler so that :func:`inspect.signature` resolves
+        the correct parameter list, while execution still routes through
+        :meth:`execute` for guard evaluation.
+        """
+
+        @functools.wraps(self._handler)
+        async def _wrapper(**kwargs: Any) -> Any:
+            return await self.execute(**kwargs)
+
+        return _wrapper
+
+
+def agent_tool(
+    name: str,
+    *,
+    description: str = "",
+    tags: Sequence[str] = (),
+    guards: Sequence[GuardProtocol] = (),
+    requires_approval: bool = False,
+    auto_register: bool = True,
+) -> Callable[[AsyncHandler], AgentTool]:
+    """Create a :class:`AgentTool` from an async function and optionally register it.
+
+    Parameters:
+        name: Unique tool name.
+        description: Description (falls back to the function's docstring).
+        tags: Tags for capability-based discovery.
+        guards: Guards evaluated before execution.
+        requires_approval: When *True*, calls to this tool pause the agent run
+            for human-in-the-loop approval via pydantic-ai's native
+            deferred-tools protocol (see the agent HITL docs).
+        auto_register: When *True*, the tool is added to the global registry.
+
+    Returns:
+        The constructed :class:`AgentTool` instance (replaces the decorated
+        function in the declaring module's namespace).
+    """
+
+    def decorator(func: AsyncHandler) -> AgentTool:
+        tool = _DecoratedTool(
+            name,
+            func,
+            description=description or func.__doc__ or "",
+            tags=tags,
+            guards=guards,
+            requires_approval=requires_approval,
+        )
+        if auto_register:
+            tool_registry.register(tool)
+        return tool
+
+    return decorator
+
+
+def guarded(guard: GuardProtocol) -> Callable[[AgentTool], AgentTool]:
+    """Append a guard to an existing :class:`AgentTool`.
+
+    Usage::
+
+        @guarded(RateLimitGuard(max_calls=10))
+        @agent_tool("word_count")
+        async def word_count(text: str) -> int:
+            return len(text.split())
+    """
+
+    def decorator(tool: AgentTool) -> AgentTool:
+        tool.guards.append(guard)
+        return tool
+
+    return decorator
+
+
+def retryable(
+    max_retries: int = 3,
+    backoff: float = 1.0,
+) -> Callable[[AgentTool], AgentTool]:
+    """Wrap a :class:`AgentTool`'s execute method with retry logic.
+
+    On failure, the tool is retried up to *max_retries* times with
+    exponential backoff starting at *backoff* seconds.
+
+    Parameters:
+        max_retries: Maximum number of retry attempts.
+        backoff: Initial delay in seconds (doubles on each retry).
+    """
+
+    def decorator(tool: AgentTool) -> AgentTool:
+        # Wrap the subclass hook ``_execute`` (not the public ``execute``) so the
+        # retry sits *inside* ``_guarded_execute``: guards run once, then only the
+        # tool body is retried, and BOTH the plain ``execute`` and the ctx-aware
+        # ``execute_with_ctx`` paths (and the pydantic-ai handler built from them)
+        # are covered uniformly. ``kwargs`` may carry ``_ctx`` for takes_ctx tools.
+        original_execute = tool._execute
+
+        @functools.wraps(original_execute)
+        async def _retrying_execute(**kwargs: Any) -> Any:
+            delay = backoff
+            last_exc: Exception | None = None
+            # Attempt the original _execute up to (max_retries + 1) times
+            # with exponential backoff (delay doubles after each failure).
+            for attempt in range(max_retries + 1):
+                try:
+                    return await original_execute(**kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < max_retries:
+                        logger.debug(
+                            "Retry %d/%d for tool '%s' after %.1fs",
+                            attempt + 1,
+                            max_retries,
+                            tool.name,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        delay *= 2  # exponential backoff
+            raise last_exc  # type: ignore[misc]
+
+        tool._execute = _retrying_execute  # type: ignore[method-assign]
+        return tool
+
+    return decorator

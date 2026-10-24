@@ -134,6 +134,12 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 
 ---
 
+## Agentic
+
+[Overview](modules/agentic.md) · [Installation](modules/agentic/getting-started/installation.md) · [Native DI and lifecycle](modules/agentic/native-runtime.md) · [Capability guides](modules/agentic/catalogue.md) · [Examples](modules/agentic/examples.md) · [Migration](modules/agentic/migration.md).
+
+---
+
 ## Adapter Reference
 
 Adapters are the concrete implementations behind PyFly's port contracts. Each adapter doc covers setup, configuration, and adapter-specific features.

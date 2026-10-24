@@ -1,0 +1,224 @@
+"""Tests for Qdrant vector store."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from pyfly.agentic.vectorstores.types import SearchFilter, VectorDocument
+
+
+class TestQdrantVectorStore:
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.PointStruct")
+    async def test_upsert(self, mock_point_struct, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        mock_point_struct.side_effect = lambda **kw: MagicMock(**kw)
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="test")
+        await store.upsert(
+            [VectorDocument(id="1", text="hello", embedding=[1.0, 0.0])],
+            namespace="ns1",
+        )
+        mock_client.upsert.assert_called_once()
+        call_kwargs = mock_client.upsert.call_args[1]
+        assert call_kwargs["collection_name"] == "test"
+        assert len(call_kwargs["points"]) == 1
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.PointStruct")
+    async def test_upsert_with_metadata(self, mock_point_struct, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        captured_kwargs = {}
+
+        def capture_point(**kw):
+            captured_kwargs.update(kw)
+            return MagicMock(**kw)
+
+        mock_point_struct.side_effect = capture_point
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="test")
+        await store.upsert(
+            [
+                VectorDocument(
+                    id="1",
+                    text="hello",
+                    embedding=[1.0, 0.0],
+                    metadata={"type": "blog"},
+                )
+            ],
+            namespace="custom_ns",
+        )
+        assert captured_kwargs["payload"]["text"] == "hello"
+        assert captured_kwargs["payload"]["_namespace"] == "custom_ns"
+        assert captured_kwargs["payload"]["type"] == "blog"
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.Filter")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.MatchValue")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.FieldCondition")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_search(self, mock_client_cls, mock_fc, mock_mv, mock_filter):
+        mock_point1 = MagicMock()
+        mock_point1.id = "1"
+        mock_point1.payload = {"text": "hello", "_namespace": "default", "tag": "a"}
+        mock_point1.score = 0.95
+
+        mock_point2 = MagicMock()
+        mock_point2.id = "2"
+        mock_point2.payload = {"text": "world", "_namespace": "default"}
+        mock_point2.score = 0.80
+
+        mock_client = AsyncMock()
+        mock_client.query_points.return_value = MagicMock(points=[mock_point1, mock_point2])
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="test")
+        results = await store.search([1.0, 0.0], top_k=2)
+
+        assert len(results) == 2
+        assert results[0].document.id == "1"
+        assert results[0].document.text == "hello"
+        assert results[0].score == 0.95
+        assert results[0].document.metadata == {"tag": "a"}
+        # _namespace and text should be stripped from metadata
+        assert "_namespace" not in results[0].document.metadata
+        assert "text" not in results[0].document.metadata
+        assert results[1].document.id == "2"
+        assert results[1].document.text == "world"
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.Filter")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.MatchValue")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.FieldCondition")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_search_with_filters(self, mock_client_cls, mock_fc, mock_mv, mock_filter):
+        mock_client = AsyncMock()
+        mock_client.query_points.return_value = MagicMock(points=[])
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="test")
+        await store.search(
+            [1.0, 0.0],
+            top_k=5,
+            filters=[SearchFilter(field="type", operator="eq", value="blog")],
+        )
+        # Should have created 2 FieldConditions: _namespace + type filter
+        assert mock_fc.call_count == 2
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.Filter")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.MatchValue")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.FieldCondition")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_search_empty_results(self, mock_client_cls, mock_fc, mock_mv, mock_filter):
+        mock_client = AsyncMock()
+        mock_client.query_points.return_value = MagicMock(points=[])
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="test")
+        results = await store.search([1.0, 0.0], top_k=5)
+        assert results == []
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.HasIdCondition")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.MatchValue")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.FieldCondition")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.Filter")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.FilterSelector")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_delete_is_namespace_scoped(
+        self, mock_client_cls, mock_selector, mock_filter, mock_fc, mock_mv, mock_hasid
+    ):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="test")
+        await store.delete(["1", "2"], namespace="ns1")
+
+        mock_client.delete.assert_called_once()
+        assert mock_client.delete.call_args[1]["collection_name"] == "test"
+        # Delete is confined to the namespace AND the requested ids -- not a bare
+        # id list (which would ignore the scope).
+        mock_mv.assert_called_once_with(value="ns1")
+        mock_fc.assert_called_once_with(key="_namespace", match=mock_mv.return_value)
+        mock_hasid.assert_called_once_with(has_id=["1", "2"])
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient", None)
+    async def test_import_error_when_qdrant_not_installed(self):
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        with pytest.raises(ImportError, match="qdrant-client"):
+            QdrantVectorStore()
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_constructor_params(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(
+            collection_name="my_coll",
+            url="http://custom:6333",
+            api_key="secret",
+            vector_size=768,
+        )
+        mock_client_cls.assert_called_once_with(url="http://custom:6333", api_key="secret")
+        assert store._collection_name == "my_coll"
+        assert store._vector_size == 768
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.VectorParams")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.Distance")
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_initialise_creates_collection_when_absent(self, mock_client_cls, mock_distance, mock_vparams):
+        mock_client = AsyncMock()
+        collections = MagicMock()
+        collections.collections = []
+        mock_client.get_collections.return_value = collections
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="c", vector_size=8)
+        await store.initialise()
+        mock_client.create_collection.assert_called_once()
+        assert mock_client.create_collection.call_args.kwargs["collection_name"] == "c"
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_initialise_is_noop_when_collection_exists(self, mock_client_cls):
+        mock_client = AsyncMock()
+        existing = MagicMock()
+        existing.name = "c"
+        collections = MagicMock()
+        collections.collections = [existing]
+        mock_client.get_collections.return_value = collections
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="c", vector_size=8)
+        await store.initialise()
+        mock_client.create_collection.assert_not_called()
+
+    @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient")
+    async def test_close_closes_client(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+
+        from pyfly.agentic.vectorstores.qdrant_store import QdrantVectorStore
+
+        store = QdrantVectorStore(collection_name="c")
+        await store.close()
+        mock_client.close.assert_called_once()

@@ -1,0 +1,16 @@
+/* Dense Mermaid graphs remain scrollable when expanded, including on mobile. */
+.md-typeset .ff-diagram { margin: 1.5em 0; min-width: 0; max-width: 100%; }
+.md-typeset .ff-diagram-scroll { overflow-x: auto; max-width: 100%; padding: 0.4rem 0; }
+.md-typeset .ff-diagram--expanded .ff-diagram-scroll { max-height: 70vh; overflow: auto; }
+.md-typeset .ff-diagram--expanded .mermaid { width: max(100%, 1800px); display: flex; justify-content: center; }
+.md-typeset .ff-diagram-toggle {
+  border: 1px solid var(--md-default-fg-color--lighter);
+  border-radius: 0.3rem;
+  padding: 0.3rem 0.6rem;
+  color: var(--md-typeset-a-color);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+}
+.md-typeset .ff-diagram-toggle:focus-visible,
+.md-typeset .ff-diagram-scroll:focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 3px; }

@@ -155,7 +155,7 @@ class TestAdminAPI:
         resp = admin_client.get("/admin/api/settings")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["title"] == "PyFly Admin"
+        assert data["title"] == "pyfly admin"
 
     def test_env(self, admin_client):
         resp = admin_client.get("/admin/api/env")

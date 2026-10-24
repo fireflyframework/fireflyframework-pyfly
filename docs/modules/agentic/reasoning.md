@@ -1,0 +1,836 @@
+# Reasoning Patterns Guide
+
+Use these capability snippets inside your application’s [native runtime](native-runtime.md).
+Installation is through [PyFly Agentic extras](getting-started/installation.md).
+
+Copyright 2026 Firefly Software Foundation. Licensed under the Apache License 2.0.
+
+The Reasoning module provides pluggable reasoning strategies that structure how an
+agent thinks through a problem. Rather than sending a single prompt and hoping for
+a good answer, reasoning patterns decompose the task into structured, iterative
+steps with structured outputs, traces, and optional working-memory integration.
+
+The framework ships with six built-in patterns and makes it straightforward
+to define custom ones.
+
+---
+
+## Architecture Overview
+
+The reasoning system is built on three layers:
+
+1. **Protocol** — `ReasoningPattern` is a `typing.Protocol` that any object can
+   satisfy via duck typing: a single `async execute(agent, input, **kwargs)` method
+   returning a `ReasoningResult`.
+2. **Abstract base class** — `AbstractReasoningPattern` uses the Template Method
+   design pattern to provide the execute loop, structured output, memory integration,
+   trace recording, step counting, error handling, configurable prompts, and optional
+   output review. Subclasses override a small set of hooks.
+3. **Concrete patterns** — Six built-in implementations, each with its own reasoning
+   strategy and prompt templates.
+
+```mermaid
+classDiagram
+    class ReasoningPattern {
+        <<protocol>>
+        +execute(agent, input, **kwargs) ReasoningResult
+    }
+
+    class AbstractReasoningPattern {
+        <<abstract>>
+        +name: str
+        +max_steps: int
+        +prompts: dict~str, PromptTemplate~
+        +reviewer: OutputReviewer | None
+        #_reason(state) ReasoningStep | None
+        #_act(state) ReasoningStep | None
+        #_observe(state, action) ReasoningStep | None
+        #_should_continue(state) bool
+        #_should_stop(state) bool
+        #_extract_output(state) Any
+        +execute(agent, input, **kwargs) ReasoningResult
+        -_structured_run(agent, prompt, output_type) T
+        -_fallback_parse(raw, output_type) T
+        -_resolve_model(agent) str | Model | None
+        -_init_memory(memory, pattern_name) MemoryManager | None
+        -_enrich_prompt(prompt, memory) str
+        -_persist_step(memory, step, step_num) None
+    }
+
+    class ReActPattern { }
+    class ChainOfThoughtPattern { }
+    class PlanAndExecutePattern { }
+    class ReflexionPattern { }
+    class TreeOfThoughtsPattern { }
+    class GoalDecompositionPattern { }
+
+    ReasoningPattern <|.. AbstractReasoningPattern
+    AbstractReasoningPattern <|-- ReActPattern
+    AbstractReasoningPattern <|-- ChainOfThoughtPattern
+    AbstractReasoningPattern <|-- PlanAndExecutePattern
+    AbstractReasoningPattern <|-- ReflexionPattern
+    AbstractReasoningPattern <|-- TreeOfThoughtsPattern
+    AbstractReasoningPattern <|-- GoalDecompositionPattern
+```
+
+### The Execute Loop
+
+The base class `execute()` method drives the standard reason-act-observe loop.
+Patterns that need a different flow (Tree of Thoughts, Goal Decomposition) override
+`execute()` entirely while reusing the infrastructure methods.
+
+```mermaid
+flowchart TD
+    START([execute called]) --> INIT[Initialise state, trace, fork memory]
+    INIT --> REASON["_reason(state)"]
+    REASON --> RECORD_T[Record thought in trace + working memory]
+    RECORD_T --> STOP{"_should_stop(state)?"}
+    STOP -->|yes| EXTRACT
+    STOP -->|no| ACT["_act(state)"]
+    ACT --> RECORD_A[Record action in trace + working memory]
+    RECORD_A --> OBSERVE["_observe(state, action)"]
+    OBSERVE --> RECORD_O[Record observation in trace + working memory]
+    RECORD_O --> CONTINUE{"_should_continue(state)?"}
+    CONTINUE -->|yes| CHECK_MAX{steps < max_steps?}
+    CHECK_MAX -->|yes| REASON
+    CHECK_MAX -->|no| ERROR[Raise ReasoningStepLimitError]
+    CONTINUE -->|no| EXTRACT["_extract_output(state)"]
+    EXTRACT --> REVIEW{reviewer set?}
+    REVIEW -->|yes| VALIDATE["_review_output(state, output)"]
+    REVIEW -->|no| PERSIST
+    VALIDATE --> PERSIST[Store output in working memory]
+    PERSIST --> RESULT([Return ReasoningResult])
+```
+
+### Hook Reference
+
+Subclasses override these hooks to define the pattern's behaviour:
+
+- **`_reason(state)`** *(abstract)* — Generate a thought for the current state. Return a `ThoughtStep`, `PlanStep`, or `None`.
+- **`_act(state)`** *(abstract)* — Perform an action (e.g. call the agent or a tool). Return an `ActionStep` or `None`.
+- **`_observe(state, action)`** — Process the result of the action. Default: no-op.
+- **`_should_stop(state)`** — Early exit before acting (checked after `_reason`). Default: `False`.
+- **`_should_continue(state)`** — Continue the loop after observing. Default: `False` (single iteration).
+- **`_extract_output(state)`** — Produce the final result. Default: `state["output"]`.
+
+---
+
+## Structured Output
+
+All reasoning patterns use typed Pydantic models instead of unstructured text. This
+replaces fragile magic stop-phrases (`FINISH`, `CONCLUSION:`, `SATISFIED`) and regex
+parsing with explicit schema validation.
+
+### The `_structured_run` Mechanism
+
+When a pattern needs structured output, it calls `_structured_run(agent, prompt, output_type)`:
+
+```mermaid
+flowchart TD
+    CALL["_structured_run(agent, prompt, OutputType)"] --> ISFF{Agent?}
+    ISFF -->|yes| THRU["agent.run(prompt, output_type=OutputType)<br/>through the full Agent stack"]
+    THRU --> DONE([Return validated OutputType])
+    ISFF -->|no| RESOLVE{Model available?}
+    RESOLVE -->|yes| EPHEMERAL["Create ephemeral Agent(model, output_type=OutputType)"]
+    EPHEMERAL --> RUN_E["agent.run(prompt) → validated OutputType"]
+    RESOLVE -->|no| FALLBACK["agent.run(prompt) → raw output"]
+    FALLBACK --> PARSE["_fallback_parse(raw, OutputType)"]
+    PARSE --> IS_TYPE{Already OutputType?}
+    IS_TYPE -->|yes| DONE
+    IS_TYPE -->|no| IS_DICT{dict?}
+    IS_DICT -->|yes| VALIDATE["model_validate(raw)"]
+    IS_DICT -->|no| IS_JSON{Valid JSON string?}
+    IS_JSON -->|yes| VALIDATE_JSON["model_validate_json(raw)"]
+    IS_JSON -->|no| SPECIFIC{Known type?}
+    SPECIFIC -->|yes| TYPE_FALLBACK[Type-specific text parsing]
+    SPECIFIC -->|no| CONTENT["Try OutputType(content=raw)"]
+    TYPE_FALLBACK --> DONE
+    VALIDATE --> DONE
+    VALIDATE_JSON --> DONE
+    RUN_E --> DONE
+    CONTENT --> DONE
+```
+
+**Routing through the agent.** When the agent is a `Agent`, the structured
+call now runs **through it** — `agent.run(prompt, output_type=OutputType)` with a
+per-call output-type override — so the reasoning step inherits the agent's full
+stack (middleware chain, 429 rate-limit retry, usage/cost recording). An explicit
+pattern-level `model=` is forwarded as a per-call model override. The agent
+records its own usage in this path, so reasoning does not double-count it. The
+bare ephemeral `pydantic_ai.Agent` is used only for non-`Agent`,
+model-bearing inputs; the fallback parse cascade handles the rest.
+
+The model is resolved from:
+1. The pattern's constructor `model` parameter.
+2. The agent's underlying model (via `_resolve_model()`).
+3. If neither is available, the fallback parse cascade handles raw text.
+
+### Output Modes
+
+On the two real-model paths (the Agent route and the ephemeral agent), the
+structured `output_type` is wrapped in a pydantic-ai **output mode** that selects
+*how* the model is constrained to the schema. Pick the mode with the per-pattern
+`output_mode=` argument or the framework-wide `reasoning_output_mode` config value:
+
+| Mode | pydantic-ai spec | Strategy | Use when |
+|------|------------------|----------|----------|
+| `None` *(default)* | bare type | pydantic-ai's default (tool-calling for a `BaseModel`) | General use on tool-capable models. |
+| `"tool"` | `ToolOutput` | Forces tool-based structured output explicitly. | You want to pin tool-calling regardless of pydantic-ai defaults. |
+| `"native"` | `NativeOutput` | Provider-native JSON-schema / structured-output mode. | OpenAI, Google, and other providers with first-class structured output — strictest schema enforcement, no tool round-trip. |
+| `"prompted"` | `PromptedOutput` | Injects the schema into the prompt and parses the JSON reply. | The most **portable** choice — works on models without tool-calling or native JSON (open-weights, smaller local models). |
+
+```python
+from pyfly.agentic.reasoning import ChainOfThoughtPattern
+
+# Per-pattern: force prompt-engineered JSON (portable to any model).
+pattern = ChainOfThoughtPattern(output_mode="prompted")
+
+# Or globally, via env var (applies to every pattern that doesn't override it):
+#   PYFLY_AGENTIC_REASONING_OUTPUT_MODE=native
+```
+
+Resolution order is **per-pattern argument → config default → pydantic-ai default**.
+The mode affects the two typed-model paths. Without a resolvable model, the fallback
+calls the supplied agent's `run()` method and parses its output through the fallback
+cascade; the supplied agent still controls whether that call uses an LLM.
+The `OutputMode` type alias (`Literal["tool", "native", "prompted"]`) is exported
+from `pyfly.agentic.reasoning`.
+
+### Model Catalogue
+
+- **`ReasoningThought`** — Content, confidence (0.0–1.0), `is_final` flag, and `final_answer`. Used by Chain of Thought and ReAct.
+- **`ReasoningAction`** — Tool name, arguments dict, and reasoning.
+- **`ReasoningPlan`** — Goal string and `steps: list[PlanStepDef]`. Each `PlanStepDef` carries `id`, `description`, `dependencies`, `status` (`StepStatus` enum: pending/running/completed/failed/skipped), and `output`.
+- **`ReflectionVerdict`** — `is_satisfactory` boolean, `issues` list, and `suggestions` list. Used by Reflexion.
+- **`BranchEvaluation`** — `branch_id` (0-based), `score` (0.0–1.0), and `reasoning`. Used by Tree of Thoughts.
+- **`BranchList`** — `branches: list[str]`. Structured branch generation for Tree of Thoughts.
+- **`GoalDecompositionResult`** — `goal` and `phases: list[GoalPhase]`. Each `GoalPhase` has `name`, `description`, and `tasks`.
+- **`ReasoningResult[T]`** — Generic result with typed `output: T`, `trace`, `steps_taken`, and `success`.
+
+```python
+from pyfly.agentic.reasoning.models import (
+    ReasoningThought,
+    ReasoningPlan,
+    PlanStepDef,
+    StepStatus,
+    ReflectionVerdict,
+    BranchEvaluation,
+    BranchList,
+    GoalDecompositionResult,
+    GoalPhase,
+)
+
+# Structured thought — the is_final flag replaces magic stop-phrases
+thought = ReasoningThought(
+    content="The answer is 42",
+    is_final=True,
+    final_answer="42",
+    confidence=0.95,
+)
+
+# Structured plan with step dependency tracking
+plan = ReasoningPlan(
+    goal="Build a REST API",
+    steps=[
+        PlanStepDef(id="step_1", description="Design schema"),
+        PlanStepDef(id="step_2", description="Implement endpoints", dependencies=["step_1"]),
+    ],
+)
+```
+
+---
+
+## Reasoning Trace
+
+Every pattern records its intermediate steps in a `ReasoningTrace` — an ordered
+list of typed `ReasoningStep` objects. The trace captures the full chain of thought,
+making every reasoning run inspectable for observability, explainability, and debugging.
+
+Step types:
+
+- **`ThoughtStep`** — The agent's internal reasoning. Fields: `content`, `confidence`.
+- **`ActionStep`** — A tool invocation or external action. Fields: `tool_name`, `tool_args`.
+- **`ObservationStep`** — The result of an action. Fields: `content`, `source`.
+- **`ReflectionStep`** — Self-evaluation of progress. Fields: `critique`, `should_retry`.
+- **`PlanStep`** — A plan or sub-goal. Fields: `description`, `sub_steps`.
+
+Each step carries a `kind` discriminator field (`"thought"`, `"action"`, `"observation"`,
+`"reflection"`, `"plan"`) for easy filtering and serialisation.
+
+```mermaid
+flowchart LR
+    PATTERN["Pattern hooks"] --> STEPS["ThoughtStep, ActionStep,<br/>ObservationStep, ReflectionStep"]
+    STEPS --> TRACE["ReasoningTrace<br/>ordered emitted steps"]
+    TRACE --> RESULT["ReasoningResult<br/>output, trace, step count"]
+```
+
+```python
+result = await pattern.execute(my_agent, "Explain quantum computing")
+for step in result.trace.steps:
+    print(f"[{step.kind}] {step.content if hasattr(step, 'content') else step.tool_name}")
+```
+
+---
+
+## Logging & Debugging
+
+Every reasoning pattern and the `Agent` emit structured log messages
+under the `pyfly.agentic` logger hierarchy. Use `configure_logging`
+to turn on framework-level logging without affecting other libraries:
+
+```python
+from pyfly.agentic import configure_logging
+
+configure_logging("INFO") # pattern lifecycle, step progress, timing
+configure_logging("DEBUG") # + LLM call durations, prompt enrichment, memory ops
+```
+
+Or use the one-liner shortcut:
+
+```python
+from pyfly.agentic import enable_debug
+
+enable_debug() # equivalent to configure_logging("DEBUG")
+```
+
+Key events logged at **INFO** level:
+
+- Pattern start / iteration / completion with elapsed time.
+- Plan generation step count and descriptions (Plan-and-Execute).
+- Branch generation and evaluation scores (Tree of Thoughts).
+- Phase and task progress (Goal Decomposition).
+- Critique verdicts and retry decisions (Reflexion).
+- Thought content previews and `is_final` signals (CoT, ReAct).
+- Pipeline stage transitions and per-pattern timing.
+
+### Step Timeout
+
+All patterns accept a `step_timeout` parameter (in seconds) that guards
+individual LLM calls against indefinite hangs. When a call exceeds the
+timeout, a `ReasoningError` is raised.
+
+```python
+from pyfly.agentic.reasoning import PlanAndExecutePattern
+
+pattern = PlanAndExecutePattern(
+    max_steps=10,
+    step_timeout=120.0, # 120 s per LLM call
+)
+```
+
+The timeout is applied to both `_structured_run()` calls and direct
+`agent.run()` calls within patterns that make their own LLM invocations
+(e.g. Plan-and-Execute step execution).
+
+---
+
+## Pattern Catalogue
+
+### ReAct (Reasoning + Acting)
+
+The ReAct pattern (Yao et al., 2022) interleaves reasoning with action in a loop.
+Each iteration produces a structured `ReasoningThought`; when `is_final=True`,
+the loop exits and the final answer is returned.
+
+**Iteration flow:**
+
+1. **Thought** — The agent analyses the current state via `_structured_run(ReasoningThought)` and decides whether it can answer or needs to act.
+2. **Early stop** — If `is_final=True`, the loop breaks before acting.
+3. **Action** — The agent takes a step toward the answer using the action prompt.
+4. **Observation** — The action result is recorded in state and working memory.
+5. **Continue** — The loop repeats until `is_final=True` or `max_steps` is reached.
+
+```mermaid
+flowchart TD
+    INPUT([Input]) --> THOUGHT["Thought: _structured_run(ReasoningThought)"]
+    THOUGHT --> FINAL{is_final?}
+    FINAL -->|yes| OUTPUT([Return final_answer])
+    FINAL -->|no| ACTION["Action: agent.run(action_prompt)"]
+    ACTION --> OBSERVE[Observation: record result]
+    OBSERVE --> THOUGHT
+```
+
+```python
+from pyfly.agentic.reasoning import ReActPattern
+
+pattern = ReActPattern(max_steps=5)
+result = await pattern.execute(my_agent, "What is the population of Tokyo?")
+print(result.output) # The final answer
+print(result.steps_taken) # Number of iterations
+```
+
+**Prompt slots:** `"thought"`, `"action"`
+
+---
+
+### Chain of Thought
+
+Chain of Thought (CoT) prompts the agent to reason step by step. Unlike ReAct, CoT
+does not interleave actions — each iteration generates a single `ReasoningThought`
+that builds on all previous steps. The chain concludes when `is_final=True`.
+
+**Iteration flow:**
+
+1. **Step** — The prompt includes the problem and all previous reasoning steps. The agent produces a `ReasoningThought` via `_structured_run`.
+2. The thought is appended to the chain for the next iteration.
+3. When `is_final=True`, the `final_answer` (or last thought content) is returned.
+
+```mermaid
+flowchart LR
+    P([Problem]) --> S1["Step 1: ReasoningThought"]
+    S1 --> S2["Step 2: builds on Step 1"]
+    S2 --> S3["Step 3: builds on Steps 1-2"]
+    S3 -->|is_final=true| A([Final Answer])
+```
+
+```python
+from pyfly.agentic.reasoning import ChainOfThoughtPattern
+
+pattern = ChainOfThoughtPattern(max_steps=10)
+result = await pattern.execute(
+    my_agent,
+    "If a train travels 60 km/h for 2.5 hours, how far does it go?",
+)
+```
+
+**Prompt slots:** `"step"`
+
+---
+
+### Plan-and-Execute
+
+The Plan-and-Execute pattern first generates a structured `ReasoningPlan` with typed
+`PlanStepDef` items, then executes each step sequentially. Each step's status is
+tracked as it progresses through the `StepStatus` lifecycle. When `allow_replan=True`,
+the plan can be revised after a step failure.
+
+**Flow:**
+
+1. **Plan** — Generate a `ReasoningPlan` via `_structured_run`. The plan is persisted to working memory.
+2. **Execute** — For each `PlanStepDef`:
+   - Set status to `running`.
+   - Execute via the step execution prompt (includes results from completed steps).
+   - On success: status → `completed`, output stored.
+   - On failure: status → `failed`, optionally trigger replan.
+3. **Result** — The list of all step outputs is returned.
+
+```mermaid
+flowchart TD
+    GOAL([Goal]) --> PLAN["Generate ReasoningPlan via _structured_run"]
+    PLAN --> S1["PlanStepDef 1: pending"]
+    S1 -->|"running → completed"| S2["PlanStepDef 2: pending"]
+    S2 -->|"running → completed"| S3["PlanStepDef 3: pending"]
+    S3 -->|"running → completed"| AGG([Aggregate all step outputs])
+    S2 -->|"running → failed"| REPLAN{allow_replan?}
+    REPLAN -->|yes| REVISE["Generate revised plan via _structured_run"]
+    REVISE --> S2B["Revised PlanStepDef: pending"]
+    S2B --> S3
+    REPLAN -->|no| SKIP[Skip failed step] --> S3
+```
+
+```python
+from pyfly.agentic.reasoning import PlanAndExecutePattern
+
+pattern = PlanAndExecutePattern(max_steps=15, allow_replan=True)
+result = await pattern.execute(
+    my_agent,
+    "Research and summarise the top 3 Python web frameworks.",
+)
+# result.output is a list of step outputs
+```
+
+**Prompt slots:** `"plan"`, `"execute_step"`, `"replan"`
+
+---
+
+### Reflexion
+
+Reflexion adds a structured self-evaluation loop. The agent first produces an answer,
+then critiques it via a `ReflectionVerdict`. If `is_satisfactory=False`, the issues
+and suggestions are fed back into a retry prompt, and the agent produces an improved
+answer.
+
+**Iteration flow:**
+
+1. **Execute** — The agent produces an answer (or retries with feedback from the previous verdict).
+2. **Reflect** — The answer is critiqued via `_structured_run(ReflectionVerdict)`.
+3. If `is_satisfactory=False`, the loop continues with specific issues and suggestions injected into the retry prompt.
+4. If `is_satisfactory=True`, the current answer is returned.
+
+```mermaid
+flowchart TD
+    INPUT([Input]) --> EXEC["Execute: agent.run(prompt)"]
+    EXEC --> ANSWER[Answer produced]
+    ANSWER --> CRITIQUE["Reflect: _structured_run(ReflectionVerdict)"]
+    CRITIQUE --> SAT{is_satisfactory?}
+    SAT -->|yes| OUTPUT([Return answer])
+    SAT -->|no| FEEDBACK["Inject issues + suggestions into retry prompt"]
+    FEEDBACK --> EXEC
+```
+
+```python
+from pyfly.agentic.reasoning import ReflexionPattern
+
+pattern = ReflexionPattern(max_steps=3)
+result = await pattern.execute(
+    my_agent,
+    "Write a unit test for a binary search function.",
+)
+```
+
+**Prompt slots:** `"critique"`, `"retry"`
+
+---
+
+### Tree of Thoughts
+
+Tree of Thoughts (ToT) generates multiple reasoning branches and evaluates them
+sequentially with structured `BranchEvaluation` responses. The highest-scoring branch
+is selected. This pattern overrides `execute()` entirely with its own
+branch-evaluate-select flow.
+
+**Flow:**
+
+1. **Branch** — Generate `branching_factor` distinct approaches via `_structured_run(BranchList)`.
+2. **Evaluate** — Score each branch via `_structured_run(BranchEvaluation)`. The `branch_id` is corrected if the LLM returns the wrong index.
+3. **Select** — The branch with the highest `score` is returned.
+
+```mermaid
+flowchart TD
+    PROBLEM([Problem]) --> BRANCH["Generate BranchList via _structured_run"]
+    BRANCH --> EVALUATE["Evaluate the next branch sequentially"]
+    EVALUATE --> SCORE["Record BranchEvaluation score and reasoning"]
+    SCORE --> MORE{"Unevaluated branches?"}
+    MORE -->|yes| EVALUATE
+    MORE -->|no| SELECT["Select the highest-scoring branch"]
+    SELECT --> REVIEW["Optional reviewer"]
+    REVIEW --> BEST(["Return selected output and trace"])
+```
+
+```python
+from pyfly.agentic.reasoning import TreeOfThoughtsPattern
+
+pattern = TreeOfThoughtsPattern(branching_factor=3)
+result = await pattern.execute(
+    my_agent,
+    "Design an API for a task management system.",
+)
+```
+
+The implementation performs one branch-evaluate-select pass. Its `max_depth`
+constructor parameter maps to the inherited `max_steps` property; it does not
+currently drive recursive tree expansion.
+
+**Prompt slots:** `"branch"`, `"evaluate"`
+
+---
+
+### Goal Decomposition
+
+Goal Decomposition hierarchically breaks a high-level goal into structured
+`GoalPhase` objects, each with concrete tasks. This pattern overrides `execute()`
+entirely. Individual tasks can optionally be delegated to another reasoning pattern
+(e.g. ReAct) via the `task_pattern` parameter.
+
+**Flow:**
+
+1. **Decompose** — Generate a `GoalDecompositionResult` via `_structured_run`. The result is persisted to working memory.
+2. **Plan** — For each phase, use the phase's `tasks` list (or generate tasks via the plan-phase prompt if empty).
+3. **Execute** — Execute each task either directly (via the task execution prompt) or by delegating to `task_pattern.execute()`.
+4. **Result** — The list of all task outputs is returned.
+
+```mermaid
+flowchart TD
+    GOAL([High-Level Goal]) --> DECOMPOSE["Decompose via _structured_run(GoalDecompositionResult)"]
+    DECOMPOSE --> P1["GoalPhase 1: Design"]
+    DECOMPOSE --> P2["GoalPhase 2: Implement"]
+    DECOMPOSE --> P3["GoalPhase 3: Test"]
+    P1 --> T1["Task: wireframes"]
+    P1 --> T2["Task: architecture"]
+    P2 --> T3["Task: code modules"]
+    P2 --> T4["Task: integrations"]
+    P3 --> T5["Task: unit tests"]
+    P3 --> T6["Task: integration tests"]
+    T1 --> EXEC["Execute each task"]
+    T2 --> EXEC
+    T3 --> EXEC
+    T4 --> EXEC
+    T5 --> EXEC
+    T6 --> EXEC
+    EXEC --> RESULTS([Aggregate all task outputs])
+```
+
+```python
+from pyfly.agentic.reasoning import GoalDecompositionPattern
+
+pattern = GoalDecompositionPattern(max_steps=20)
+result = await pattern.execute(
+    my_agent,
+    "Build a customer feedback analysis pipeline.",
+)
+
+# Delegate tasks to a sub-pattern:
+from pyfly.agentic.reasoning import ReActPattern
+
+pattern = GoalDecompositionPattern(
+    max_steps=20,
+    task_pattern=ReActPattern(max_steps=5),
+)
+```
+
+**Prompt slots:** `"decompose"`, `"plan_phase"`, `"execute_task"`
+
+---
+
+## Memory Integration
+
+Reasoning patterns integrate with the framework's `MemoryManager` to maintain
+working-memory context across iterations. When `memory` is passed to `execute()`,
+the pattern selects a named working-memory scope. This scope separates pattern
+names, not individual executions.
+
+```mermaid
+flowchart TD
+    MEMORY["MemoryManager"] --> FORK["Fork working scope<br/>reasoning:pattern_name"]
+    FORK --> SCOPE["Facts shared by this named scope"]
+    SCOPE --> ENRICH["Enrich model prompts with working context"]
+    SCOPE --> STEPS["Update reasoning:step:N<br/>and reasoning:last_step"]
+    SCOPE --> OUTPUT["Write reasoning:output on completion"]
+```
+
+**Lifecycle within a pattern execution:**
+
+1. **Fork** — `_init_memory()` selects a pattern-named working scope (e.g. `reasoning:react`). Repeated or concurrent executions with the same pattern name and backend share that scope. Use separate backing stores when those runs must be isolated; forking the parent manager alone does not change the pattern's scope name.
+2. **Enrich** — Patterns that call `_enrich_prompt()` prepend their retained working facts to the prompt. This is not a replay of the complete trace; Tree of Thoughts uses its explicit branch and evaluation inputs instead.
+3. **Persist** — Each emitted reason/act/observe step updates `reasoning:step:N` and `reasoning:last_step`. Steps in one iteration share `N`, so later hooks replace that iteration's working-memory entry; the trace retains all emitted steps.
+4. **Store output** — On completion, the final output is stored under `reasoning:output`.
+
+```python
+from pyfly.agentic.memory import MemoryManager
+from pyfly.agentic.reasoning import ReActPattern
+
+memory = MemoryManager()
+pattern = ReActPattern(max_steps=10)
+
+# Memory is automatically forked, enriched, and persisted
+result = await pattern.execute(my_agent, "Research topic X", memory=memory)
+```
+
+When using `Agent.run_with_reasoning()`, the agent's attached memory is
+passed automatically — see the [Agents Guide](agents.md#reasoning-patterns).
+
+---
+
+## Pipeline
+
+The `ReasoningPipeline` chains multiple patterns sequentially. The output of one
+pattern becomes the input to the next. A pipeline is itself a `ReasoningPattern`,
+so pipelines can be nested.
+
+When `memory` is passed, it flows through to every pattern. Each pattern forks the
+memory into its named scope (`reasoning:<pattern_name>`). The previous result is
+passed explicitly as the next pattern's input; working facts from other scopes are
+not automatically included in that pattern's prompt.
+
+```mermaid
+flowchart LR
+    INPUT([Input]) --> P1["Pattern 1: PlanAndExecute"]
+    P1 -->|"output → input"| P2["Pattern 2: ReAct"]
+    P2 -->|"output → input"| P3["Pattern 3: Reflexion"]
+    P3 --> RESULT([Final ReasoningResult])
+```
+
+```python
+from pyfly.agentic.reasoning import (
+    PlanAndExecutePattern,
+    ReActPattern,
+    ReasoningPipeline,
+)
+
+pipeline = ReasoningPipeline([
+    PlanAndExecutePattern(max_steps=15),
+    ReActPattern(max_steps=10),
+])
+result = await pipeline.execute(
+    my_agent,
+    "Analyse last quarter's sales data and produce a report.",
+)
+```
+
+The returned `ReasoningResult` contains a merged trace spanning all patterns and
+a total `steps_taken` count.
+
+---
+
+## Configurable Prompts
+
+Every pattern uses `PromptTemplate` instances for its LLM calls. By default, the
+built-in templates from `reasoning.prompts` are used. You can override any prompt
+by passing a `prompts` dict to the pattern constructor. Slots that are not overridden
+use the built-in defaults.
+
+A `PromptTemplate` takes three positional arguments — `name`, `system_template`,
+and `user_template` — and declares its required variables as a list of plain
+strings via the keyword-only `required_variables`. Its `.render(**vars)` returns
+a `Prompt` object (with `.system` and `.user`), not a bare string.
+
+```python
+from pyfly.agentic.prompts.template import PromptTemplate
+from pyfly.agentic.reasoning import ReActPattern
+
+custom_thought = PromptTemplate(
+    "my:react:thought",
+    "You are a careful reasoner.",
+    "Think step by step about: {{ context }}",
+    required_variables=["context"],
+)
+pattern = ReActPattern(prompts={"thought": custom_thought})
+```
+
+### Prompt Slots per Pattern
+
+- **ReActPattern**: `"thought"`, `"action"`
+- **ChainOfThoughtPattern**: `"step"`
+- **PlanAndExecutePattern**: `"plan"`, `"execute_step"`, `"replan"`
+- **ReflexionPattern**: `"critique"`, `"retry"`
+- **TreeOfThoughtsPattern**: `"branch"`, `"evaluate"`
+- **GoalDecompositionPattern**: `"decompose"`, `"plan_phase"`, `"execute_task"`
+
+All built-in templates are registered in the active runtime’s `prompt_registry` under the
+`reasoning:` namespace (e.g. `"reasoning:react:thought"`, `"reasoning:cot:step"`).
+Templates can also be retrieved from the registry at runtime:
+
+```python
+from pyfly.agentic.prompts.registry import prompt_registry
+
+thought_prompt = prompt_registry.get("reasoning:react:thought")
+```
+
+---
+
+## Output Reviewer Integration
+
+Any pattern can be paired with an `OutputReviewer` from the validation module.
+When set, the final output is validated after `_extract_output()` and retried if
+it does not match the expected schema. If all retries fail, the raw output is
+returned with a warning logged (non-fatal by default).
+
+```python
+from pyfly.agentic.validation import OutputReviewer
+from pyfly.agentic.reasoning import ReActPattern
+from pydantic import BaseModel
+
+class MyOutput(BaseModel):
+    answer: str
+    confidence: float
+
+reviewer = OutputReviewer(output_type=MyOutput, max_retries=2)
+pattern = ReActPattern(reviewer=reviewer)
+result = await pattern.execute(my_agent, "What is 2+2?")
+```
+
+See the [Validation Guide](validation.md) for full `OutputReviewer` documentation.
+
+---
+
+## Pattern Registry
+
+The `ReasoningPatternRegistry` provides framework-wide discovery of reasoning
+patterns by name. All six built-in patterns can be registered at application
+startup, and custom patterns can be added dynamically.
+
+```python
+from pyfly.agentic.reasoning.registry import reasoning_registry
+from pyfly.agentic.reasoning import ReActPattern
+
+reasoning_registry.register("react", ReActPattern)
+
+# Look up and instantiate later
+pattern_cls = reasoning_registry.get("react")
+pattern = pattern_cls(max_steps=5)
+```
+
+---
+
+## Creating a Custom Pattern
+
+To create a custom reasoning pattern, extend `AbstractReasoningPattern` and override
+the template method hooks. The base class handles the loop, tracing, memory, step
+counting, and error handling for you.
+
+```python
+from pyfly.agentic.reasoning.base import AbstractReasoningPattern
+from pyfly.agentic.reasoning.models import ReasoningThought
+from pyfly.agentic.reasoning.trace import ThoughtStep, ReasoningStep
+
+class MyCustomPattern(AbstractReasoningPattern):
+    def __init__(self, *, max_steps: int = 10, step_timeout: float | None = None, **kwargs):
+        super().__init__("my_custom", max_steps=max_steps, step_timeout=step_timeout, **kwargs)
+
+    async def _reason(self, state: dict) -> ReasoningStep | None:
+        agent = state["agent"]
+        memory = state.get("memory")
+        prompt = f"Reason about: {state['input']}"
+        prompt = self._enrich_prompt(prompt, memory) # inject working memory
+        thought = await self._structured_run(agent, prompt, ReasoningThought)
+        state["last_thought"] = thought
+        if thought.is_final:
+            state["output"] = thought.final_answer or thought.content
+        return ThoughtStep(content=thought.content, confidence=thought.confidence)
+
+    async def _act(self, state: dict) -> ReasoningStep | None:
+        # Optional: take an action based on the thought
+        return None
+
+    async def _should_continue(self, state: dict) -> bool:
+        thought = state.get("last_thought")
+        return thought is None or not thought.is_final
+
+    async def _extract_output(self, state: dict):
+        return state.get("output")
+```
+
+Register it to make it available framework-wide:
+
+```python
+from pyfly.agentic.reasoning.registry import reasoning_registry
+
+reasoning_registry.register("my_custom", MyCustomPattern)
+```
+
+---
+
+## Examples
+
+The `examples/` directory contains runnable scripts for every pattern:
+
+- `reasoning_cot.py` — Chain of Thought
+- `reasoning_react.py` — ReAct
+- `reasoning_reflexion.py` — Reflexion
+- `reasoning_plan.py` — Plan-and-Execute
+- `reasoning_tot.py` — Tree of Thoughts
+- `reasoning_goal.py` — Goal Decomposition
+- `reasoning_pipeline.py` — Pipeline (chaining patterns)
+- `reasoning_memory.py` — Memory integration
+
+Run any example with:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+uv run python examples/reasoning_cot.py
+```
+
+See [examples/README.md](https://github.com/fireflyframework/fireflyframework-pyfly/blob/main/examples/agentic/catalogue.md) for the full list.
+
+## Reasoning traces and function tools
+
+Reasoning patterns orchestrate calls to the supplied agent. For example,
+`ReActPattern._act` invokes `agent.run(prompt)` and records an
+`ActionStep(tool_name="react_action", ...)` describing that reasoning stage.
+This trace entry is not itself a function-tool dispatch record.
+
+Configure real function tools on `Agent(tools=[...])`; Pydantic AI dispatches
+them during the agent's model calls, including calls made by a reasoning pattern.
+Inspect the agent's messages or tool lifecycle events for individual tool calls.
+See the [Tools guide](tools.md) for registration and lifecycle hooks, and the
+[IDP guide](use-case-idp.md) for an end-to-end reasoning example.

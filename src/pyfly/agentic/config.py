@@ -1,0 +1,408 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Central configuration for the Firefly Agentic framework.
+
+All configuration values can be overridden via environment variables prefixed
+with ``PYFLY_AGENTIC_``.  For example, setting ``PYFLY_AGENTIC_DEFAULT_MODEL``
+in the environment will override the ``default_model`` field.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from collections.abc import Callable
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from pyfly.core.config import config_properties
+
+REMOVED_NATIVE_FIELDS = {
+    "vector_store_namespace": "pass namespace= explicitly to vector-store operations",
+    "default_vector_store": "construct and inject an explicit VectorStoreProtocol adapter",
+    "default_embedding_model": "select an explicit provider embedder constructor and model argument",
+    "validation_enabled": "configure explicit output validators on Agent or the pipeline",
+    "prompt_templates_dir": "pass an explicit path to PromptLoader.from_directory",
+    "experiment_storage": "use an explicit ExperimentTracker; SQL persistence requires a native Data adapter",
+    "tools_sandbox_enabled": "configure each tool's host guards and allowlists explicitly",
+    "http_pool_enabled": "configure the native HttpClientPort under pyfly.client",
+    "http_pool_size": "configure the native HttpClientPort under pyfly.client",
+    "http_pool_max_keepalive": "configure the native HttpClientPort under pyfly.client",
+    "http_pool_timeout": "configure pyfly.client.timeout",
+    "memory_postgres_url": "configure pyfly.data.relational and memory_datasource",
+    "memory_postgres_pool_size": "configure native pyfly.data.relational pool settings",
+    "memory_postgres_pool_min_size": "configure native pyfly.data.relational pool settings",
+    "memory_mongodb_url": "configure native pyfly.data.document.uri",
+    "memory_mongodb_pool_size": "configure native pyfly.data.document pool settings",
+}
+
+
+@config_properties("pyfly.agentic")
+class AgenticConfig(BaseModel):
+    """Typed Agentic configuration bound through the PyFly configuration tree.
+
+    This configuration object centralises every tunable knob in the framework.
+    Individual modules read from this configuration at runtime via
+    :func:`get_config` so that applications use one effective configuration tree.
+    Direct construction accepts explicit values; it does not read a .env file.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    # -- Model defaults ------------------------------------------------------
+    default_model: str = "openai:gpt-4o"
+    """The default Pydantic AI model identifier used when no model is specified."""
+
+    default_temperature: float | None = None
+    """Default sampling temperature applied to every agent's model settings when
+    the caller does not specify one. ``None`` (default) leaves it unset so each
+    provider uses its own default — important because some models (e.g. OpenAI
+    ``o1``/``o3`` reasoning models) reject an explicit temperature."""
+
+    max_retries: int = 3
+    """Default maximum number of retries for agent runs and tool calls."""
+
+    # -- Reasoning -----------------------------------------------------------
+    reasoning_output_mode: Literal["tool", "native", "prompted"] | None = None
+    """Structured-output strategy for reasoning patterns' internal LLM calls
+    (plan / thought / reflection / evaluation / decomposition). ``None``
+    (default) leaves pydantic-ai to use its tool-calling output. ``"tool"``
+    forces tool-based structured output; ``"native"`` uses provider-native
+    JSON-schema output (OpenAI, Google, ...); ``"prompted"`` injects the schema
+    into the prompt and parses the JSON reply — the most portable choice for
+    models without tool-calling or native structured-output support. A
+    per-pattern ``output_mode=`` argument overrides this default."""
+
+    # -- Observability -------------------------------------------------------
+    observability_enabled: bool = True
+    """Whether OpenTelemetry instrumentation is active."""
+
+    native_instrumentation_enabled: bool = True
+    """Whether to enable pydantic-ai's **native** OpenTelemetry instrumentation on
+    every agent — rich GenAI-semantic-convention spans for each model request
+    (``chat``) and tool call (``execute_tool``), nested under the framework's
+    ``agent.{name}`` span, plus native GenAI token/duration metrics. **On by
+    default** (gated by :attr:`observability_enabled`): the framework leaves the
+    tracer/meter providers unset (``None``) so telemetry flows through the global
+    OpenTelemetry API and costs nothing until the host wires an SDK/exporter, and
+    prompt/response content is stripped unless :attr:`instrumentation_include_content`
+    is set — so default-on is safe. Set to ``False`` to suppress the per-request /
+    per-tool-call span volume on very high-throughput hosts (the coarse
+    ``agent.{name}`` span and firefly metrics remain)."""
+
+    instrumentation_include_content: bool = False
+    """Whether native instrumentation records prompt/response **content** (and
+    tool args/results, binary content) as span attributes. ``False`` (default)
+    strips content so the framework never silently leaks prompts/PII into traces
+    — message events keep only their role/part-type skeleton. Overrides
+    pydantic-ai's own ``include_content=True`` default."""
+
+    instrumentation_version: Literal[1, 2, 3, 4, 5, 6] = 5
+    """GenAI semantic-convention version for native instrumentation span names
+    and attributes. ``5`` (default) matches pydantic-ai. Legacy values 1-4
+    are upgraded to 5; 6 opts into the newer telemetry format."""
+
+    instrumentation_event_mode: Literal["attributes", "logs"] = "attributes"
+    """Legacy setting retained for configuration compatibility. PydanticAI v2
+    stores message events as span attributes; this field no longer changes routing."""
+
+    log_level: str = "INFO"
+    """Default level used when the explicit configure_logging helper omits level.
+    Managed application logging remains owned by the host logging configuration."""
+
+    # -- Plugins -------------------------------------------------------------
+    plugin_auto_discover: bool = True
+    """Whether to discover managed entry-point plugins on startup."""
+
+    artifact_cache_root: str = "~/.cache/pyfly.agentic/dbstore"
+    """Local SQLite artifact cache root; explicit storage paths take precedence."""
+
+    # -- Content processing --------------------------------------------------
+    default_chunk_size: int = 4000
+    """Default maximum number of estimated tokens per chunk."""
+
+    default_chunk_overlap: int = 200
+    """Default token overlap between consecutive chunks."""
+
+    max_context_tokens: int = 128_000
+    """Maximum context window size in tokens."""
+
+    # -- Validation & QoS ---------------------------------------------------
+
+    qos_min_confidence: float = 0.7
+    """Minimum confidence threshold for QoS guards."""
+
+    qos_consistency_runs: int = 3
+    """Number of runs for consistency checking."""
+
+    # -- Cost tracking & metering --------------------------------------------
+    cost_tracking_enabled: bool = True
+    """Whether usage and cost tracking is active."""
+
+    budget_limit_usd: float | None = None
+    """Hard budget limit in USD. When exceeded, a ``BudgetExceededError`` is
+    raised (it is a hard gate, not a warning).
+
+    The gate enforces only over models that can be **priced** — a model
+    ``genai-prices`` cannot price contributes $0 and is not counted. For
+    budget-critical deployments set ``cost_strict=True`` to fail closed
+    (``UnknownModelCostError``) on any unpriceable model instead."""
+
+    cost_strict: bool = False
+    """When true, :func:`resolve_cost` raises :class:`UnknownModelCostError`
+    instead of returning ``None`` when no resolver can price the model.
+    Equivalent env var: ``PYFLY_AGENTIC_COST_STRICT``."""
+
+    # -- Memory -------------------------------------------------------------
+    memory_backend: Literal["in_memory", "file", "relational", "postgres", "mongodb"] = "in_memory"
+    """Default memory backend: ``"in_memory"``, ``"file"``, ``"postgres"``, or ``"mongodb"``."""
+
+    memory_max_conversation_tokens: int = 128_000
+    """Maximum tokens retained in conversation memory per conversation."""
+
+    memory_summarize_threshold: int = 10
+    """Number of evicted turns before auto-summarization triggers."""
+
+    memory_file_dir: str = ".firefly_memory"
+    """Directory for file-based memory persistence."""
+
+    memory_datasource: str | None = None
+    """Named native relational datasource, or primary when unset."""
+    memory_table: str | None = None
+    """Explicit table; default preserves each backend's historical location."""
+    memory_schema: str | None = None
+    memory_create_table: bool | None = None
+    """None follows datasource ddl-auto; False requires existing migrated tables."""
+    memory_create_indexes: bool = True
+    memory_postgres_schema: str = "firefly_memory"
+    memory_mongodb_database: str = "firefly_memory"
+    memory_mongodb_collection: str = "entries"
+
+    # -- Usage tracker -------------------------------------------------------
+    usage_tracker_max_records: int = 10_000
+    """Maximum number of usage records retained in memory.  Oldest records
+    are evicted when this limit is reached (FIFO)."""
+
+    # -- Quota & Rate Limiting -----------------------------------------------
+    quota_enabled: bool = False
+    """Whether API quota management and rate limiting is active."""
+
+    quota_budget_daily_usd: float | None = None
+    """Daily spending budget in USD.  When exceeded, requests are rejected."""
+
+    quota_rate_limits: dict[str, int] = {}
+    """Per-model rate limits as ``{model: requests_per_minute}``.
+    Example: ``{"openai:gpt-4o": 60, "openai:gpt-4o-mini": 200}``."""
+
+    quota_adaptive_backoff: bool = True
+    """Whether to use adaptive exponential backoff for 429 (rate limit) responses."""
+
+    rate_limit_max_retries: int = 3
+    """Max retry attempts for HTTP 429 rate limit errors."""
+
+    rate_limit_base_delay: float = 1.0
+    """Base delay (seconds) for rate limit exponential backoff."""
+
+    rate_limit_max_delay: float = 60.0
+    """Maximum delay (seconds) between rate limit retries."""
+
+    # -- Security (Encryption) -----------------------------------------------
+    encryption_enabled: bool = False
+    """Whether data encryption at rest is active."""
+
+    encryption_key: str | None = None
+    """Encryption key for AES-256-GCM (32 bytes, or password for key derivation)."""
+
+    # -- Embeddings -------------------------------------------------------
+
+    embedding_batch_size: int = 100
+    """Maximum number of texts per embedding API call."""
+
+    embedding_max_retries: int = 3
+    """Maximum retries for embedding API calls."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_cost_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for key, guidance in REMOVED_NATIVE_FIELDS.items():
+                if key in data:
+                    raise ValueError(f"{key} was removed; {guidance}")
+            removed = {
+                "cost_calculator",
+                "budget_alert_threshold_usd",
+                "auth_api_keys",
+                "auth_bearer_tokens",
+                "cors_allowed_origins",
+                "otlp_endpoint",
+                "rbac_enabled",
+                "rbac_jwt_secret",
+                "rbac_multi_tenant",
+            } & set(data)
+            if removed:
+                raise ValueError(
+                    f"Removed config fields: {sorted(removed)}. Serving/exposure (REST/queue "
+                    "auth, CORS) is now owned by the host service; see CHANGELOG."
+                )
+        return data
+
+    @model_validator(mode="after")
+    def _validate_cross_fields(self) -> AgenticConfig:
+        """Validate cross-field constraints."""
+        if self.instrumentation_event_mode != "attributes":
+            raise ValueError(
+                "instrumentation_event_mode supports attributes only with native PydanticAI instrumentation"
+            )
+        if self.default_chunk_overlap >= self.default_chunk_size:
+            raise ValueError(
+                f"default_chunk_overlap ({self.default_chunk_overlap}) "
+                f"must be less than default_chunk_size ({self.default_chunk_size})"
+            )
+        if self.qos_consistency_runs < 2:
+            raise ValueError(f"qos_consistency_runs ({self.qos_consistency_runs}) must be >= 2")
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Singleton accessor — double-checked locking pattern ensures the config is
+# created exactly once, even under concurrent access from multiple threads.
+# ---------------------------------------------------------------------------
+
+_config_instance: AgenticConfig | None = None
+_config_lock = threading.Lock()
+
+#: Callables told when a configuration is installed (``set_config``) or dropped
+#: (``reset_config``). Anything built at import time from ``get_config()`` — the process usage
+#: tracker is the one that bit — subscribes here so a later install reaches it. Kept as a
+#: hook rather than an import: ``observability.usage`` imports this module, so this module
+#: cannot import the tracker back without a cycle.
+_installed_hooks: list[Callable[[AgenticConfig], None]] = []
+
+
+def on_config_installed(hook: Callable[[AgenticConfig], None]) -> Callable[[AgenticConfig], None]:
+    """Register *hook* to run with the config each time one is installed, built or reset.
+
+    The hook runs at once with the current instance (building it from the environment if
+    nothing is installed yet), so a subscriber registered before the application called
+    ``set_config`` still starts from the right values. Returns *hook* so it can be used as a
+    decorator.
+    """
+    from pyfly.agentic._runtime_context import selected_runtime
+
+    runtime = selected_runtime()
+    if runtime is not None:
+        runtime._config_hooks.append(hook)
+    else:
+        _installed_hooks.append(hook)
+    hook(get_config())
+    return hook
+
+
+def _notify_installed(config: AgenticConfig) -> None:
+    for hook in list(_installed_hooks):
+        try:
+            hook(config)
+        except Exception:  # noqa: BLE001 — one subscriber must not veto the install for the others
+            logging.getLogger(__name__).warning("config hook %r failed", hook, exc_info=True)
+
+
+def get_config() -> AgenticConfig:
+    """Return the singleton :class:`AgenticConfig` instance.  Thread-safe.
+
+    The instance is built from the environment on first access, and the subscribers of
+    :func:`on_config_installed` are told then — a build is an install.
+    """
+    from pyfly.agentic._runtime_context import selected_runtime
+
+    runtime = selected_runtime()
+    if runtime is not None:
+        from pyfly.agentic._runtime_context import _operation_config
+
+        override = _operation_config.get()
+        return override[1] if override is not None and override[0] is runtime else runtime.config
+    global _config_instance  # noqa: PLW0603
+    if _config_instance is None:
+        built: AgenticConfig | None = None
+        with _config_lock:
+            if _config_instance is None:
+                from pyfly.agentic.auto_configuration import bind_agentic_config
+                from pyfly.core.config import Config
+
+                _config_instance = built = bind_agentic_config(Config())
+        if built is not None:
+            _notify_installed(built)
+    return _config_instance
+
+
+def set_config(config: AgenticConfig) -> None:
+    """Install ``config`` as the instance :func:`get_config` returns from now on.
+
+    For a host with its own configuration tree — a PyFly ``pyfly.yaml``, a settings service —
+    that builds the :class:`AgenticConfig` itself and needs the framework to read it,
+    rather than the process environment. Before this setter existed the singleton had no
+    public door, so such a host's translated settings never reached the framework: the usage
+    tracker kept its 10 000-record default, ``default_model`` stayed the framework's, and the
+    only alternatives were exporting ``PYFLY_AGENTIC_*`` variables or writing the private
+    global.
+
+    Installing is not only assignment. Whatever was built at import time from the previous
+    instance is told (:func:`on_config_installed`): the process usage tracker
+    (``observability.usage.default_usage_tracker``) takes the new ``usage_tracker_max_records``
+    and ``budget_limit_usd`` at once, even though ``agents.base`` imported it long before this
+    call — so a host may install its config after its imports, where it naturally does. An
+    agent may also be given a config of its own (``Agent(config=...)``), which governs
+    that agent's middleware, retries, temperature, cost gate and rate limit; the process ledger
+    is shared and only ``set_config`` sizes it, unless the agent is given a ``usage_tracker``
+    of its own.
+    """
+    if not isinstance(config, AgenticConfig):
+        raise TypeError(f"set_config expects a AgenticConfig, got {type(config).__name__}")
+    from pyfly.agentic._runtime_context import selected_runtime
+
+    runtime = selected_runtime()
+    if runtime is not None:
+        runtime.configure(config)
+        return
+    global _config_instance  # noqa: PLW0603
+    with _config_lock:
+        _config_instance = config
+    _notify_installed(config)
+
+
+def reset_config() -> None:
+    """Reset the cached configuration.  Useful in tests.
+
+    Subscribers registered with :func:`on_config_installed` are told, with a fresh
+    environment-built instance, so the process tracker returns to the defaults too.
+    """
+    from pyfly.agentic._runtime_context import selected_runtime
+
+    runtime = selected_runtime()
+    if runtime is not None:
+        runtime.configure(AgenticConfig())
+        return
+    global _config_instance  # noqa: PLW0603
+    with _config_lock:
+        _config_instance = None
+    # The singleton stays unbuilt: it is read from the environment on the next ``get_config``
+    # (a test that changed the environment for its own duration relies on that — building
+    # here would cache its variables past its teardown). Subscribers are told now with a
+    # transient environment-built instance so the process tracker does not keep a limit that
+    # was reset, and told again when the singleton is built.
+    try:
+        _notify_installed(AgenticConfig())
+    except Exception:  # noqa: BLE001 — a bad environment surfaces on the next get_config(), not here
+        logging.getLogger(__name__).debug("reset_config: environment not readable, subscribers not told", exc_info=True)

@@ -109,3 +109,15 @@
 **Feature flag** — A runtime definition that selects a typed value or variant using evaluation context; the caller supplies a default for missing, disabled or failed flags (Appendix F).
 
 **Targeting key** — A stable user or entity identifier used by the shared fractional algorithm to keep a subject in one rollout cohort (Appendix F).
+
+**Agentic runtime** — The application-owned configuration, registries, accounting and resource boundary for native agents and nested execution (Chapters 19–21).
+
+**Deferred tool approval** — A paused tool call identified by its call ID; an authenticated decision and preserved message history are required to resume it (Chapter 19).
+
+**RAG** — Retrieval-augmented generation: retrieve authorized evidence and then generate an answer constrained by it. Similarity and schema validation do not establish truth (Chapter 20).
+
+**Scoped vector store** — A retrieval interface requiring trusted tenant and workspace identifiers for every data operation (Chapter 20).
+
+**Agentic journal** — A sequence-keyed record of model-call results used for replay; its persistence may be best-effort and does not make arbitrary business effects exactly once (Chapter 21).
+
+**Workflow budget** — Per-run limits on concurrency, agent calls and optional tokens, cost and wall time; distinct from application usage ledgers and subject quotas (Chapter 21).

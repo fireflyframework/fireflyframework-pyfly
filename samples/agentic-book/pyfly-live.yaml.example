@@ -1,0 +1,9 @@
+# Separate qualification profile; never used by the offline companion tests.
+# LUMEN_AGENT_MODEL must be a model identifier supported by the selected provider.
+# Supply that provider's credential environment variables outside this file.
+pyfly:
+  agentic:
+    enabled: true
+    default-model: ${LUMEN_AGENT_MODEL}
+    instrumentation-include-content: false
+    usage-tracker-max-records: 10000

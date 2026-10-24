@@ -1,0 +1,107 @@
+# Copyright 2026 Firefly Software Foundation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""DAG-based pipeline orchestrator for enterprise workflows.
+
+This package provides a Directed Acyclic Graph (DAG) execution engine that
+wires agents, reasoning patterns, validation, and tools into production
+pipelines where independent stages execute concurrently.
+
+Two builder modes exist:
+
+* **Port-based** (legacy, parallel): :class:`PipelineEngine` executes a DAG
+  whose nodes communicate via ``output_key``/``input_key`` edge ports.
+* **State-based**: configure ``PipelineBuilder(state=SomeModel)`` and nodes
+  become ``async (state) -> dict`` functions over a typed shared state.
+  Branching is one ``.branch(source, router)`` call. Optional checkpointing
+  via :class:`Checkpointer` enables resume after failure and mid-pipeline start.
+"""
+
+from pyfly.agentic.pipeline.audit import (
+    AuditEntry,
+    AuditLog,
+    FileAuditLog,
+    LoggingAuditLog,
+    OtelAuditLog,
+    QueryableAuditLog,
+)
+from pyfly.agentic.pipeline.builder import PipelineBuilder
+from pyfly.agentic.pipeline.checkpoint import (
+    Checkpointer,
+    CheckpointRecord,
+    FileCheckpointer,
+)
+from pyfly.agentic.pipeline.context import PipelineContext
+from pyfly.agentic.pipeline.dag import DAG, DAGEdge, DAGNode, FailureStrategy
+from pyfly.agentic.pipeline.engine import (
+    EventHandler,
+    Pause,
+    PipelineEngine,
+    PipelineEventHandler,
+    Send,
+)
+from pyfly.agentic.pipeline.reducers import append, extend, merge_dict, replace
+from pyfly.agentic.pipeline.result import ExecutionTraceEntry, NodeResult, PipelineResult
+from pyfly.agentic.pipeline.steps import (
+    AgentStep,
+    BatchLLMStep,
+    BranchStep,
+    CallableStep,
+    EmbeddingStep,
+    FanInStep,
+    FanOutStep,
+    ReasoningStep,
+    RetrievalStep,
+    StepExecutor,
+)
+
+__all__ = [
+    "DAG",
+    "AgentStep",
+    "AuditEntry",
+    "AuditLog",
+    "BatchLLMStep",
+    "BranchStep",
+    "CallableStep",
+    "CheckpointRecord",
+    "Checkpointer",
+    "DAGEdge",
+    "DAGNode",
+    "EmbeddingStep",
+    "ExecutionTraceEntry",
+    "FailureStrategy",
+    "EventHandler",
+    "FanInStep",
+    "FanOutStep",
+    "FileAuditLog",
+    "FileCheckpointer",
+    "LoggingAuditLog",
+    "NodeResult",
+    "OtelAuditLog",
+    "Pause",
+    "PipelineBuilder",
+    "PipelineContext",
+    "PipelineEngine",
+    "PipelineEventHandler",
+    "PipelineResult",
+    "QueryableAuditLog",
+    "ReasoningStep",
+    "RetrievalStep",
+    "Send",
+    "StepExecutor",
+    "append",
+    "extend",
+    "merge_dict",
+    "replace",
+]

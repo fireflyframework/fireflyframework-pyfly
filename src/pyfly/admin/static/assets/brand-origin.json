@@ -1,0 +1,46 @@
+{
+  "repository": "https://github.com/fireflyframework/brand-kit",
+  "commit": "b64a50e289b853cab54e5d59bc1b092b48c5eec4",
+  "version": "0.2.0",
+  "generator": "scripts/family-identity.mjs: familyLogo(python, theme)",
+  "dependencies": {
+    "@fontsource/manrope": "5.3.0",
+    "@fontsource-variable/manrope": "5.3.0",
+    "fontkit": "2.0.4"
+  },
+  "banner_sha256": "d0e2aeabed9405bd21e0adae7411550f16fc62b4229ad5729db7aa240c1da3c1",
+  "files": {
+    "pyfly-dark.svg": {
+      "source": "generated: scripts/family-identity.mjs familyLogo(python, dark)",
+      "sha256": "7af6fd197430b7dd4e0e762c232b5ec761febe70ad0895435f8767b1e36bdfab"
+    },
+    "pyfly-light.svg": {
+      "source": "generated: scripts/family-identity.mjs familyLogo(python, light)",
+      "sha256": "671bcee966b48488df447106c1f43a04c385ad26100cb5399db9d258f237ad96"
+    },
+    "Manrope-variable.woff2": {
+      "source": "node_modules/@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2",
+      "sha256": "a30ddcd349703aff7464c34bef3fffdff405ee50c113440d7c8693c02d210972"
+    },
+    "Manrope-OFL.txt": {
+      "source": "node_modules/@fontsource-variable/manrope/LICENSE",
+      "sha256": "d826ab6583b12c26807d8716a545bdbbb672df04f48608a364ba9efdbe501c30"
+    },
+    "brand-NOTICE.md": {
+      "source": "NOTICE.md",
+      "sha256": "41a01e1ddf5fae9f104635dfbaabd2bfadd165472bffc9a54599f1a3e60d6ac0"
+    },
+    "vendor/firefly/NOTICE.md": {
+      "source": "vendor/firefly/NOTICE.md",
+      "sha256": "bf335452f77088a4a0f26b359e068a11b8174da24b0e322acc05a3084f27355b"
+    },
+    "favicon.svg": {
+      "source": "generated: scripts/build.mjs 02-Icons/favicon.svg tile",
+      "sha256": "e93bca419603ca68224187ecec927dcc77d67108bf3bdaeef941c15dc12d07a0"
+    }
+  },
+  "generator_sha256": "4d15ec1a33719d38e9a0a595f4b5c8bfc481f886dc111e481c9595430990d2a6",
+  "additional_generators": {
+    "scripts/build.mjs": "35954f912088fead91c1113370c76c1acd4eabf5aba929f523bfabafeee87443"
+  }
+}

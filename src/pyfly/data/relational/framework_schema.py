@@ -48,6 +48,7 @@ Table                             Used by
 ``pyfly_oauth2_grants``           ``PostgresTokenStore``: refresh tokens, authorization codes, pushed requests
 ``pyfly_oauth2_token_families``   ``PostgresTokenStore``: the refresh-token rotation families
 ``pyfly_sessions``                ``SqlSessionStore`` (``pyfly.session.store=postgres``)
+``pyfly_agentic_memory``          ``RelationalMemoryStore`` (namespace-scoped Agentic memory)
 ``pyfly_session_registrations``   ``PostgresSessionRegistry``: the sessions of each principal
 ``pyfly_session_principals``      ``PostgresSessionRegistry``: a row per principal, locked by a login
 ``firefly_feature_flags``         ``SqlAlchemyFlagStore``: the writable feature-flag layer, shared with LaraFly
@@ -76,11 +77,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
+    JSON,
     TIMESTAMP,
     BigInteger,
     Boolean,
     Column,
     DateTime,
+    Float,
     Identity,
     Index,
     Integer,
@@ -94,6 +97,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects import mssql, mysql
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection, Dialect
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -106,6 +110,7 @@ if TYPE_CHECKING:
     from pyfly.data.relational.datasource_registry import DataSource, DataSourceRegistry
 
 __all__ = [
+    "AGENTIC_MEMORY",
     "CACHE_ENTRIES",
     "CREATE_ATTEMPTS",
     "EVENT_STORE",
@@ -132,6 +137,8 @@ __all__ = [
     "KeyString",
     "UtcTimestamp",
     "ZonelessUtcTimestamp",
+    "agentic_memory",
+    "agentic_memory_table",
     "cache_entries",
     "cache_entries_table",
     "context_datasource_registry",
@@ -203,6 +210,7 @@ framework_metadata = MetaData(naming_convention=NAMING_CONVENTION)
 ``target_metadata``."""
 
 ORCHESTRATION_STATE = "pyfly_orchestration_state"
+AGENTIC_MEMORY = "pyfly_agentic_memory"
 CACHE_ENTRIES = "pyfly_cache_entries"
 LOCKS = "pyfly_locks"
 USERS = "pyfly_users"
@@ -357,11 +365,13 @@ def long_binary() -> TypeEngine[bytes]:
 # ---------------------------------------------------------------------------------------------------------
 
 
-def _declare(kind: str, name: str, build: Callable[[str], Table]) -> Table:
+def _declare(kind: str, name: str, build: Callable[[str], Table], *, schema: str | None = None) -> Table:
     """The framework table *kind* named *name* on :data:`framework_metadata`, declared on first use."""
     if not _IDENTIFIER.match(name):
         raise ValueError(f"Invalid framework table name: {name!r} (letters, digits and underscores only)")
-    existing = framework_metadata.tables.get(name)
+    if schema is not None and not _IDENTIFIER.match(schema):
+        raise ValueError(f"Invalid framework schema name: {schema!r} (letters, digits and underscores only)")
+    existing = framework_metadata.tables.get(f"{schema}.{name}" if schema else name)
     if existing is not None:
         if existing.info.get(_KIND) != kind:
             raise ValueError(
@@ -372,6 +382,34 @@ def _declare(kind: str, name: str, build: Callable[[str], Table]) -> Table:
     table = build(name)
     table.info[_KIND] = kind
     return table
+
+
+def agentic_memory_table(name: str = AGENTIC_MEMORY, *, schema: str | None = None) -> Table:
+    """Agentic entries, with identity scoped by namespace and the original database row layout.
+
+    ``schema="firefly_memory", name="memory_entries"`` preserves the PostgreSQL provider's location.
+    Existing globally keyed tables require a migration to the compound primary key before use.
+    """
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("namespace", key_string(255), primary_key=True),
+            Column("entry_id", key_string(255), primary_key=True),
+            Column("scope", key_string(32), nullable=False),
+            Column("key", key_string(255), nullable=True),
+            Column("content", JSON().with_variant(JSONB(), "postgresql"), nullable=False),
+            Column("metadata", JSON().with_variant(JSONB(), "postgresql"), nullable=False),
+            Column("created_at", UtcTimestamp(), nullable=False),
+            Column("expires_at", UtcTimestamp(), nullable=True),
+            Column("importance", Float(), nullable=False),
+            Index(f"{table_name}_namespace_key", "namespace", "key", "created_at", "entry_id"),
+            Index(f"{table_name}_expires", "expires_at"),
+            schema=schema,
+        )
+
+    return _declare("agentic_memory", name, build, schema=schema)
 
 
 def orchestration_state_table(name: str = ORCHESTRATION_STATE) -> Table:
@@ -769,6 +807,9 @@ def feature_flag_changes_table(name: str = FEATURE_FLAG_CHANGES) -> Table:
 
     return _declare("feature_flag_changes", name, build)
 
+
+agentic_memory = agentic_memory_table()
+"""``pyfly_agentic_memory`` (:func:`agentic_memory_table`)."""
 
 orchestration_state = orchestration_state_table()
 """``pyfly_orchestration_state`` (:func:`orchestration_state_table`)."""
