@@ -19,9 +19,9 @@ description = "{{ name }} — built with PyFly"
 requires-python = ">=3.12"
 dependencies = [
 {% if has_web and has_fastapi %}
-    "pyfly[web-fastapi{% for f in features if f not in ('web', 'fastapi') %},{{ f }}{% endfor %}]",
+    "pyfly[web-fastapi{% for f in features if f not in ('web', 'fastapi') %},{{ f }}{% endfor %}]{% if has_agentic %} @ {{ release_wheel_url }}{% endif %}",
 {% elif features %}
-    "pyfly[{{ features | join(',') }}]",
+    "pyfly[{{ features | join(',') }}]{% if has_agentic %} @ {{ release_wheel_url }}{% endif %}",
 {% else %}
     "pyfly",
 {% endif %}
@@ -48,6 +48,11 @@ dev = [
     "mypy>=1.8",
 ]
 
+{% if has_agentic %}
+[tool.hatch.metadata]
+allow-direct-references = true
+
+{% endif %}
 [tool.hatch.build.targets.wheel]
 packages = ["src/{{ package_name }}"]
 

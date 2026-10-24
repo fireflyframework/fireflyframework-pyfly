@@ -140,6 +140,28 @@ Once running, visit:
 {% endif %}
 {% endif %}
 
+{% if has_agentic and archetype != "library" %}
+## Native Agentic
+
+The PyFly dependency is pinned to the official release wheel matching the CLI
+version that generated this project. If that CLI came from an unreleased source
+checkout, publish its matching release wheel before running `uv sync`.
+
+Agentic is enabled explicitly in `pyfly.yaml`. Inject `AgentFactory` from
+`pyfly.agentic.factory` into services to create application-owned agents.
+Pass a model explicitly or set `pyfly.agentic.default_model` before running an
+agent. Keep provider credentials in environment variables. For offline tests,
+pass `pydantic_ai.models.test.TestModel()`; no provider credentials are needed.
+
+Storage and integration extras are separate choices. Add the `agentic-` extras
+your application needs to its PyFly dependency, retaining any release wheel URL.
+In existing projects, `pyfly add agentic` preserves direct references and pins
+unversioned requirements to the CLI version's official wheel. A version constraint
+without a direct reference requires explicitly selecting a compatible wheel first.
+See the [Agentic guide](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/)
+for configuration.
+
+{% endif %}
 ## Development
 
 ```bash

@@ -21,7 +21,8 @@
 #   Via get.pyfly:   curl -fsSL https://get.pyfly.io/ | bash
 #   Uninstall:       bash install.sh --uninstall
 #   Custom dir:      PYFLY_HOME=/opt/pyfly bash install.sh
-#   Custom extras:   PYFLY_EXTRAS=web,data bash install.sh
+#   Custom extras:   PYFLY_EXTRAS=web,data-relational bash install.sh
+#   Native agents:   PYFLY_EXTRAS=agentic bash install.sh
 
 set -euo pipefail
 
@@ -261,7 +262,7 @@ prompt_install_dir() {
 prompt_extras() {
     if [ "$IS_INTERACTIVE" = true ] && [ -z "${PYFLY_EXTRAS:-}" ]; then
         printf "\n${BOLD}Available extras:${RESET}\n"
-        printf "  ${CYAN} 1${RESET}) full             — All modules incl. Granian + FastAPI (recommended)\n"
+        printf "  ${CYAN} 1${RESET}) full             — Core framework incl. Granian + FastAPI (Agentic is opt-in)\n"
         printf "  ${CYAN} 2${RESET}) web              — Web framework (Starlette + Uvicorn; see web-fast for Granian)\n"
         printf "  ${CYAN} 3${RESET}) web-fast         — High-performance web (Starlette + Granian + uvloop)\n"
         printf "  ${CYAN} 4${RESET}) web-fastapi      — FastAPI web framework (FastAPI + Granian + uvloop)\n"
@@ -278,6 +279,7 @@ prompt_extras() {
         printf "  ${CYAN}15${RESET}) granian          — Granian ASGI server (Rust/tokio, ~3x faster than Uvicorn)\n"
         printf "  ${CYAN}16${RESET}) hypercorn        — Hypercorn ASGI server (HTTP/2 and HTTP/3 support)\n"
         printf "  ${CYAN}17${RESET}) custom           — Enter comma-separated extras\n"
+        printf "  ${CYAN}18${RESET}) agentic          — Native agents, tools, reasoning and workflows\n"
         printf "\n${BOLD}Select extras${RESET} ${DIM}[1]${RESET}: "
         prompt_read choice
         case "${choice:-1}" in
@@ -297,6 +299,7 @@ prompt_extras() {
             14) EXTRAS="shell" ;;
             15) EXTRAS="granian" ;;
             16) EXTRAS="hypercorn" ;;
+            18) EXTRAS="agentic" ;;
             17)
                 printf "${BOLD}Enter extras${RESET} ${DIM}(comma-separated, e.g. web,data-relational,cache,security)${RESET}: "
                 prompt_read custom_extras

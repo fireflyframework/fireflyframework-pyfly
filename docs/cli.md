@@ -219,7 +219,20 @@ Features control which PyFly extras are included as dependencies and which confi
 | `scheduling` | Cron-based task scheduling |
 | `observability` | Prometheus metrics, OpenTelemetry tracing |
 | `cqrs` | Command/Query Responsibility Segregation |
+| `agentic` | Native AI agents, injectable `AgentFactory`, application-owned runtime and explicit activation |
 | `shell` | Spring Shell-inspired CLI commands with DI |
+
+Select Agentic in the interactive wizard or scaffold it with
+`pyfly new agent-service --archetype core --features agentic`. This adds the
+`agentic` extra and `pyfly.agentic.enabled: true` to the generated configuration.
+The PyFly dependency is pinned to the official release wheel matching the installed
+CLI version. A CLI from an unreleased source checkout requires that matching wheel
+to be published before the generated dependency can be resolved.
+Inject `AgentFactory` from `pyfly.agentic.factory` into services, then pass a model
+explicitly or configure `pyfly.agentic.default_model`. Provider credentials belong
+in environment variables. Storage and provider integration extras remain explicit
+choices; see [Agentic installation](modules/agentic/getting-started/installation.md).
+Existing archetype defaults and the `full` extra do not enable Agentic.
 
 ### Core Archetype
 
@@ -1498,10 +1511,21 @@ Manage PyFly feature extras in an existing project's `pyproject.toml`:
 ```bash
 pyfly features                # list features and which are enabled here
 pyfly add cache security      # add extras to the pyfly[...] dependency
+pyfly add agentic             # add native Agentic dependencies; prints activation tips
 pyfly remove cache --yes      # remove extras (‑‑yes skips the prompt)
 ```
 
 After `add`/`remove`, run `uv sync` to install. `add` also prints feature-specific tips.
+These commands preserve existing direct wheel references and environment markers.
+When adding `agentic` without an existing PyFly direct reference, unversioned PyFly
+requirements are pinned to the installed CLI version's official release wheel.
+Explicit version constraints are rejected before the file changes: review the
+constraint and select a compatible official wheel reference explicitly. Hatchling
+projects gain the required direct-reference metadata setting when absent; an
+explicit policy disabling direct references must be changed before retrying.
+Other feature edits keep version constraints intact. For an existing Agentic
+application, also set `pyfly.agentic.enabled: true` in `pyfly.yaml`; disable it when
+removing the module's dependencies.
 
 ### Build & packaging
 

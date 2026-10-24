@@ -29,9 +29,9 @@ This guide covers every way to install PyFly — from the interactive installer 
 ```bash
 # Clone the repository
 git clone https://github.com/fireflyframework/fireflyframework-pyfly.git
-cd pyfly
+cd fireflyframework-pyfly
 
-# Full installation (all modules)
+# Core framework installation (Agentic is opt-in)
 bash install.sh
 
 # Or with specific extras
@@ -106,13 +106,24 @@ Default: `~/.pyfly`. This directory will contain the PyFly source code, a dedica
 
 ```
 Which extras should be installed?
-  1) full — All modules (recommended)
+  1) full — Core framework (Agentic is opt-in)
   2) web — Web framework (Starlette, uvicorn)
-  3) data-relational — SQL Database (SQLAlchemy, Alembic)
-  4) data-document — Document Database (MongoDB, Beanie ODM)
-  5) eda — Event-Driven (Kafka, RabbitMQ)
-  6) security — Auth & JWT
-  7) custom — Enter comma-separated extras
+  3) web-fast — Starlette, Granian and uvloop
+  4) web-fastapi — FastAPI, Granian and uvloop
+  5) fastapi — FastAPI adapter
+  6) data-relational — SQL Database (SQLAlchemy, Alembic)
+  7) data-document — Document Database (MongoDB, Beanie ODM)
+  8) eda — Event-Driven (Kafka, RabbitMQ)
+  9) cache — Redis and in-memory caching
+ 10) client — HTTP client, circuit breaker and retry
+ 11) security — Auth & JWT
+ 12) scheduling — Cron and scheduled tasks
+ 13) observability — Prometheus and OpenTelemetry
+ 14) shell — CLI commands and interactive REPL
+ 15) granian — Granian ASGI server
+ 16) hypercorn — HTTP/2 and HTTP/3 server
+ 17) custom — Enter comma-separated extras
+ 18) agentic — Native agents, tools, reasoning and workflows
 
 Your choice [1]:
 ```
@@ -610,4 +621,15 @@ pip uninstall pyfly
 
 ## Agentic extras
 
-Agentic is opt-in: from a native source checkout use `python -m pip install -e ".[agentic]"`, then set `pyfly.agentic.enabled: true`. Add namespaced integrations such as `agentic-relational`, `agentic-postgres`, `agentic-binary` or `agentic-all`; existing PyFly extras keep their meanings. See the [complete extras table and source-installation status](modules/agentic/getting-started/installation.md). The standalone Agentic installer does not install this native module.
+Agentic is opt-in. Choose option **18** in the installer, or use
+`PYFLY_EXTRAS=agentic bash install.sh`. Use the custom option to combine it with
+other framework modules, for example `web,agentic-relational`. The installer
+includes the CLI automatically. The existing `full` extra keeps its core framework
+meaning and does not implicitly install AI providers.
+
+From a native source checkout, use `python -m pip install -e ".[agentic]"`, then
+set `pyfly.agentic.enabled: true`. Add namespaced integrations such as
+`agentic-relational`, `agentic-postgres`, `agentic-binary` or `agentic-all`;
+existing PyFly extras keep their meanings. See the
+[complete extras table and installation guide](modules/agentic/getting-started/installation.md).
+The standalone Agentic installer does not install this native module.

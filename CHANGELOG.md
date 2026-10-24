@@ -27,6 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Apply the canonical `fireflyframework/brand-kit` logos, Manrope font, colors and
   favicon throughout `pyfly admin`, including light, dark and mobile layouts.
 - Publish downloadable SHA-256 checksums for every package and book release asset.
+- Expose Agentic in CLI project creation, the interactive feature wizard and
+  feature management, plus an explicit installer option. Generated Agentic
+  applications select the official GitHub Release wheel for their CLI version.
 
 ### Changed
 

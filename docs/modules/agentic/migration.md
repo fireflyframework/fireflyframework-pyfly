@@ -28,7 +28,7 @@ changes; their release numbers do not name a PyFly Agentic release.
 | Version lookup | `version("fireflyframework-agentic")` | `version("pyfly")`; package version follows PyFly |
 | State ownership | Process defaults | Application-owned `AgenticRuntime` |
 
-1. Use the staged PyFly v26.10.08 candidate or a later verified release with its `agentic` extras following [installation](getting-started/installation.md).
+1. Use a verified PyFly release, v26.10.08 or later, with its `agentic` extras following [installation](getting-started/installation.md).
    Remove the standalone distribution from the application's dependency manifest
    and resolve a clean environment. Do not assume an older published PyFly wheel
    includes Agentic; verify the selected release and its artifacts.

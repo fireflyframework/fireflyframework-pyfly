@@ -12,10 +12,8 @@ those dependencies on every operating system.
 
 ## From a release
 
-The native module targets the staged **v26.10.08** candidate (package version
-`26.10.8`). Publication is a separate release gate: confirm the release and its
-assets exist before using the candidate URLs below. Until then use the source
-checkout. PyFly is distributed through
+This guide uses **v26.10.08** (package version `26.10.8`). Verify the release's
+assets before installing its wheel. PyFly is distributed through
 [GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases),
 not PyPI. Install the wheel and select the optional module explicitly:
 
@@ -54,6 +52,36 @@ or build and install its wheel. Record its commit and lock the resolved graph.
 The former standalone installer installs the former distribution; use PyFly's
 [installer guidance](../../../installation.md) for the framework, or the explicit
 source commands above for this opt-in module.
+
+## Scaffold or update an application
+
+With the PyFly CLI installed, select **agentic** in `pyfly new`'s interactive
+feature picker, or create a minimal service directly:
+
+```bash
+pyfly new agent-service --archetype core --features agentic
+```
+
+The generated dependency selects `pyfly[agentic]` with the official release wheel
+URL pinned to the installed CLI version. `pyfly.yaml` explicitly sets
+`pyfly.agentic.enabled: true`. If the CLI came from an unreleased source checkout,
+the matching release wheel must be published before resolving that dependency.
+No model, credentials, database or external backend is selected for you.
+Inject `AgentFactory` from
+`pyfly.agentic.factory` into services; pass a model explicitly or configure
+`pyfly.agentic.default_model` before running agents.
+
+For an existing application, run `pyfly add agentic`, resolve dependencies, and
+add the activation setting shown below. `pyfly features` shows the selected
+extra; `pyfly remove agentic --yes` removes it. Existing direct references and
+environment markers are preserved. Without an existing direct reference,
+unversioned PyFly dependencies are automatically pinned to the CLI version's
+official wheel. A non-direct version constraint is rejected before writing:
+review that constraint and explicitly choose a compatible official wheel.
+Hatchling projects gain the direct-reference metadata setting when absent; an
+explicit policy disabling it requires updating that setting before retrying.
+Disable Agentic before removing its dependencies. Add storage and
+integration extras explicitly to the same PyFly dependency as needed.
 
 ## Optional extras
 

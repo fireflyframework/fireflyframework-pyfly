@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -185,6 +186,38 @@ ensure_cli_extra() {
     def test_multiple_extras_adds_cli(self):
         result = self._run_ensure_cli_extra("web,data,security")
         assert result == "web,data,security,cli"
+
+
+@pytest.mark.parametrize(
+    ("interactive", "choice", "configured", "expected"),
+    [
+        (True, "18", "", "agentic,cli"),
+        (False, "", "agentic-relational", "agentic-relational,cli"),
+        (False, "", "", "full"),
+    ],
+)
+def test_installer_selects_native_agentic_without_changing_default(interactive, choice, configured, expected):
+    source = INSTALLER_PATH.read_text()
+    definitions = []
+    for name in ("ensure_cli_extra", "prompt_extras"):
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", source, re.MULTILINE | re.DOTALL)
+        assert match is not None
+        definitions.append(match.group())
+    script = (
+        "\n".join(definitions)
+        + """
+BOLD= RESET= CYAN= DIM=
+prompt_read() { printf -v "$1" '%s' "$TEST_CHOICE"; }
+info() { :; }
+prompt_extras
+printf '\\nEXTRAS=%s\\n' "$EXTRAS"
+"""
+    )
+    environment = os.environ.copy()
+    environment.update(IS_INTERACTIVE=str(interactive).lower(), TEST_CHOICE=choice, PYFLY_EXTRAS=configured)
+    result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True, env=environment, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split("EXTRAS=")[-1].strip() == expected
 
 
 class TestPythonVersionComparison:

@@ -16,25 +16,33 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import click
 
 from pyfly.cli.console import console, err_console
-from pyfly.cli.templates import AVAILABLE_FEATURES, FEATURE_DETAILS, FEATURE_TIPS
+from pyfly.cli.templates import AVAILABLE_FEATURES, FEATURE_DETAILS, FEATURE_TIPS, native_release_wheel_url
 
 # Matches a quoted ``pyfly`` requirement: optional ``[extras]`` and an optional
-# trailing version/marker (which must start with a PEP 508 separator so we never
+# trailing version, direct reference or marker (starting with a PEP 508 separator so we never
 # match a *different* package like ``"pyfly-extensions"``). The trailing part is
 # preserved when rewriting extras.
-_PYFLY_DEP_RE = re.compile(r'"pyfly(?:\[(?P<extras>[^\]]*)\])?(?P<rest>(?:[<>=!~;\s][^"]*)?)"')
+_PYFLY_DEP_RE = re.compile(r'"pyfly(?:\[(?P<extras>[^\]]*)\])?(?P<rest>(?:[<>=!~(;@\s][^"]*)?)"')
 
 
-def _update_pyfly_extras(dep: str, *, add: list[str] | None = None, remove: list[str] | None = None) -> str:
+def _update_pyfly_extras(
+    dep: str,
+    *,
+    add: list[str] | None = None,
+    remove: list[str] | None = None,
+    native_wheel_url: str | None = None,
+) -> str:
     """Return the ``"pyfly[...]"`` dependency string with extras added/removed.
 
     Any trailing version specifier / environment marker (e.g. ``>=26.0``) is
-    preserved.
+    preserved during ordinary edits. A native wheel pin accepts unversioned
+    requirements only.
     """
     match = _PYFLY_DEP_RE.fullmatch(dep.strip())
     if not match:
@@ -43,6 +51,15 @@ def _update_pyfly_extras(dep: str, *, add: list[str] | None = None, remove: list
     extras |= set(add or [])
     extras -= set(remove or [])
     rest = match.group("rest") or ""
+    if native_wheel_url is not None:
+        if rest.strip() and not rest.lstrip().startswith(";"):
+            raise ValueError(
+                "Cannot add agentic to a dependency with a version constraint. Review the constraint and "
+                "explicitly select a compatible official release wheel, preserving extras and environment markers. "
+                f"The installed CLI's release wheel is {native_wheel_url}"
+            )
+        marker = " " + rest if rest.startswith(";") else rest
+        rest = f" @ {native_wheel_url}{marker}"
     if not extras:
         return f'"pyfly{rest}"'
     return f'"pyfly[{",".join(sorted(extras))}]{rest}"'
@@ -58,10 +75,47 @@ def _project_root(ctx: click.Context) -> Path:
     raise SystemExit(1)
 
 
+def _allow_hatch_direct_references(text: str) -> str:
+    """Permit an auto-pinned dependency in a Hatchling project without overriding an explicit policy."""
+    config = tomllib.loads(text)
+    if config.get("build-system", {}).get("build-backend") != "hatchling.build":
+        return text
+    metadata = config.get("tool", {}).get("hatch", {}).get("metadata", {})
+    if metadata.get("allow-direct-references") is True:
+        return text
+    if "allow-direct-references" in metadata:
+        raise ValueError(
+            "Set tool.hatch.metadata.allow-direct-references=true before adding Agentic's wheel reference."
+        )
+    table = re.search(r"(?m)^\[tool\.hatch\.metadata\][ \t]*(?:#.*)?$", text)
+    if table:
+        return text[: table.end()] + "\nallow-direct-references = true" + text[table.end() :]
+    if "metadata" in config.get("tool", {}).get("hatch", {}):
+        raise ValueError("Set tool.hatch.metadata.allow-direct-references=true in the existing inline Hatch metadata.")
+    return text.rstrip() + "\n\n[tool.hatch.metadata]\nallow-direct-references = true\n"
+
+
 def _patch_pyproject(root: Path, *, add: list[str] | None = None, remove: list[str] | None = None) -> bool:
     path = root / "pyproject.toml"
     text = path.read_text()
-    new_text, n = _PYFLY_DEP_RE.subn(lambda m: _update_pyfly_extras(m.group(0), add=add, remove=remove), text)
+    has_direct_reference = any(match.group("rest").lstrip().startswith("@") for match in _PYFLY_DEP_RE.finditer(text))
+    native_wheel_url = native_release_wheel_url() if "agentic" in (add or []) and not has_direct_reference else None
+    try:
+        new_text, n = _PYFLY_DEP_RE.subn(
+            lambda m: _update_pyfly_extras(m.group(0), add=add, remove=remove, native_wheel_url=native_wheel_url), text
+        )
+        if native_wheel_url is not None and n:
+            new_text = _allow_hatch_direct_references(new_text)
+            try:
+                tomllib.loads(new_text)
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError(
+                    "Set tool.hatch.metadata.allow-direct-references=true in the existing inline Hatch "
+                    "configuration before adding Agentic's wheel reference."
+                ) from exc
+    except ValueError as exc:
+        err_console.print(f"✗ {exc}", style="error", markup=False, soft_wrap=True)
+        return False
     if n == 0:
         err_console.print("[error]✗[/error] Could not find a 'pyfly[...]' dependency to update.")
         return False

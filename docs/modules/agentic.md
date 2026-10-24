@@ -6,8 +6,8 @@ pipelines, dynamic workflows and operational controls with PyFly's configuration
 dependency injection and application lifecycle. It preserves the source capability
 APIs beneath the new namespace; Pydantic AI remains the provider execution engine.
 
-Install the `agentic` extra from the staged PyFly v26.10.08 candidate or a verified
-later release, then set `pyfly.agentic.enabled`
+Install the `agentic` extra from a verified PyFly release, v26.10.08 or later,
+then set `pyfly.agentic.enabled`
 to `true`. The module is disabled by default; PyFly's base installation does not
 need the AI SDKs. See [installation and every extra](agentic/getting-started/installation.md).
 
