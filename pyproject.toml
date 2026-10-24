@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.10.10"
+version = "26.10.11"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -167,7 +167,7 @@ data-relational = [
     # tested on the 2.0 and 2.1 lines: the lock holds the latest release, and CI runs the suite on the newest 2.0
     # release too (test-sqlalchemy-2-0). No upper bound; what differs between the lines is bridged in
     # pyfly.data.relational.sqlalchemy.compat.
-    "sqlalchemy[asyncio]>=2.1.6",
+    "sqlalchemy[asyncio]>=2.0.50",
     "alembic>=1.20.0",
     "aiosqlite>=0.22.1",
 ]

@@ -13,9 +13,15 @@ de la aplicación: versiones posteriores de Ragas y datasets tienen conflictos
 de API o dependencias descritos en las
 [notas de dependencias](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/).
 
+La versión de mantenimiento v26.10.11 conserva estas API y el mínimo de
+SQLAlchemy 2.0.50. El lock del repositorio selecciona 2.1.6; cada aplicación
+conserva y prueba su propio lock de dependencias. Las actualizaciones automáticas
+del proyecto cambian el lockfile; modificar requisitos exige revisar compatibilidad
+por separado.
+
 ## 19.1. Activar el módulo de forma explícita
 
-Instala el núcleo opcional desde el wheel oficial de v26.10.10, seleccionando
+Instala el núcleo opcional desde el wheel oficial de v26.10.11, seleccionando
 `pyfly[agentic]`, como indica la
 [guía de instalación](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/getting-started/installation/).
 PyFly se distribuye mediante GitHub Releases. Una instalación base no necesita
@@ -180,7 +186,7 @@ de SQLite con una fila de negocio y un hecho asíncrono.
 
 ## 19.10. Ejecutar scripts limitados con Code Mode
 
-Instala `pyfly[agentic,agentic-script-execution]` desde el wheel de v26.10.10.
+Instala `pyfly[agentic,agentic-script-execution]` desde el wheel de v26.10.11.
 Este extra opcional instala `pydantic-monty==0.0.23` y el binario de
 `pydantic-monty-runtime`. El SDK localiza el binario instalado y admite
 `MONTY_BIN` para indicar un ejecutable compatible. Si falta el runtime,

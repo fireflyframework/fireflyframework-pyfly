@@ -12,15 +12,15 @@ those dependencies on every operating system.
 
 ## From a release
 
-This guide uses **v26.10.10** (package version `26.10.10`). Verify the release's
+This guide uses **v26.10.11** (package version `26.10.11`). Verify the release's
 assets before installing its wheel. PyFly is distributed through
 [GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases),
 not PyPI. Install the wheel and select the optional module explicitly:
 
 ```bash
-python -m pip install "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.10/pyfly-26.10.10-py3-none-any.whl"
+python -m pip install "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.11/pyfly-26.10.11-py3-none-any.whl"
 # In a uv-managed application:
-uv add "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.10/pyfly-26.10.10-py3-none-any.whl"
+uv add "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.11/pyfly-26.10.11-py3-none-any.whl"
 ```
 
 Add namespaced extras such as `agentic-postgres` or `agentic-ollama-embeddings`

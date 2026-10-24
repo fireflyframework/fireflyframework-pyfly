@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.11 (2026-10-24)
+
+### Changed
+
+- Include the previously unreleased dependency metadata from Dependabot PR #196:
+  `agentic-openai-embeddings` and `agentic-azure-embeddings` require
+  `openai>=3.36.0`, `agentic-binary` requires `pypdf>=6.21.2`, and the `fastapi`
+  extra requires `fastapi>=0.158.0`. The v26.10.10 lock already selected OpenAI
+  3.37.0, pypdf 6.21.2 and FastAPI 0.162.0; these changes raise declared
+  minimums without introducing an application API change. PR #196 also separates
+  native uv project updates from pip documentation updates.
+- Preserve the qualified SQLAlchemy `>=2.0.50` minimum while the repository lock
+  selects 2.1.6. Use Dependabot's `lockfile-only` strategy for project dependency
+  updates so compatible lock refreshes do not raise application requirements.
+  Keep documentation requirements under the separate pip updater and retain
+  the existing SDK and feature-flag compatibility caps.
+- Raise the book toolchain's PyYAML requirement to `>=6.0.3,<7` from Dependabot
+  PR #197; the installed version remains 6.0.3.
+- Refresh the Lumen and native Agentic book companion locks against 26.10.11,
+  including the current SDK pins, so their documented locked installs work.
+
+### Documentation
+
+- Refresh current release installation examples and download links, document
+  dependency-floor maintenance, and rebuild the aligned English/Spanish books.
+  Native Agentic APIs, Monty 0.0.23 examples and canonical artwork are preserved.
+
 ## v26.10.10 (2026-10-24)
 
 ### Fixed

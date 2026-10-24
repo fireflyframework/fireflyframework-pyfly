@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
@@ -2561,8 +2561,8 @@ name = "httpcore2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "sys_platform != 'emscripten'" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
 wheels = [
@@ -3487,16 +3487,16 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "executing" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-sdk" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "protobuf" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "typing-extensions" },
+    { name = "executing", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "opentelemetry-api", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "opentelemetry-instrumentation", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "opentelemetry-sdk", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "opentelemetry-semantic-conventions", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "protobuf", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "requests", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "rich", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/56/5a/e6cccc98d30358b8beee47c61c2a1ca66ac7a76a07de9ba333aa5219b9a6/logfire-5.2.0.tar.gz", hash = "sha256:5fb9ddda303759766e86f5704a1ae96f3a0072906d52e21fbaad2e3c3b03f823", size = 1404990, upload-time = "2026-10-13T17:36:30.746Z" }
 wheels = [
@@ -3505,7 +3505,7 @@ wheels = [
 
 [package.optional-dependencies]
 httpx = [
-    { name = "opentelemetry-instrumentation-httpx" },
+    { name = "opentelemetry-instrumentation-httpx", marker = "python_full_version < '3.15' or sys_platform != 'win32'" },
 ]
 
 [[package]]
@@ -3516,7 +3516,7 @@ resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
 ]
 dependencies = [
-    { name = "logfire-sdk" },
+    { name = "logfire-sdk", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/09/08/8e5388d272d1d90e7a9f60fb2efadfbea65d7058e396f82da4ef1cfc730b/logfire-5.3.0.tar.gz", hash = "sha256:b3be3e29b14147fdf8a0e3ca3aa5b3e8b96d5e2539d6ea8c7e5eecec2dd40490", size = 3228, upload-time = "2026-10-23T15:11:01.751Z" }
 wheels = [
@@ -3525,7 +3525,7 @@ wheels = [
 
 [package.optional-dependencies]
 httpx = [
-    { name = "logfire-sdk", extra = ["httpx"] },
+    { name = "logfire-sdk", extra = ["httpx"], marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -3542,17 +3542,17 @@ name = "logfire-sdk"
 version = "5.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "certifi", version = "2026.10.23", source = { registry = "https://pypi.org/simple" } },
-    { name = "executing" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-sdk" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "protobuf" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "typing-extensions" },
+    { name = "certifi", version = "2026.10.23", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "executing", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "opentelemetry-api", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "opentelemetry-instrumentation", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "opentelemetry-sdk", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "opentelemetry-semantic-conventions", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "protobuf", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "requests", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "rich", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/c9/8c93f9eac2eb7e4eecad8a7074e16063bcc81fe6fa68e314599c8abc0a5e/logfire_sdk-5.3.0.tar.gz", hash = "sha256:a90a220724d5e09f9a0d792ae01b2aa9ed6b59f9b99c17cfc00d57bb5916ef87", size = 1443999, upload-time = "2026-10-23T15:11:03.98Z" }
 wheels = [
@@ -3561,7 +3561,7 @@ wheels = [
 
 [package.optional-dependencies]
 httpx = [
-    { name = "opentelemetry-instrumentation-httpx" },
+    { name = "opentelemetry-instrumentation-httpx", marker = "python_full_version >= '3.15' and sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -4356,7 +4356,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorclass" },
     { name = "easygui" },
-    { name = "msoffcrypto-tool", marker = "platform_python_implementation != 'PyPy' or (sys_platform != 'darwin' and sys_platform != 'win32')" },
+    { name = "msoffcrypto-tool", marker = "(platform_python_implementation != 'PyPy' and sys_platform == 'darwin') or (platform_python_implementation != 'PyPy' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'win32')" },
     { name = "olefile" },
     { name = "pcodedmp" },
     { name = "pyparsing" },
@@ -6108,7 +6108,7 @@ wheels = [
 
 [[package]]
 name = "pyfly"
-version = "26.10.10"
+version = "26.10.11"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -6837,7 +6837,7 @@ requires-dist = [
     { name = "redis", extras = ["hiredis"], marker = "extra == 'cache'", specifier = ">=8.1.0" },
     { name = "redis", extras = ["hiredis"], marker = "extra == 'redis'", specifier = ">=8.1.0" },
     { name = "rich", marker = "extra == 'cli'", specifier = ">=15.0.0" },
-    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'data-relational'", specifier = ">=2.1.6" },
+    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'data-relational'", specifier = ">=2.0.50" },
     { name = "sqlite-vec", marker = "extra == 'agentic-vectorstores-sqlite-vec'", specifier = ">=0.1.9" },
     { name = "starlette", marker = "extra == 'web'", specifier = ">=1.9.0" },
     { name = "structlog", marker = "extra == 'observability'", specifier = ">=26.1.0" },
@@ -7727,8 +7727,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography" },
-    { name = "jeepney" },
+    { name = "cryptography", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "jeepney", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [

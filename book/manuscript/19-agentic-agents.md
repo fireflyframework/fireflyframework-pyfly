@@ -12,9 +12,14 @@ community 0.3 adapter and datasets >=5.0.1. Resolve the complete application
 graph: newer Ragas and datasets releases have API or dependency conflicts in the
 [dependency notes](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/).
 
+The v26.10.11 maintenance release preserves these APIs and the SQLAlchemy
+2.0.50 minimum. The repository lock selects 2.1.6; applications keep and test
+their own dependency locks. Automated project updates change the lockfile;
+requirement changes need separate compatibility review.
+
 ## 19.1. Enable the module deliberately
 
-Install the optional core from the official v26.10.10 release wheel, selecting
+Install the optional core from the official v26.10.11 release wheel, selecting
 `pyfly[agentic]`, as shown in the
 [installation guide](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/getting-started/installation/).
 PyFly is distributed through GitHub Releases. Base installations need no AI SDK. Enable managed integration in the effective configuration tree:
@@ -178,7 +183,7 @@ actual SQLite transaction containing both a business row and an async fact.
 
 ## 19.10. Execute bounded scripts with Code Mode
 
-Install `pyfly[agentic,agentic-script-execution]` from the v26.10.10 release
+Install `pyfly[agentic,agentic-script-execution]` from the v26.10.11 release
 wheel. This optional extra installs `pydantic-monty==0.0.23` and the
 `pydantic-monty-runtime` binary. The SDK discovers its installed binary and
 honors `MONTY_BIN` for an explicit compatible executable. A missing runtime

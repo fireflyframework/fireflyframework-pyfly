@@ -1,9 +1,25 @@
-# Dependency updates in v26.10.10
+# Dependency updates in v26.10.11
 
-This release adapts sandbox execution to Monty 0.0.23 from Dependabot
-[PR #195](https://github.com/fireflyframework/fireflyframework-pyfly/pull/195),
-following the compatible updates from Dependabot
-[PR #193](https://github.com/fireflyframework/fireflyframework-pyfly/pull/193).
+This maintenance release adopts the book toolchain's `PyYAML>=6.0.3,<7` from
+Dependabot [PR #197](https://github.com/fireflyframework/fireflyframework-pyfly/pull/197).
+It retains `SQLAlchemy>=2.0.50` instead of raising the supported minimum to
+2.1.6 as proposed by [PR #198](https://github.com/fireflyframework/fireflyframework-pyfly/pull/198).
+The repository lock already selects SQLAlchemy 2.1.6 and PyYAML 6.0.3. No
+application API migration is required from v26.10.10; Pydantic AI 2.59.0,
+Monty 0.0.23 and the existing compatibility caps remain in place.
+This release also includes previously unreleased dependency metadata from
+Dependabot [PR #196](https://github.com/fireflyframework/fireflyframework-pyfly/pull/196):
+OpenAI/Azure embedding extras now require `openai>=3.36.0`, the binary extra
+requires `pypdf>=6.21.2`, and the FastAPI extra requires `fastapi>=0.158.0`.
+The v26.10.10 lock already selected OpenAI 3.37.0, pypdf 6.21.2 and FastAPI
+0.162.0; the changed metadata makes those minimum requirements explicit.
+SQLAlchemy's locked selection advances from 2.1.4 to 2.1.6 while its supported
+2.0.50 minimum stays intact. PR #196 also introduced the native uv project
+updater and separate pip documentation updater.
+
+If an application selects one of these extras, reconcile any direct SDK pins
+below its new minimum before resolving the full graph, then test that adapter.
+Applications that do not select those extras do not need to add those SDKs.
 The declared constraints are in `pyproject.toml`; `uv.lock` records the exact
 repository selection. Applications must resolve and validate their own locks.
 Python 3.12 and 3.13 remain the qualification targets.
@@ -11,18 +27,25 @@ Python 3.12 and 3.13 remain the qualification targets.
 ## Repository dependency automation
 
 Dependabot uses the `uv` ecosystem so Python updates include `uv.lock`, matching
-CI's `uv sync --locked` checks. The `increase-if-necessary` strategy retains an
-existing supported requirement when it already allows the updated dependency;
-it still updates the resolved lock. The Python dependency group includes both
-runtime and development dependencies.
+CI's `uv sync --locked` checks. The `lockfile-only` strategy updates resolved
+versions within existing requirements and leaves declared compatibility floors
+unchanged. Review requirement changes separately with the affected adapter's
+minimum-version and current-version qualification lanes. The Python dependency
+group includes both runtime and development dependencies. On the next native
+`uv` updater run, inspect its job payload and confirm `lockfile-only: true`;
+checked-in configuration records intent, not proof that the updater applied it.
+An earlier run reported `requirements-update-strategy: null` and
+`lockfile-only: false`, so that run does not establish an upstream strategy bug.
 
 The separate `pip` entry keeps maintaining the documentation requirements while
 excluding `pyproject.toml` and `uv.lock`, which belong to the `uv` entry.
 
 Intentional changes to Agentic extra requirements must also update the reviewed
 contracts in `scripts/agentic-migration-manifest.json`. Regenerate the lock and
-run `scripts/verify_agentic_migration.py` before submitting those changes. Keep
-the SQLAlchemy 2.0.50 floor and the separate 2.0/2.1 qualification lanes; a newer
+run `scripts/verify_agentic_migration.py` before submitting those changes.
+Explicitly pinned Pydantic AI and Monty upgrades require this deliberate
+manifest review and adapter qualification; lockfile-only automation cannot
+advance those pins. Keep the SQLAlchemy 2.0.50 floor and the separate 2.0/2.1 qualification lanes; a newer
 locked patch does not require dropping supported application combinations.
 
 See [uv's Dependabot integration](https://docs.astral.sh/uv/guides/integration/dependabot/)
@@ -45,6 +68,11 @@ do not reuse their removed backend installation instructions for this hotfix.
 
 | Dependency | Current selection | Compatibility boundary |
 | --- | --- | --- |
+| OpenAI SDK (`agentic-openai-embeddings`, `agentic-azure-embeddings`) | `>=3.36.0`; lock `3.37.0` | Reconcile lower application pins when selecting either embedding extra. |
+| pypdf (`agentic-binary`) | `>=6.21.2`; lock `6.21.2` | Reconcile lower application pins for binary ingestion. |
+| FastAPI (`fastapi`) | `>=0.158.0`; lock `0.162.0` | Reconcile lower application pins when selecting the FastAPI adapter. |
+| SQLAlchemy | `>=2.0.50`; lock `2.1.6` | Preserve qualified 2.0 applications while exercising the newer 2.1 selection in repository environments. |
+| PyYAML (book toolchain) | `>=6.0.3,<7`; installed `6.0.3` | Keep documentation parsing within the supported 6.x series. |
 | asyncmy | `>=0.2.11`; lock `0.2.16` | Keep the proven MySQL/MariaDB driver minimum while installing the newer compatible patch in repository environments. |
 | openfeature-flagd-core | `>=1.0.0,<2` | Preserve the shared PyFly/LaraFly fractional cohort contract; 2.x changes the hash input and shifts existing assignments. |
 | Pydantic AI | `==2.59.0` | Preserve provider extras and the native runtime contracts. |
