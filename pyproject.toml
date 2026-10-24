@@ -227,7 +227,7 @@ client = [
 feature-flags = [
     # OpenFeature SDK + flagd's reference in-process evaluator (FlagdCore, spec D3); httpx serves the http source.
     "openfeature-sdk>=0.10.0",
-    "openfeature-flagd-core>=2.0.0",
+    "openfeature-flagd-core>=1.0.0,<2",
     "httpx>=0.28",
 ]
 config-server-git = [

@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   native Agentic to Pydantic AI 2.59.0. Preserve Monty 0.0.18 and the compatible
   Ragas 0.2.6 / LangChain community 0.3 adapter; document why incompatible major upgrades
   remain excluded.
+- Retain `openfeature-flagd-core>=1.0.0,<2` to preserve the shared PyFly/LaraFly
+  fractional cohort contract. Version 2 changes the hash input to a canonical
+  CBOR array and shifts existing assignments; adopting it requires an explicit
+  shared-contract migration rather than changing the conformance vectors.
 - Reduce the admin console's canonical brand-kit logo size in the header.
 - Stage installer source without copying local virtual environments, worktrees
   or caches, avoiding large duplicate trees while preserving source dotfiles and

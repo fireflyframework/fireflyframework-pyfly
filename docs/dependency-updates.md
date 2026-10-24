@@ -19,10 +19,11 @@ The previous Git/GitHub source-build and spaCy-model requirements no longer
 apply to redaction. Historical v26.10.05–08 facts remain in the changelog;
 do not reuse their removed backend installation instructions for this hotfix.
 
-## Agentic compatibility boundaries
+## Compatibility boundaries
 
 | Dependency | Hotfix selection | Compatibility boundary |
 | --- | --- | --- |
+| openfeature-flagd-core | `>=1.0.0,<2` | Preserve the shared PyFly/LaraFly fractional cohort contract; 2.x changes the hash input and shifts existing assignments. |
 | Pydantic AI | `==2.59.0` | Preserve provider extras and the native runtime contracts. |
 | NumPy | `>=2.5.4` | The removed NLP dependency graph no longer imposes its NumPy restriction. |
 | pydantic-monty | `==0.0.18` | Monty 1.2 uses a worker-pool API and removes the interpreter's `run_async`; a sandbox adapter migration needs separate qualification. |
@@ -35,6 +36,20 @@ The last row is a compatible minimum, not a claim that every newer release can
 coexist with all extras. Let the resolver honor the complete graph rather than
 forcing individual requested major versions. Keep optional evaluation and
 sandbox dependencies out of installations that do not need them.
+
+## Feature-flag cohort compatibility
+
+The `feature-flags` extra retains `openfeature-flagd-core>=1.0.0,<2`.
+Version 2 changes fractional bucketing from raw `flagKey + targetingKey` input
+to a canonical CBOR array. That changes cohort assignments for existing users
+and fails the shared PyFly/LaraFly conformance vectors. Preserve the established
+vectors and application targeting keys when upgrading this hotfix; changing
+those fixtures to match the new dependency would hide a rollout behavior change.
+
+A future 2.x adoption requires an explicit shared-contract migration and
+cross-framework qualification before changing cohort behavior. The current
+constraint intentionally defers that major version while allowing compatible
+1.x fixes.
 
 ## Earlier v26.10.05 refresh
 

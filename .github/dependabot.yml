@@ -8,6 +8,9 @@ updates:
       dev-dependencies:
         patterns: ["*"]
     ignore:
+      # Version 2 changes fractional bucketing and existing experiment assignments.
+      - dependency-name: openfeature-flagd-core
+        versions: [">=2.0.0"]
       # Pydantic AI's Hugging Face extra requires hf-xet <1.5.
       - dependency-name: datasets
         versions: [">=5.1.0"]
