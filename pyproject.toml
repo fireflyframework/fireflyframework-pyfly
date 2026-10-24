@@ -67,7 +67,7 @@ agentic-security = [
 ]
 agentic-script-execution = [
     "pyfly[agentic]",
-    "pydantic-monty==0.0.18",
+    "pydantic-monty==0.0.23",
 ]
 agentic-embeddings = [
     "pyfly[agentic]",
@@ -79,7 +79,7 @@ agentic-openai-embeddings = [
 ]
 agentic-cohere-embeddings = [
     "pyfly[agentic]",
-    "cohere>=7.2.0",
+    "cohere>=7.3.0",
 ]
 agentic-google-embeddings = [
     "pyfly[agentic]",
@@ -163,7 +163,7 @@ web = [
     "python-multipart>=0.0.32",
 ]
 data-relational = [
-    # Requires SQLAlchemy >= 2.0.50 (2.0.49 broke pool pre-ping on the MySQL/MariaDB async drivers, C089) and is
+    # Requires SQLAlchemy >= 2.1.5 (2.0.49 broke pool pre-ping on the MySQL/MariaDB async drivers, C089) and is
     # tested on the 2.0 and 2.1 lines: the lock holds the latest release, and CI runs the suite on the newest 2.0
     # release too (test-sqlalchemy-2-0). No upper bound; what differs between the lines is bridged in
     # pyfly.data.relational.sqlalchemy.compat.
@@ -200,7 +200,7 @@ eda = [
     "aio-pika>=10.1.1",
 ]
 fastapi = [
-    "fastapi>=0.156.8",
+    "fastapi>=0.157.0",
 ]
 granian = [
     "granian>=2.8.5",
