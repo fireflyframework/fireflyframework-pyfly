@@ -24,6 +24,7 @@ from pyfly.agentic.agents.registry import AgentRegistry
 from pyfly.agentic.content.chunking import TextChunker
 from pyfly.agentic.embeddings.providers.ollama import OllamaEmbedder
 from pyfly.agentic.exceptions import RateLimitError
+from pyfly.agentic.execution import ExecutionLimits, MontyEnvironment, SecureScriptRunner, toolkit_external_functions
 from pyfly.agentic.memory.manager import MemoryManager
 from pyfly.agentic.model_utils import get_model_identifier
 from pyfly.agentic.models.factory import ModelFactory
@@ -86,6 +87,44 @@ async def native(local_ollama):
         yield runtime, model
     finally:
         await runtime.aclose()
+
+
+@_bounded
+async def test_ollama_executes_native_monty_code_mode(native):
+    runtime, model = native
+    calls, values = [], []
+
+    @agent_tool("fixture_double", auto_register=False)
+    async def fixture_double(value: int) -> int:
+        """Double a fictional arithmetic value."""
+        values.append(value)
+        return value * 2
+
+    runner = SecureScriptRunner(MontyEnvironment())
+
+    @agent_tool("execute_fixture", auto_register=False)
+    async def execute_fixture(code: str) -> int:
+        """Execute the requested arithmetic snippet in the native worker sandbox."""
+        result = await runner.execute(
+            code,
+            external_functions=toolkit_external_functions([fixture_double]),
+            limits=ExecutionLimits(timeout_seconds=5, max_memory_bytes=1_000_000),
+        )
+        assert result.success, result.error
+        calls.append(code)
+        return int(result.output)
+
+    assistant = runtime.agent_factory.create(
+        "native-monty-fixture",
+        model=model,
+        tools=[execute_fixture],
+        model_settings=SETTINGS,
+        instructions="Call execute_fixture once with code='fixture_double(21)', then report its result.",
+    )
+    result = await assistant.run("Use execute_fixture to calculate fixture_double(21).")
+    assert calls == ["fixture_double(21)"]
+    assert values == [21]
+    assert "42" in result.output
 
 
 @_bounded

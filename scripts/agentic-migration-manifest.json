@@ -11011,7 +11011,7 @@
     ],
     "agentic-script-execution": [
       "pyfly[agentic]",
-      "pydantic-monty==0.0.18"
+      "pydantic-monty==0.0.23"
     ],
     "agentic-embeddings": [
       "pyfly[agentic]",
@@ -11023,7 +11023,7 @@
     ],
     "agentic-cohere-embeddings": [
       "pyfly[agentic]",
-      "cohere>=7.2.0"
+      "cohere>=7.3.0"
     ],
     "agentic-google-embeddings": [
       "pyfly[agentic]",
@@ -11198,7 +11198,7 @@
   },
   "dependency_adaptations": {
     "pydantic-ai": "Pin 2.59.0 for qualified native SDK behavior.",
-    "pydantic-monty": "Pin 0.0.18; newer 1.x API differs.",
+    "pydantic-monty": "Pin 0.0.23; native scoped worker pools and explicit async snapshot dispatch preserve direct host-tool calls. Unsupported allocation ceilings fail explicitly.",
     "dev": "Standalone dev extra is the native agentic-dev dependency group.",
     "all": "Self-reference rewritten to pyfly and native agentic-* extras.",
     "relational": "New agentic-relational extra composes agentic,data-relational for framework-owned SQLite/SQL storage.",
@@ -11248,7 +11248,7 @@
     },
     "script-execution": {
       "native_extra": "agentic-script-execution",
-      "treatment": "Preserve Monty integration and deliberately pin pydantic-monty==0.0.18 to the qualified API."
+      "treatment": "Preserve the native execution API with scoped Monty 0.0.23 worker pools and explicit async snapshot dispatch; reject removed allocation ceilings."
     },
     "embeddings": {
       "native_extra": "agentic-embeddings",

@@ -1,6 +1,8 @@
-# Dependency updates in v26.10.09
+# Dependency updates in v26.10.10
 
-This hotfix consolidates compatible updates from Dependabot
+This release adapts sandbox execution to Monty 0.0.23 from Dependabot
+[PR #195](https://github.com/fireflyframework/fireflyframework-pyfly/pull/195),
+following the compatible updates from Dependabot
 [PR #193](https://github.com/fireflyframework/fireflyframework-pyfly/pull/193).
 The declared constraints are in `pyproject.toml`; `uv.lock` records the exact
 repository selection. Applications must resolve and validate their own locks.
@@ -21,13 +23,13 @@ do not reuse their removed backend installation instructions for this hotfix.
 
 ## Compatibility boundaries
 
-| Dependency | Hotfix selection | Compatibility boundary |
+| Dependency | Current selection | Compatibility boundary |
 | --- | --- | --- |
 | asyncmy | `>=0.2.11`; lock `0.2.16` | Keep the proven MySQL/MariaDB driver minimum while installing the newer compatible patch in repository environments. |
 | openfeature-flagd-core | `>=1.0.0,<2` | Preserve the shared PyFly/LaraFly fractional cohort contract; 2.x changes the hash input and shifts existing assignments. |
 | Pydantic AI | `==2.59.0` | Preserve provider extras and the native runtime contracts. |
 | NumPy | `>=2.5.4` | The removed NLP dependency graph no longer imposes its NumPy restriction. |
-| pydantic-monty | `==0.0.18` | Monty 1.2 uses a worker-pool API and removes the interpreter's `run_async`; a sandbox adapter migration needs separate qualification. |
+| pydantic-monty | `==0.0.23` | Worker-backed adapter with per-run pool/session ownership, direct sync/async host tools, memory/recursion limits and a parent wall-clock budget. Non-`None` `max_allocations` is rejected because upstream removed that control. |
 | Ragas | `>=0.2.6,<0.2.7` | Ragas 0.4 introduces Instructor's `rich<15` constraint, conflicting with the CLI's Rich 15 baseline. |
 | LangChain community | `>=0.3.31,<0.4` | Retain the compatible community adapter alongside Ragas 0.2.6; provider adapters resolve independently. |
 | LangChain provider adapters | Anthropic `>=1.7.6`, Ollama `>=1.1.0`, OpenAI `>=1.7.2` | These 1.x adapters resolve with the retained community adapter; the community cap does not hold all LangChain packages at 0.3. |
@@ -37,6 +39,23 @@ The last row is a compatible minimum, not a claim that every newer release can
 coexist with all extras. Let the resolver honor the complete graph rather than
 forcing individual requested major versions. Keep optional evaluation and
 sandbox dependencies out of installations that do not need them.
+
+## Monty 0.0.23 execution migration
+
+The `agentic-script-execution` extra includes Monty's SDK runtime binary package,
+`pydantic-monty-runtime`. Keep that optional dependency installed alongside the
+SDK. Binary discovery uses the SDK's locator; an explicit SDK `MONTY_BIN` setting
+must identify a compatible executable. Missing binaries fail with installation
+guidance instead of falling back to CPython or a remote execution service.
+
+`MontyEnvironment` and `SecureScriptRunner` retain their public call signatures.
+The adapter owns an `AsyncMonty(max_processes=1, min_processes=0)` pool and a fresh
+checkout for each run, closes both on every exit path, and preserves direct guest
+calls to sync and async external functions. The default 30-second wall-clock
+budget includes waiting for host callbacks; guest VM time, memory and recursion
+limits remain available. Remove `max_allocations` values before upgrading:
+Monty 0.0.23 no longer supports that control and PyFly raises `ValueError` before
+starting workers. See the [execution tutorial](modules/agentic/execution.md).
 
 ## Feature-flag cohort compatibility
 

@@ -45,10 +45,10 @@ class Capability(StrEnum):
 class ExecutionLimits:
     """Resource ceilings for a single script execution.
 
-    ``None`` disables a limit. Backends map these onto their native controls
-    (the Monty backend maps them onto its ``ResourceLimits``: ``timeout_seconds``
-    → ``max_duration_secs``, ``max_memory_bytes`` → ``max_memory``,
-    ``max_allocations`` and ``max_recursion_depth`` pass through).
+    Unset per-call fields inherit the environment's defaults. Monty maps time,
+    memory and recursion onto its native controls, with a host wall-clock
+    deadline as well. Monty 0.0.23 does not support ``max_allocations`` and
+    rejects a configured allocation ceiling before starting workers.
     """
 
     timeout_seconds: float | None = None

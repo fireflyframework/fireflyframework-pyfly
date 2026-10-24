@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.10 (2026-10-24)
+
+### Fixed
+
+- Bind Code Mode arguments using inferred `@agent_tool` handler signatures when
+  explicit `ParameterSpec` metadata is absent. Preserve defaults and keyword
+  arguments while routing every bridged call through `tool.execute` for guards
+  and call listeners.
+
+### Changed
+
+- Adapt optional script execution to `pydantic-monty==0.0.23` and its SDK runtime
+  binary. Each run owns a bounded `AsyncMonty` worker pool and a fresh session;
+  completion, failure and cancellation close the session and workers.
+- Preserve `MontyEnvironment`, `SecureScriptRunner` and direct Code Mode calls
+  for synchronous and asynchronous host tools. Synchronous callbacks run off the
+  application event loop; asynchronous callbacks are awaited on their owner loop.
+- Keep deny-by-default guest capabilities, the 30-second wall-clock default,
+  memory and recursion limits. Reject non-`None` `max_allocations` before starting
+  workers because Monty 0.0.23 removed that control. The wall-clock budget also
+  covers host-tool waits; cancellation does not undo completed host effects.
+- Keep Pydantic AI 2.59.0 and the existing Ragas, datasets and feature-flag cohort
+  compatibility constraints.
+
+### Documentation
+
+- Update current installation and dependency guidance and English/Spanish books
+  for Monty 0.0.23, with runnable computation and mixed sync/async Code Mode
+  examples, lifecycle guidance and allocation-limit migration instructions.
+
 ## v26.10.09 (2026-10-24)
 
 ### Changed

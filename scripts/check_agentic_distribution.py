@@ -50,7 +50,7 @@ async def base():
     before_handlers = list(logging.getLogger().handlers)
     for package in (
         "pydantic_ai", "pydantic_graph", "openai", "anthropic", "genai_prices", "opentelemetry",
-        "sqlalchemy", "aiosqlite", "asyncpg", "beanie", "pymongo", "motor",
+        "sqlalchemy", "aiosqlite", "asyncpg", "beanie", "pymongo", "motor", "pydantic_monty",
     ):
         assert importlib.util.find_spec(package) is None, package
     from pyfly.context import ApplicationContext
@@ -187,6 +187,7 @@ async def agentic():
     assert runtime._closed
     assert not runtime._tasks and not runtime._streams
     persistence = await relational()
+    execution = await script_execution()
     return {
         "native_DI_TestModel_service": "passed",
         "public_export_resolutions": exported,
@@ -195,7 +196,31 @@ async def agentic():
         "runtime_shutdown": "passed",
         "provider_requests": "disabled",
         **persistence,
+        **execution,
     }
+
+
+async def script_execution():
+    from pyfly.agentic import agent_tool
+    from pyfly.agentic.execution import MontyEnvironment, toolkit_external_functions, ExecutionLimits
+
+    @agent_tool("installed_double", auto_register=False)
+    async def installed_double(value: int) -> int:
+        """Double a fictional test value."""
+        return value * 2
+
+    environment = MontyEnvironment()
+    functions = toolkit_external_functions([installed_double])
+    result = await environment.run_code("print('installed worker')\ninstalled_double(n)", inputs={"n": 21},
+                                        external_functions=functions)
+    assert result.success and result.output == 42 and result.stdout == "installed worker\n"
+    try:
+        await environment.run_code("1 + 1", limits=ExecutionLimits(max_allocations=100))
+    except ValueError as exc:
+        assert "not supported" in str(exc)
+    else:
+        raise AssertionError("Unsupported allocation limit was accepted")
+    return {"native_Monty_worker_and_Code_Mode": "passed", "unsupported_allocation_limit_rejected": True}
 
 
 async def relational():
@@ -414,7 +439,8 @@ def installed_lane(artifact: Path, mode: str, python: str, work: Path, root: Pat
             "install",
             "--python",
             str(executable),
-            str(artifact) + ("[agentic-relational,agentic-security]" if mode == "agentic" else ""),
+            str(artifact)
+            + ("[agentic-relational,agentic-security,agentic-script-execution]" if mode == "agentic" else ""),
         ],
         [str(executable), "-I", "-c", INSTALLED_SMOKE, mode, str(root)],
     ]

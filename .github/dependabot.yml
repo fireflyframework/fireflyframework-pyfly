@@ -17,7 +17,7 @@ updates:
       # Pydantic AI's Hugging Face extra requires hf-xet <1.5.
       - dependency-name: datasets
         versions: [">=5.1.0"]
-      # Monty 1.x replaces the interpreter API with a worker-pool API.
+      # The native adapter is qualified against Monty 0.0.23; qualify 1.x separately.
       - dependency-name: pydantic-monty
         versions: [">=1.0.0"]
       # Ragas 0.4 requires Instructor/Rich <15, conflicting with the native CLI.

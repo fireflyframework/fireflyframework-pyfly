@@ -12,15 +12,15 @@ those dependencies on every operating system.
 
 ## From a release
 
-This guide uses **v26.10.09** (package version `26.10.9`). Verify the release's
+This guide uses **v26.10.10** (package version `26.10.10`). Verify the release's
 assets before installing its wheel. PyFly is distributed through
 [GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases),
 not PyPI. Install the wheel and select the optional module explicitly:
 
 ```bash
-python -m pip install "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-26.10.9-py3-none-any.whl"
+python -m pip install "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.10/pyfly-26.10.10-py3-none-any.whl"
 # In a uv-managed application:
-uv add "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-26.10.9-py3-none-any.whl"
+uv add "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.10/pyfly-26.10.10-py3-none-any.whl"
 ```
 
 Add namespaced extras such as `agentic-postgres` or `agentic-ollama-embeddings`
@@ -92,7 +92,7 @@ integration extras explicitly to the same PyFly dependency as needed.
 | `agentic-postgres` | Agentic plus native Data relational support and PostgreSQL driver |
 | `agentic-mongodb` | Agentic plus native Data document support using async PyMongo, without Motor |
 | `agentic-security` | cryptography for at-rest encryption |
-| `agentic-script-execution` | pydantic-monty sandbox |
+| `agentic-script-execution` | Monty 0.0.23 SDK and its runtime binary for local sandbox workers |
 | `agentic-embeddings` | NumPy for in-memory vector math |
 | `agentic-openai-embeddings` | OpenAI embedding client |
 | `agentic-azure-embeddings` | Azure embedding client |
@@ -153,16 +153,23 @@ Next: [native DI and lifecycle](../native-runtime.md),
 
 ## Monty interpreter compatibility
 
-The native `agentic-script-execution` extra pins **`pydantic-monty==0.0.18`**, the
-interpreter API used by the preserved sandbox implementation. Later Monty 1.x
-releases expose a worker-pool constructor and remove the `run_async` interpreter
-API; they are not drop-in replacements. Retain the declared pin when resolving
-dependencies and qualify any future adapter upgrade with the execution contracts.
+The native `agentic-script-execution` extra pins **`pydantic-monty==0.0.23`**
+and installs its `pydantic-monty-runtime` binary dependency. The adapter uses an
+owned worker pool and a fresh session per run; it closes both after success,
+failure or cancellation. Guest scripts keep direct calls to registered sync and
+async tools without guest-side `await`. Binary discovery follows the SDK's
+`MONTY_BIN`/installed-binary locator. A missing binary fails explicitly; no
+CPython or remote-service fallback is enabled.
+
+Monty 0.0.23 removed `max_allocations`. Remove any non-`None` value from
+`ExecutionLimits`; PyFly raises `ValueError` before starting workers rather than
+silently ignoring it. Use wall-clock, memory and recursion budgets. The
+[execution guide](../execution.md) describes callback scheduling and lifecycle.
 
 ## Qualified dependency baseline
 
 Native Agentic pins **Pydantic AI 2.59.0**, matching the source-qualified API and
-provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.18**.
+provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.23**.
 The optional `agentic-evaluation` extra retains **Ragas 0.2.6**, the compatible
 **LangChain community 0.3** adapter and **datasets >=5.0.1**. Ragas 0.4 conflicts with the
 CLI Rich 15 baseline; datasets 5.1 conflicts with the Hugging Face integration's

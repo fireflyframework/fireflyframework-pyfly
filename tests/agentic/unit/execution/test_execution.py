@@ -182,6 +182,62 @@ def test_toolkit_external_functions_allowlist_and_toolslike():
     assert set(funcs) == {"a"}
 
 
+@pytest.mark.asyncio
+async def test_code_mode_binds_native_decorated_tool_arguments():
+    from pyfly.agentic import agent_tool
+
+    called = []
+
+    @agent_tool("native_add", auto_register=False)
+    async def native_add(left: int, right: int = 2) -> int:
+        """Add two fictional test values."""
+        called.append((left, right))
+        return left + right
+
+    function = toolkit_external_functions([native_add])["native_add"]
+    assert await function(40) == 42
+    assert await function(20, right=22) == 42
+    assert called == [(40, 2), (20, 22)]
+    with pytest.raises(TypeError):
+        await function(40, left=1)
+    with pytest.raises(TypeError):
+        await function(1, 2, 3)
+    assert len(called) == 2
+
+
+@pytest.mark.asyncio
+async def test_code_mode_preserves_native_guards_and_keyword_arguments():
+    from pyfly.agentic import agent_tool
+    from pyfly.agentic.exceptions import ToolGuardError
+    from pyfly.agentic.tools.guards import ValidationGuard
+
+    called = []
+
+    @agent_tool("native_guarded", guards=[ValidationGuard(required_keys=["allowed"])], auto_register=False)
+    async def native_guarded(value: int, **kwargs: Any) -> int:
+        """Return an allowed fictional value."""
+        called.append((value, kwargs))
+        return value
+
+    function = toolkit_external_functions([native_guarded])["native_guarded"]
+    with pytest.raises(ToolGuardError):
+        await function(42)
+    assert called == []
+    assert await function(42, allowed=True) == 42
+    assert called == [(42, {"allowed": True})]
+
+
+@pytest.mark.asyncio
+async def test_code_mode_rejects_duplicate_or_excess_declared_arguments():
+    tool = _FakeTool("native_declared", ["value"])
+    function = toolkit_external_functions([tool])["native_declared"]
+    with pytest.raises(TypeError):
+        await function(1, value=2)
+    with pytest.raises(TypeError):
+        await function(1, 2)
+    assert tool.received is None
+
+
 # -- Monty backend (requires the script-execution extra) ---------------------
 
 pytest.importorskip("pydantic_monty")

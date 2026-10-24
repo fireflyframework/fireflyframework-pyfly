@@ -15,18 +15,18 @@
 """Secure script execution -- run untrusted/generated Python in a sandbox.
 
 One :class:`ExecutionEnvironment` abstraction with tiered, deny-by-default
-backends. The default :class:`MontyEnvironment` (Rust micro-interpreter, no
+backends. The default :class:`MontyEnvironment` (scoped Rust worker processes, no
 FS/network/env; host access only via explicitly registered external functions)
-covers glue logic over Firefly tools. :class:`SecureScriptRunner` adds the
+covers glue logic over pyfly tools. :class:`SecureScriptRunner` adds the
 static safety pre-screen and the generate -> validate -> execute -> capture loop;
-:func:`toolkit_external_functions` powers Firefly Code Mode.
+:func:`toolkit_external_functions` powers Code Mode.
 
     from pyfly.agentic.execution import MontyEnvironment, SecureScriptRunner
 
     runner = SecureScriptRunner(MontyEnvironment())
     result = await runner.execute("a = 2\\nb = 3\\na * b")   # -> ExecutionResult(success=True, output=6)
 
-The Monty backend requires the ``script-execution`` extra.
+The Monty backend requires the ``agentic-script-execution`` extra.
 """
 
 from pyfly.agentic.execution.code_mode import toolkit_external_functions

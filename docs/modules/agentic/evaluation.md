@@ -355,7 +355,7 @@ and the orchestrator `run_judge`.
 ## Qualified dependency baseline
 
 Native Agentic pins **Pydantic AI 2.59.0**, matching the source-qualified API and
-provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.18**.
+provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.23**.
 The optional `agentic-evaluation` extra retains **Ragas 0.2.6**, the compatible
 **LangChain community 0.3** adapter and **datasets >=5.0.1**. Ragas 0.4 conflicts with the
 CLI Rich 15 baseline; datasets 5.1 conflicts with the Hugging Face integration's

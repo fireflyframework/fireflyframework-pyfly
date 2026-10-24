@@ -605,16 +605,23 @@ handlers keep working.
 
 ## Monty interpreter compatibility
 
-The native `agentic-script-execution` extra pins **`pydantic-monty==0.0.18`**, the
-interpreter API used by the preserved sandbox implementation. Later Monty 1.x
-releases expose a worker-pool constructor and remove the `run_async` interpreter
-API; they are not drop-in replacements. Retain the declared pin when resolving
-dependencies and qualify any future adapter upgrade with the execution contracts.
+The native `agentic-script-execution` extra pins **`pydantic-monty==0.0.23`**
+and installs its `pydantic-monty-runtime` binary dependency. The adapter uses an
+owned worker pool and a fresh session per run; it closes both after success,
+failure or cancellation. Guest scripts keep direct calls to registered sync and
+async tools without guest-side `await`. Binary discovery follows the SDK's
+`MONTY_BIN`/installed-binary locator. A missing binary fails explicitly; no
+CPython or remote-service fallback is enabled.
+
+Monty 0.0.23 removed `max_allocations`. Remove any non-`None` value from
+`ExecutionLimits`; PyFly raises `ValueError` before starting workers rather than
+silently ignoring it. Use wall-clock, memory and recursion budgets. The
+[execution guide](execution.md) describes callback scheduling and lifecycle.
 
 ## Qualified dependency baseline
 
 Native Agentic pins **Pydantic AI 2.59.0**, matching the source-qualified API and
-provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.18**.
+provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.23**.
 The optional `agentic-evaluation` extra retains **Ragas 0.2.6**, the compatible
 **LangChain community 0.3** adapter and **datasets >=5.0.1**. Ragas 0.4 conflicts with the
 CLI Rich 15 baseline; datasets 5.1 conflicts with the Hugging Face integration's

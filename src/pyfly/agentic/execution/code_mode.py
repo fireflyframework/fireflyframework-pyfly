@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Firefly Code Mode: expose Firefly tools to sandboxed scripts.
+"""pyfly Code Mode: expose native tools to sandboxed scripts.
 
 Instead of the model emitting one tool call per step, it can emit a *script*
 that orchestrates several tools at once, executed in the sandbox with those
@@ -43,18 +43,39 @@ def _iter_tools(source: Any) -> Iterable[Any]:
 
 
 def _wrap_tool(tool: Any) -> Callable[..., Any]:
-    """Adapt a Firefly tool into an external function callable from guest code.
+    """Adapt a native tool into an external function callable from guest code.
 
     Positional arguments from the script are mapped onto the tool's declared
-    parameter names; keyword arguments pass through. The tool's ``execute`` is
-    awaited when it returns a coroutine.
+    parameter names or the decorated handler's inferred signature. Execution
+    still passes through ``execute`` for guards and call listeners.
     """
     raw_names = [getattr(p, "name", None) for p in (getattr(tool, "parameters", None) or [])]
     param_names = [p for p in raw_names if isinstance(p, str) and p]
+    handler_factory = getattr(tool, "pydantic_handler", None)
+    signature = inspect.signature(handler_factory()) if not param_names and callable(handler_factory) else None
+    if signature is not None and getattr(tool, "takes_ctx", False):
+        signature = signature.replace(parameters=[p for p in signature.parameters.values() if p.name != "ctx"])
 
     async def _call(*args: Any, **kwargs: Any) -> Any:
-        bound = dict(zip(param_names, args, strict=False))
-        bound.update(kwargs)
+        if signature is not None:
+            arguments = signature.bind(*args, **kwargs).arguments
+            bound = {}
+            for name, value in arguments.items():
+                kind = signature.parameters[name].kind
+                if kind == inspect.Parameter.VAR_KEYWORD:
+                    bound.update(value)
+                elif kind == inspect.Parameter.VAR_POSITIONAL:
+                    if value:
+                        raise TypeError("Code Mode tools require named parameters instead of *args")
+                else:
+                    bound[name] = value
+        else:
+            if len(args) > len(param_names):
+                raise TypeError(f"Tool {tool.name!r} accepts at most {len(param_names)} positional arguments")
+            bound = dict(zip(param_names, args, strict=False))
+            if bound.keys() & kwargs.keys():
+                raise TypeError("Tool arguments cannot be provided both positionally and by keyword")
+            bound.update(kwargs)
         result = tool.execute(**bound)
         if inspect.isawaitable(result):
             result = await result
@@ -65,7 +86,7 @@ def _wrap_tool(tool: Any) -> Callable[..., Any]:
 
 
 def toolkit_external_functions(source: Any, *, names: Iterable[str] | None = None) -> dict[str, Callable[..., Any]]:
-    """Build an ``external_functions`` mapping from Firefly tools.
+    """Build an ``external_functions`` mapping from native tools.
 
     Args:
         source: A ``ToolKit``, an object exposing ``tools``/``list_tools()``, or

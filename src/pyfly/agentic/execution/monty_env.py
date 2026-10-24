@@ -12,28 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Monty-backed in-process execution environment (tiers 0 and 1).
+"""Monty worker execution environment (tiers 0 and 1).
 
 `Monty <https://pypi.org/project/pydantic-monty/>`_ is a Rust micro-interpreter
 with a deny-by-default capability model: guest code gets no filesystem, network,
 or environment access, and reaches the host only through ``external_functions``
 explicitly registered per run. It supports a Python *subset* (no third-party
-packages) — ideal for glue logic over Firefly tools, not for pandas jobs.
+packages) — intended for glue logic over pyfly tools.
 
-This backend requires the ``script-execution`` extra
-(``pip install 'pyfly[script-execution]'``).
+The optional ``agentic-script-execution`` extra installs the client and worker binary.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import keyword
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pydantic_monty import ResourceLimits
+    from pydantic_monty import AsyncSnapshot, ResourceLimits
 
 from pyfly.agentic.exceptions import SandboxUnavailableError
 from pyfly.agentic.execution.types import Capability, ExecutionLimits, ExecutionResult
@@ -41,26 +41,13 @@ from pyfly.agentic.execution.types import Capability, ExecutionLimits, Execution
 logger = logging.getLogger(__name__)
 
 
-def _sync_bridge(coro_fn: Callable[..., Any], loop: asyncio.AbstractEventLoop) -> Callable[..., Any]:
-    """Wrap an async external function so guest code can call it without ``await``.
-
-    Monty invokes external functions from a worker thread during ``run_async``; an
-    async one would otherwise return an unawaited coroutine. This runs the
-    coroutine on the host event loop and blocks the worker thread for its result.
-    """
-
-    def _call(*args: Any, **kwargs: Any) -> Any:
-        return asyncio.run_coroutine_threadsafe(coro_fn(*args, **kwargs), loop).result()
-
-    return _call
-
-
 class MontyEnvironment:
     """A sandboxed :class:`ExecutionEnvironment` backed by pydantic-monty.
 
     Tier 0 (no ``external_functions``) is pure computation. Tier 1 exposes
     allow-listed host callables to the script via ``external_functions`` — the
-    basis of Firefly's Code Mode.
+    basis of pyfly's Code Mode. Each invocation owns and closes its worker pool
+    and session; no interpreter state survives into another invocation.
 
     Args:
         type_check: Run Monty's static type checker before execution.
@@ -74,7 +61,7 @@ class MontyEnvironment:
             import pydantic_monty  # noqa: F401
         except ImportError as exc:  # pragma: no cover - exercised only without the extra
             raise SandboxUnavailableError(
-                "MontyEnvironment requires the 'script-execution' extra: pip install 'pyfly[script-execution]'"
+                "MontyEnvironment requires the optional 'pyfly[agentic-script-execution]' extra"
             ) from exc
         self._type_check = type_check
         self._default_limits = default_limits if default_limits is not None else ExecutionLimits(timeout_seconds=30.0)
@@ -99,13 +86,13 @@ class MontyEnvironment:
 
     def _resource_limits(self, limits: ExecutionLimits | None) -> ResourceLimits | None:
         eff = self._effective_limits(limits)
+        if eff.max_allocations is not None:
+            raise ValueError("max_allocations is not supported by Monty 0.0.23; use memory and time limits")
         kwargs: ResourceLimits = {}
         if eff.timeout_seconds is not None:
             kwargs["max_duration_secs"] = eff.timeout_seconds
         if eff.max_memory_bytes is not None:
             kwargs["max_memory"] = eff.max_memory_bytes
-        if eff.max_allocations is not None:
-            kwargs["max_allocations"] = eff.max_allocations
         if eff.max_recursion_depth is not None:
             kwargs["max_recursion_depth"] = eff.max_recursion_depth
         return kwargs or None
@@ -118,39 +105,43 @@ class MontyEnvironment:
         external_functions: dict[str, Callable[..., Any]] | None = None,
         limits: ExecutionLimits | None = None,
     ) -> ExecutionResult:
-        from pydantic_monty import (
-            CollectStreams,
-            Monty,
-            MontyError,
-            MontySyntaxError,
-            MontyTypingError,
-        )
+        from pydantic_monty import AsyncMonty, CollectStreams, MontyError
 
-        input_names = sorted(inputs) if inputs else None
-        try:
-            interp = Monty(code, inputs=input_names, type_check=self._type_check)
-        except (MontySyntaxError, MontyTypingError) as exc:
-            return ExecutionResult(success=False, error=str(exc), error_type=type(exc).__name__)
-
-        # Async external functions (e.g. Firefly tools via Code Mode) are bridged
-        # to sync so guest code can call them naturally, without `await`.
-        bridged = external_functions
-        if external_functions:
-            loop = asyncio.get_running_loop()
-            bridged = {
-                name: (_sync_bridge(fn, loop) if inspect.iscoroutinefunction(fn) else fn)
-                for name, fn in external_functions.items()
-            }
-
+        functions = external_functions or {}
+        for name in (inputs or {}).keys() | functions.keys():
+            if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
+                raise ValueError("Input and external function names must be valid Python identifiers")
+        if any(not callable(fn) for fn in functions.values()):
+            raise ValueError("External functions must be callable")
+        resource_limits = self._resource_limits(limits)
+        timeout = self._effective_limits(limits).timeout_seconds
         collector = CollectStreams()
+        checked_out = False
         try:
-            output = await interp.run_async(
-                inputs=inputs or None,
-                limits=self._resource_limits(limits),
-                external_functions=bridged or None,
-                print_callback=collector,
-            )
-        except MontyError as exc:
+            async with (
+                asyncio.timeout(timeout),
+                AsyncMonty(min_processes=0, max_processes=1, request_timeout=timeout) as pool,
+                pool.checkout(
+                    limits=resource_limits,
+                    type_check=self._type_check,
+                    type_check_stubs=_type_stubs(inputs or {}, functions) if self._type_check else None,
+                ) as session,
+            ):
+                checked_out = True
+                snapshot = await session.feed_start(
+                    code, inputs=inputs or None, external_lookup=functions or None, print_callback=collector
+                )
+                output = await _drive(snapshot, functions)
+        except (MontyError, TimeoutError, RuntimeError, OSError) as exc:
+            if (
+                not checked_out
+                and isinstance(exc, RuntimeError | OSError)
+                and not isinstance(exc, MontyError | TimeoutError)
+            ):
+                raise SandboxUnavailableError(
+                    "Monty runtime could not start; install 'pyfly[agentic-script-execution]' "
+                    "and verify the configured MONTY_BIN executable"
+                ) from exc
             stdout, stderr = _split_streams(collector)
             return ExecutionResult(
                 success=False, error=str(exc), error_type=type(exc).__name__, stdout=stdout, stderr=stderr
@@ -158,6 +149,62 @@ class MontyEnvironment:
 
         stdout, stderr = _split_streams(collector)
         return ExecutionResult(success=True, output=output, stdout=stdout, stderr=stderr)
+
+
+def _type_stubs(inputs: dict[str, Any], functions: dict[str, Callable[..., Any]]) -> str:
+    names = inputs.keys() | functions.keys()
+    alias = "_PyflyHostAny"
+    while alias in names:
+        alias += "_"
+    lines = [f"from typing import Any as {alias}"]
+    for name in sorted(names):
+        if name in inputs:
+            lines.append(f"{name}: {alias}")
+        else:
+            lines.append(f"def {name}(*args: {alias}, **kwargs: {alias}) -> {alias}: ...")
+    lines.append(f"__all__ = {sorted(names)!r}")
+    return "\n".join(lines) + "\n"
+
+
+async def _drive(snapshot: AsyncSnapshot, functions: dict[str, Callable[..., Any]]) -> Any:
+    from pydantic_monty import AsyncFunctionSnapshot, AsyncNameLookupSnapshot, MontyComplete
+
+    while not isinstance(snapshot, MontyComplete):
+        if isinstance(snapshot, AsyncFunctionSnapshot):
+            fn = functions.get(snapshot.function_name)
+            if snapshot.is_os_function:
+                snapshot = await snapshot.resume_not_handled()
+                continue
+            if snapshot.object_id is not None:
+                snapshot = await snapshot.resume({"exception": AttributeError("Host object access is unavailable")})
+                continue
+            if fn is None:
+                snapshot = await snapshot.resume(
+                    {"exception": NameError(f"External function {snapshot.function_name!r} is not registered")}
+                )
+                continue
+            try:
+                result = (
+                    await fn(*snapshot.args, **snapshot.kwargs)
+                    if inspect.iscoroutinefunction(fn)
+                    else await asyncio.to_thread(fn, *snapshot.args, **snapshot.kwargs)
+                )
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception as exc:
+                snapshot = await snapshot.resume({"exception": exc})
+            else:
+                # Answer with a value so existing scripts need no `await` for host tools.
+                snapshot = await snapshot.resume({"return_value": result})
+        elif isinstance(snapshot, AsyncNameLookupSnapshot):
+            snapshot = (
+                await snapshot.resume_auto()
+                if snapshot.object_id is None and snapshot.variable_name in functions
+                else await snapshot.resume()
+            )
+        else:
+            snapshot = await snapshot.resume_auto()
+    return snapshot.output
 
 
 def _split_streams(collector: Any) -> tuple[str, str]:

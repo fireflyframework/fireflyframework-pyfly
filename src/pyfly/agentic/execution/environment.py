@@ -14,7 +14,7 @@
 
 """The single abstraction over secure execution backends.
 
-Every backend (Monty in-process today; Docker / cloud micro-VM in later tiers)
+Every backend (Monty workers today; Docker / cloud micro-VM in later tiers)
 implements :class:`ExecutionEnvironment`. The tiered, capability-based design
 lets a policy select the cheapest sufficiently-isolated backend for a given
 script without callers caring which one runs.

@@ -6,15 +6,15 @@ Lumen's support team needs to explain wallet review policy. The assistant reads 
 
 Our complete companion is `samples/agentic-book`. Its real Pydantic AI `TestModel` generates deterministic responses without credentials or provider requests. This makes the examples reproducible on Python 3.12 and 3.13. It does not establish the accuracy, cost or latency of a production model. The test data, policy IDs and effects are fictional.
 
-This hotfix uses Pydantic AI 2.59.0. Optional sandbox execution retains Monty
-0.0.18; optional evaluation retains Ragas 0.2.6, the compatible LangChain community 0.3
-adapter and datasets >=5.0.1. Resolve the complete application graph: newer Monty,
-Ragas and datasets releases have API or dependency conflicts described in the
+This release uses Pydantic AI 2.59.0 and adapts optional sandbox execution to
+Monty 0.0.23. Optional evaluation retains Ragas 0.2.6, the compatible LangChain
+community 0.3 adapter and datasets >=5.0.1. Resolve the complete application
+graph: newer Ragas and datasets releases have API or dependency conflicts in the
 [dependency notes](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/).
 
 ## 19.1. Enable the module deliberately
 
-Install the optional core from the official v26.10.09 release wheel, selecting
+Install the optional core from the official v26.10.10 release wheel, selecting
 `pyfly[agentic]`, as shown in the
 [installation guide](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/getting-started/installation/).
 PyFly is distributed through GitHub Releases. Base installations need no AI SDK. Enable managed integration in the effective configuration tree:
@@ -174,3 +174,95 @@ including when the working store is relational or MongoDB. Restarting a worker
 therefore does not restore its conversations. Keep durable approval records and
 business receipts in the application's Data model. Chapter 20 demonstrates an
 actual SQLite transaction containing both a business row and an async fact.
+
+
+## 19.10. Execute bounded scripts with Code Mode
+
+Install `pyfly[agentic,agentic-script-execution]` from the v26.10.10 release
+wheel. This optional extra installs `pydantic-monty==0.0.23` and the
+`pydantic-monty-runtime` binary. The SDK discovers its installed binary and
+honors `MONTY_BIN` for an explicit compatible executable. A missing runtime
+produces installation guidance; it does not select another execution backend.
+
+Monty runs a Python subset in a local Rust worker. PyFly mounts no filesystem
+and grants no guest network, environment or third-party-package access. A
+script can reach a host service only through the external functions supplied
+for that run. `SecureScriptRunner` checks the source before execution; that
+static screen supplements the sandbox boundary.
+
+To expose native tools, pass `toolkit_external_functions(my_toolkit)` as the
+external-function mapping. It accepts explicit `ParameterSpec` metadata and
+signatures inferred from `@agent_tool` handlers, preserving defaults and keyword
+arguments. Every bridged call uses `tool.execute`, so tool guards and call
+listeners still run.
+
+Save this example as `monty_demo.py` and run `python monty_demo.py` in the
+installed environment. No model or provider credentials are required. The
+first call performs pure computation. The second performs Code Mode: a guest
+script combines an async read with a synchronous formatter.
+
+```python
+import asyncio
+
+from pyfly.agentic.execution import (
+    ExecutionLimits, MontyEnvironment, SecureScriptRunner,
+)
+
+async def lookup_policy(wallet_id: int) -> dict:
+    await asyncio.sleep(0)
+    return {"wallet_id": wallet_id, "review": "human"}
+
+def summarize(policy: dict) -> str:
+    return f"Wallet {policy['wallet_id']}: {policy['review']} review"
+
+async def main() -> None:
+    runner = SecureScriptRunner(MontyEnvironment())
+    limits = ExecutionLimits(
+        timeout_seconds=5.0,
+        max_memory_bytes=64 * 1024 * 1024,
+        max_recursion_depth=100,
+    )
+    pure = await runner.execute("sum([2, 3, 5])", limits=limits)
+    assert pure.success and pure.output == 10
+    result = await runner.execute(
+        "policy = lookup_policy(wallet_id)\nsummarize(policy)",
+        inputs={"wallet_id": 42},
+        external_functions={
+            "lookup_policy": lookup_policy,
+            "summarize": summarize,
+        },
+        limits=limits,
+    )
+    assert result.success, result.error
+    assert result.output == "Wallet 42: human review"
+    print(result.output)
+
+asyncio.run(main())
+```
+
+The output is `Wallet 42: human review`. Although `lookup_policy` is async in
+the host, the guest calls it directly, without `await`. Async tools run on the
+calling application's event loop; synchronous tools run off that loop in a
+thread. The adapter pauses and resumes the guest around each host call.
+
+Every execution owns an `AsyncMonty(max_processes=1, min_processes=0)` pool and
+a fresh session. Success, failure and cancellation close both. Reusing the
+`MontyEnvironment` object preserves no guest variables, imported modules or
+function registrations from a previous run. Worker startup has a cost; this
+backend is not an in-process interpreter with microsecond startup.
+
+The default wall-clock budget is 30 seconds; the example sets five seconds
+for worker setup, VM execution and host-tool waits together. Native VM time,
+guest memory and recursion limits also apply. Monty 0.0.23 removed allocation
+counting: leave `max_allocations=None`. Any non-`None` value raises `ValueError`
+before workers start. Replace an old allocation-count budget with memory and
+time budgets. These guest limits do not bound host callbacks' memory use.
+
+Host tools remain capabilities with business authority. Authenticate identity,
+check tenant scope and use explicit I/O deadlines. Cancellation cannot undo an
+external effect or forcibly stop a synchronous callback already running in its
+thread. Keep writes idempotent and record their receipts. An exercise: replace
+the formatter with a failing tool, inspect `success`, `error_type` and `error`,
+and confirm a subsequent call starts with fresh guest state. See the
+[execution guide](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/execution/)
+for output scrubbing and toolkit integration.

@@ -6,16 +6,16 @@ El equipo de soporte de Lumen necesita explicar la política de revisión de wal
 
 El ejemplo completo está en `samples/agentic-book`. Utiliza el `TestModel` real de Pydantic AI para producir respuestas deterministas sin credenciales ni solicitudes a proveedores. Permite repetir las pruebas con Python 3.12 y 3.13; no demuestra la precisión, el coste o la latencia de un modelo de producción. Los datos, identificadores de política y efectos son ficticios.
 
-Este hotfix utiliza Pydantic AI 2.59.0. La ejecución opcional en sandbox conserva
-Monty 0.0.18; la evaluación opcional conserva Ragas 0.2.6, el adaptador compatible
-LangChain community 0.3 y datasets >=5.0.1. Resuelve el grafo completo de la aplicación:
-versiones posteriores de Monty, Ragas y datasets tienen cambios de API o
-conflictos de dependencias descritos en las
+Esta versión utiliza Pydantic AI 2.59.0 y adapta la ejecución opcional en
+sandbox a Monty 0.0.23. La evaluación opcional conserva Ragas 0.2.6, el adaptador
+compatible LangChain community 0.3 y datasets >=5.0.1. Resuelve el grafo completo
+de la aplicación: versiones posteriores de Ragas y datasets tienen conflictos
+de API o dependencias descritos en las
 [notas de dependencias](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/).
 
 ## 19.1. Activar el módulo de forma explícita
 
-Instala el núcleo opcional desde el wheel oficial de v26.10.09, seleccionando
+Instala el núcleo opcional desde el wheel oficial de v26.10.10, seleccionando
 `pyfly[agentic]`, como indica la
 [guía de instalación](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/getting-started/installation/).
 PyFly se distribuye mediante GitHub Releases. Una instalación base no necesita
@@ -176,3 +176,99 @@ el proceso, incluso con un almacén relacional o MongoDB. Reiniciar un worker no
 restaura sus conversaciones. Guarda aprobaciones duraderas y recibos de negocio
 en el modelo Data de la aplicación. El Capítulo 20 demuestra una transacción real
 de SQLite con una fila de negocio y un hecho asíncrono.
+
+
+## 19.10. Ejecutar scripts limitados con Code Mode
+
+Instala `pyfly[agentic,agentic-script-execution]` desde el wheel de v26.10.10.
+Este extra opcional instala `pydantic-monty==0.0.23` y el binario de
+`pydantic-monty-runtime`. El SDK localiza el binario instalado y admite
+`MONTY_BIN` para indicar un ejecutable compatible. Si falta el runtime,
+devuelve instrucciones de instalación; no selecciona otro backend.
+
+Monty ejecuta un subconjunto de Python en un worker Rust local. PyFly no monta
+el sistema de archivos ni concede al script acceso a red, entorno o paquetes
+de terceros. El script solo llega a servicios del host mediante las funciones
+externas suministradas para esa ejecución. `SecureScriptRunner` comprueba el
+código antes de ejecutarlo; ese análisis estático complementa el sandbox.
+
+Para exponer herramientas nativas, pasa `toolkit_external_functions(my_toolkit)`
+como mapa de funciones externas. Admite metadatos explícitos `ParameterSpec` y
+firmas inferidas de funciones `@agent_tool`, conservando valores predeterminados
+y argumentos por nombre. Cada llamada utiliza `tool.execute`, por lo que se
+mantienen las guardas y los listeners de la herramienta.
+
+Guarda este ejemplo como `monty_demo.py` y ejecuta `python monty_demo.py` en
+el entorno instalado. No necesita modelo ni credenciales de proveedor. La
+primera llamada realiza cálculo puro. La segunda utiliza Code Mode: el script
+combina una lectura asíncrona con un formateador síncrono.
+
+```python
+import asyncio
+
+from pyfly.agentic.execution import (
+    ExecutionLimits, MontyEnvironment, SecureScriptRunner,
+)
+
+async def lookup_policy(wallet_id: int) -> dict:
+    await asyncio.sleep(0)
+    return {"wallet_id": wallet_id, "review": "human"}
+
+def summarize(policy: dict) -> str:
+    return f"Wallet {policy['wallet_id']}: {policy['review']} review"
+
+async def main() -> None:
+    runner = SecureScriptRunner(MontyEnvironment())
+    limits = ExecutionLimits(
+        timeout_seconds=5.0,
+        max_memory_bytes=64 * 1024 * 1024,
+        max_recursion_depth=100,
+    )
+    pure = await runner.execute("sum([2, 3, 5])", limits=limits)
+    assert pure.success and pure.output == 10
+    result = await runner.execute(
+        "policy = lookup_policy(wallet_id)\nsummarize(policy)",
+        inputs={"wallet_id": 42},
+        external_functions={
+            "lookup_policy": lookup_policy,
+            "summarize": summarize,
+        },
+        limits=limits,
+    )
+    assert result.success, result.error
+    assert result.output == "Wallet 42: human review"
+    print(result.output)
+
+asyncio.run(main())
+```
+
+La salida es `Wallet 42: human review`. Aunque `lookup_policy` sea asíncrona en
+el host, el script la llama directamente, sin `await`. Las herramientas
+asíncronas se esperan en el bucle de la aplicación; las síncronas se ejecutan
+fuera de ese bucle, en un hilo. El adaptador pausa y reanuda el script alrededor
+de cada llamada al host.
+
+Cada ejecución posee un pool `AsyncMonty(max_processes=1, min_processes=0)` y
+una sesión nueva. Tanto el éxito como el fallo y la cancelación cierran ambos.
+Reutilizar `MontyEnvironment` no conserva variables, módulos importados ni
+funciones registradas en ejecuciones anteriores. Arrancar el worker tiene un
+coste: este backend no es un intérprete dentro del proceso con arranque de
+microsegundos.
+
+El límite de tiempo real predeterminado es 30 segundos; el ejemplo establece
+cinco para el arranque, la VM y la espera de herramientas del host en conjunto.
+También se aplican los límites nativos de tiempo de VM, memoria y recursión del
+script. Monty 0.0.23 eliminó el conteo de asignaciones: deja
+`max_allocations=None`. Cualquier otro valor provoca `ValueError` antes de
+arrancar workers. Sustituye un presupuesto antiguo de asignaciones por límites
+de memoria y tiempo. Los límites del script no limitan la memoria del host.
+
+Las herramientas conservan autoridad de negocio. Autentica la identidad,
+comprueba tenant y fija plazos de E/S. Cancelar no revierte efectos externos ni
+detiene por la fuerza una función síncrona que ya esté ejecutándose en su hilo.
+Mantén escrituras idempotentes y recibos duraderos. Como ejercicio, sustituye
+el formateador por una herramienta que falle, inspecciona `success`,
+`error_type` y `error`, y comprueba que la siguiente llamada inicia un estado
+del script nuevo. La
+[guía de ejecución](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/execution/)
+explica el filtrado de salida y la integración con `ToolKit`.

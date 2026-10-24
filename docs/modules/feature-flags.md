@@ -7,7 +7,7 @@ PyFly evaluates [flagd](https://flagd.dev) definitions through OpenFeature. The 
 Install the optional dependency from the pinned GitHub Release wheel and enable the subsystem. PyFly is distributed through GitHub Releases:
 
 ```bash
-uv add "pyfly[feature-flags] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-26.10.9-py3-none-any.whl"
+uv add "pyfly[feature-flags] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.10/pyfly-26.10.10-py3-none-any.whl"
 ```
 
 ```yaml

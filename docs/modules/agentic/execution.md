@@ -63,11 +63,19 @@ the set of `external_functions` you hand to that specific call.
 
 ### `MontyEnvironment` (tiers 0–1, default)
 
-[Monty](https://pypi.org/project/pydantic-monty/) is a Rust micro-interpreter
-with a deny-by-default capability model (no filesystem, network, or environment;
-host access only through registered external functions), resource limits, and
-microsecond startup. It executes a Python *subset* (no third-party packages) —
-perfect for glue logic over PyFly Agentic tools, not for `pandas` jobs.
+[Monty](https://pypi.org/project/pydantic-monty/) 0.0.23 executes a Python
+*subset* in a local Rust worker. PyFly grants no guest filesystem, network or
+environment capabilities and mounts no host directories. Only explicitly
+registered external functions can access host services. Third-party Python
+packages are unavailable inside the guest.
+
+Each `run_code` owns an `AsyncMonty(max_processes=1, min_processes=0)` pool and a
+fresh session. Completion, errors and cancellation close the session and worker
+pool; variables and registered functions do not persist into the next run.
+Worker startup is part of execution cost; do not assume in-process or
+microsecond startup. The SDK locates the binary installed by
+`agentic-script-execution` (`pydantic-monty-runtime`), honoring its `MONTY_BIN`
+override. Keep the runtime dependency installed on a supported platform.
 
 | Tier | What | Use |
 |---|---|---|
@@ -88,13 +96,25 @@ from pyfly.agentic.execution import ExecutionLimits
 await env.run_code(code, limits=ExecutionLimits(
     timeout_seconds=5.0,        # wall-clock cap — the reliable runaway-loop guard
     max_memory_bytes=64 * 1024 * 1024,
-    max_allocations=1_000_000,
     max_recursion_depth=500,
 ))
 ```
 
-`MontyEnvironment` applies a **30-second wall-clock default** as a runaway-loop
-safety net; per-call `limits` are merged over it field-by-field.
+`MontyEnvironment` applies a **30-second wall-clock default**; per-call limits
+are merged over it field-by-field. The parent deadline includes worker/session
+setup, guest execution and host-tool waits. Monty's native VM-duration control
+also receives the time budget. Memory and recursion controls apply to the guest,
+not to allocations or recursion inside host callbacks.
+
+Monty 0.0.23 removed allocation-count limits. The retained compatibility field
+`ExecutionLimits.max_allocations` must be `None`; any other value raises
+`ValueError` before workers start. Replace old allocation-count budgets with
+memory and time limits.
+
+Async callbacks run on the application's owner loop. Sync callbacks run in a
+worker thread so they cannot block that loop. Host tools must apply their own
+I/O deadlines, authorization and idempotency. Cancellation closes the sandbox
+but cannot undo a completed effect or forcibly stop a running Python thread.
 
 ---
 
@@ -138,7 +158,67 @@ result = await runner.execute(
 ```
 
 Positional arguments in the script are mapped onto each tool's declared parameter
-names; async tools are awaited automatically.
+names; async tools are awaited automatically on the caller's event loop. The
+guest writes `lookup_policy(wallet_id)`, even when the host function is async;
+no guest `await` is required. Host-tool exceptions return as failed execution
+results, and cleanup still closes the run's session and worker pool.
+
+`toolkit_external_functions` supports explicit `ParameterSpec` metadata and
+signatures inferred from `@agent_tool` handlers. Positional and keyword arguments
+retain the handler's binding rules and defaults. Each bridged call goes through
+`tool.execute`, preserving tool guards and call listeners; the bridge does not
+invoke the decorated handler directly.
+
+### Run a deterministic mixed-tool example
+
+Save this as `monty_demo.py` and run `python monty_demo.py` in an environment
+with `pyfly[agentic,agentic-script-execution]` installed. It uses no model,
+credentials, files or network services:
+
+```python
+import asyncio
+
+from pyfly.agentic.execution import (
+    ExecutionLimits, MontyEnvironment, SecureScriptRunner,
+)
+
+async def lookup_policy(wallet_id: int) -> dict:
+    await asyncio.sleep(0)
+    return {"wallet_id": wallet_id, "review": "human"}
+
+def summarize(policy: dict) -> str:
+    return f"Wallet {policy['wallet_id']}: {policy['review']} review"
+
+async def main() -> None:
+    runner = SecureScriptRunner(MontyEnvironment())
+    limits = ExecutionLimits(
+        timeout_seconds=5.0,
+        max_memory_bytes=64 * 1024 * 1024,
+        max_recursion_depth=100,
+    )
+    pure = await runner.execute("sum([2, 3, 5])", limits=limits)
+    assert pure.success and pure.output == 10
+    result = await runner.execute(
+        "policy = lookup_policy(wallet_id)\nsummarize(policy)",
+        inputs={"wallet_id": 42},
+        external_functions={
+            "lookup_policy": lookup_policy,
+            "summarize": summarize,
+        },
+        limits=limits,
+    )
+    assert result.success, result.error
+    assert result.output == "Wallet 42: human review"
+    print(result.output)
+
+asyncio.run(main())
+```
+
+The first execution grants computation only. The second grants exactly the two
+functions in its mapping. They cannot authorize a wallet transfer: real tool
+implementations must enforce the application's identity, tenant and domain
+rules. Each execution starts a fresh session and releases its worker; the
+`MontyEnvironment` object does not retain guest variables between these calls.
 
 ---
 
@@ -176,8 +256,15 @@ Exceptions live in `pyfly.agentic.exceptions`: `ExecutionError` (base),
 
 ## Monty interpreter compatibility
 
-The native `agentic-script-execution` extra pins **`pydantic-monty==0.0.18`**, the
-interpreter API used by the preserved sandbox implementation. Later Monty 1.x
-releases expose a worker-pool constructor and remove the `run_async` interpreter
-API; they are not drop-in replacements. Retain the declared pin when resolving
-dependencies and qualify any future adapter upgrade with the execution contracts.
+The native `agentic-script-execution` extra pins **`pydantic-monty==0.0.23`**
+and installs its `pydantic-monty-runtime` binary dependency. The adapter uses an
+owned worker pool and a fresh session per run; it closes both after success,
+failure or cancellation. Guest scripts keep direct calls to registered sync and
+async tools without guest-side `await`. Binary discovery follows the SDK's
+`MONTY_BIN`/installed-binary locator. A missing binary fails explicitly; no
+CPython or remote-service fallback is enabled.
+
+Monty 0.0.23 removed `max_allocations`. Remove any non-`None` value from
+`ExecutionLimits`; PyFly raises `ValueError` before starting workers rather than
+silently ignoring it. Use wall-clock, memory and recursion budgets. The
+[execution guide](execution.md) describes callback scheduling and lifecycle.
