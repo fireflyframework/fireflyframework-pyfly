@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fractional cohort contract. Version 2 changes the hash input to a canonical
   CBOR array and shifts existing assignments; adopting it requires an explicit
   shared-contract migration rather than changing the conformance vectors.
+- Preserve the qualified asyncmy 0.2.11 minimum while the lock selects 0.2.16.
 - Reduce the admin console's canonical brand-kit logo size in the header.
 - Stage installer source without copying local virtual environments, worktrees
   or caches, avoiding large duplicate trees while preserving source dotfiles and

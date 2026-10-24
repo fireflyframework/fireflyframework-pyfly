@@ -23,6 +23,7 @@ do not reuse their removed backend installation instructions for this hotfix.
 
 | Dependency | Hotfix selection | Compatibility boundary |
 | --- | --- | --- |
+| asyncmy | `>=0.2.11`; lock `0.2.16` | Keep the proven MySQL/MariaDB driver minimum while installing the newer compatible patch in repository environments. |
 | openfeature-flagd-core | `>=1.0.0,<2` | Preserve the shared PyFly/LaraFly fractional cohort contract; 2.x changes the hash input and shifts existing assignments. |
 | Pydantic AI | `==2.59.0` | Preserve provider extras and the native runtime contracts. |
 | NumPy | `>=2.5.4` | The removed NLP dependency graph no longer imposes its NumPy restriction. |
@@ -50,6 +51,11 @@ A future 2.x adoption requires an explicit shared-contract migration and
 cross-framework qualification before changing cohort behavior. The current
 constraint intentionally defers that major version while allowing compatible
 1.x fixes.
+
+The MySQL extra also preserves its qualified `asyncmy>=0.2.11` minimum alongside
+SQLAlchemy 2.0.50. The lock already selects asyncmy 0.2.16; raising the declared
+minimum to that patch would exclude supported application combinations without
+changing the version exercised by the repository tests.
 
 ## Earlier v26.10.05 refresh
 

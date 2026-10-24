@@ -193,7 +193,7 @@ mysql = [
     # checkout raised TypeError (C089); asyncmy's pre-ping worked there and works on every later 2.0.x.
     # 0.2.11 is the oldest release the MySQL/MariaDB lanes were run on (with SQLAlchemy 2.0.50) and the
     # oldest with wheels for Python 3.12 and 3.13.
-    "asyncmy>=0.2.16",
+    "asyncmy>=0.2.11",
 ]
 eda = [
     "aiokafka>=0.14.0",
