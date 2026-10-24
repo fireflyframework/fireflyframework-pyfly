@@ -21,7 +21,7 @@ from pyfly.agentic.execution import ExecutionLimits, MontyEnvironment  # noqa: E
 def _workers() -> set[int]:
     if shutil.which("ps") is None:
         pytest.skip("worker process inventory requires ps")
-    rows = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
+    rows = subprocess.check_output(["ps", "-ww", "-axo", "pid=,ppid=,command="], text=True)
     found = set()
     for row in rows.splitlines():
         fields = row.strip().split(None, 2)
