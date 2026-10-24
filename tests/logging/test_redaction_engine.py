@@ -13,6 +13,10 @@
 # limitations under the License.
 from __future__ import annotations
 
+import builtins
+
+import pytest
+
 from pyfly.config.properties.logging import RedactionProperties
 from pyfly.logging.redaction.engine import RegexRedactor, build_redactor
 
@@ -50,9 +54,25 @@ def test_build_redactor_regex_engine():
     assert type(r).__name__ == "RegexRedactor"
 
 
-def test_build_redactor_auto_falls_back_to_regex_without_presidio():
-    props = RedactionProperties(engine="auto")
-    r = build_redactor(props)
+@pytest.mark.parametrize("engine", ["regex", "auto"])
+def test_build_redactor_uses_native_patterns_without_loading_nlp(engine, monkeypatch):
+    original_import = builtins.__import__
+
+    def import_without_nlp(name, *args, **kwargs):
+        if name.startswith(("presidio", "spacy")):
+            pytest.fail(f"Native redaction attempted to import {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_nlp)
+    r = build_redactor(RedactionProperties(engine=engine))
     assert r is not None
-    # presidio is not installed in CI -> regex fallback
-    assert type(r).__name__ in ("RegexRedactor", "PresidioRedactor")
+    assert isinstance(r, RegexRedactor)
+    assert r.redact("Contact jane@acme.io for run 550e8400-e29b-41d4-a716-446655440000") == (
+        "Contact <EMAIL> for run 550e8400-e29b-41d4-a716-446655440000"
+    )
+
+
+@pytest.mark.parametrize("engine", ["presidio", "unknown"])
+def test_removed_or_unknown_engine_requires_explicit_migration(engine):
+    with pytest.raises(ValueError, match="pyfly.logging.redaction.engine.*regex"):
+        build_redactor(RedactionProperties(engine=engine))

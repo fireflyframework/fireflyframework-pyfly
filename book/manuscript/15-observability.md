@@ -185,19 +185,16 @@ Run `uv run python -m lumen.logging_demo` again. The output shows the value alre
 
 That redaction pass runs for *every* logger in the process, including ones inside third-party libraries, which is why it catches leaks you did not write.
 
-The regex engine ships with every install. The Presidio-backed NER engine — which also catches free-text names and addresses — is available via the `[pii]` extra and activates automatically when installed:
+The native regex engine ships with every install and remains enabled by default.
+Starting with v26.10.09, the Presidio backend and `pii` extra are removed. No
+spaCy model or source-package installation is required. When upgrading, remove
+`pii` from your dependency selection and the entire `redaction.presidio` block;
+replace `engine: presidio` with `engine: regex`. An explicit `presidio` engine
+now fails with migration guidance. Legacy `auto` selects regex only.
 
-```bash
-uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.06/pyfly-26.10.6-py3-none-any.whl"
-uv run python -m spacy download en_core_web_sm
-```
-
-For v26.10.06, the optional PII extra requires Git and GitHub access: it pins
-an official Presidio source fix so cryptography 50 can be installed. The source
-still reports the same Presidio version as its older PyPI package. Existing pip
-installations must explicitly reinstall the pinned anonymizer before upgrading;
-follow the [dependency migration procedure](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/#presidio-and-cryptography)
-and finish with `python -m pip check`. The regex engine does not need this extra.
+Patterns detect known formats; they do not recognize arbitrary personal names
+or street addresses in free text. Avoid logging those values, use `deny-fields`
+for sensitive structured fields, and add `extra-patterns` for known formats.
 
 Configure redaction in `pyfly.yaml`:
 
@@ -205,17 +202,13 @@ Configure redaction in `pyfly.yaml`:
 pyfly:
   logging:
     redaction:
-      enabled: true          # default; set false to disable entirely
-      engine: auto           # regex | presidio | auto (presidio if installed)
-      mask: placeholder      # placeholder (<EMAIL>) | partial (****@acme.com)
+      enabled: true          # false disables redaction
+      engine: regex          # default; auto is a legacy alias
+      mask: placeholder      # placeholder | partial | hash
       deny-fields:
         - password
         - token
         - secret
-      presidio:
-        model: en_core_web_sm
-        score-threshold: 0.6
-        languages: [en]
 ```
 
 `deny-fields` lists structured log field *names* whose values are unconditionally replaced with `<REDACTED>`. Use it for fields like `password` where you know the value is sensitive without inspecting the content.
@@ -1676,7 +1669,7 @@ You started with a production-ready but opaque service. By the end of this
 chapter Lumen:
 
 - Emits **structured JSON logs** with correlation IDs, async-context-bound
-  fields, and automatic PII redaction via regex and optional Presidio NER.
+  fields, and automatic PII redaction via native regex patterns.
 - Exports **Prometheus metrics** from `MetricsRegistry`, tagged with
   `@timed` duration histograms and `@counted` invocation counters, scraped
   at `/actuator/prometheus`.
@@ -1702,8 +1695,8 @@ chapter Lumen:
    (`customer_email="alice@example.com"`) and a `token` field with an
    arbitrary string. Run Lumen locally with `format: console`, observe that
    the email is replaced with `<EMAIL>` and the token field value is replaced
-   with `<REDACTED>`. Then switch `engine: presidio` (after installing
-   `pyfly[pii]` and `en_core_web_sm`) and compare the output.
+   with `<REDACTED>`. Add a fictional employee identifier and an
+   `extra-patterns` rule for its known format, then confirm it is masked too.
 
 2. **Custom HealthIndicator.** Write a `StripeHealthIndicator` that calls
    `https://status.stripe.com/api/v2/status.json` with `httpx`, parses

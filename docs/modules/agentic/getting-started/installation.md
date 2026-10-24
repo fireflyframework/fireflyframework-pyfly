@@ -12,15 +12,15 @@ those dependencies on every operating system.
 
 ## From a release
 
-This guide uses **v26.10.08** (package version `26.10.8`). Verify the release's
+This guide uses **v26.10.09** (package version `26.10.9`). Verify the release's
 assets before installing its wheel. PyFly is distributed through
 [GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases),
 not PyPI. Install the wheel and select the optional module explicitly:
 
 ```bash
-python -m pip install "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-26.10.8-py3-none-any.whl"
+python -m pip install "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-26.10.9-py3-none-any.whl"
 # In a uv-managed application:
-uv add "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-26.10.8-py3-none-any.whl"
+uv add "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-26.10.9-py3-none-any.whl"
 ```
 
 Add namespaced extras such as `agentic-postgres` or `agentic-ollama-embeddings`
@@ -161,9 +161,10 @@ dependencies and qualify any future adapter upgrade with the execution contracts
 
 ## Qualified dependency baseline
 
-Native Agentic pins **Pydantic AI 2.55.0**, matching the source-qualified API and
+Native Agentic pins **Pydantic AI 2.59.0**, matching the source-qualified API and
 provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.18**.
-The optional `agentic-evaluation` extra requires **datasets >=5.0.1** so resolution
-does not fall back to an incompatible older dependency graph. Preserve these
-constraints when locking an application; a dependency change needs its own
-compatibility qualification.
+The optional `agentic-evaluation` extra retains **Ragas 0.2.6**, the compatible
+**LangChain community 0.3** adapter and **datasets >=5.0.1**. Ragas 0.4 conflicts with the
+CLI Rich 15 baseline; datasets 5.1 conflicts with the Hugging Face integration's
+`hf-xet<1.5` constraint. Preserve the complete graph when locking an application;
+see the [hotfix dependency notes](../../../dependency-updates.md). A future major upgrade needs separate adapter qualification.

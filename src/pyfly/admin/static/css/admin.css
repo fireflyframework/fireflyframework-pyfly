@@ -94,7 +94,7 @@ a:hover {
     gap: 10px;
     padding: 0 20px;
     /* The endorsed lockup retains its original aspect ratio and clear space. */
-    height: 154px;
+    height: 94px;
     flex-shrink: 0;
     border-bottom: 1px solid var(--admin-border-subtle);
     overflow: hidden;
@@ -102,7 +102,7 @@ a:hover {
 
 .admin-sidebar-brand img {
     height: auto;
-    width: 220px;
+    width: 124px;
     max-width: 100%;
     object-fit: contain;
     flex-shrink: 0;

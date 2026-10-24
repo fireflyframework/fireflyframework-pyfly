@@ -6,9 +6,20 @@ El equipo de soporte de Lumen necesita explicar la política de revisión de wal
 
 El ejemplo completo está en `samples/agentic-book`. Utiliza el `TestModel` real de Pydantic AI para producir respuestas deterministas sin credenciales ni solicitudes a proveedores. Permite repetir las pruebas con Python 3.12 y 3.13; no demuestra la precisión, el coste o la latencia de un modelo de producción. Los datos, identificadores de política y efectos son ficticios.
 
+Este hotfix utiliza Pydantic AI 2.59.0. La ejecución opcional en sandbox conserva
+Monty 0.0.18; la evaluación opcional conserva Ragas 0.2.6, el adaptador compatible
+LangChain community 0.3 y datasets >=5.0.1. Resuelve el grafo completo de la aplicación:
+versiones posteriores de Monty, Ragas y datasets tienen cambios de API o
+conflictos de dependencias descritos en las
+[notas de dependencias](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/).
+
 ## 19.1. Activar el módulo de forma explícita
 
-Instala el núcleo opcional con `pip install 'pyfly[agentic]'`. Una instalación base de PyFly no necesita SDK de inteligencia artificial. Activa la integración administrada en el árbol efectivo de configuración:
+Instala el núcleo opcional desde el wheel oficial de v26.10.09, seleccionando
+`pyfly[agentic]`, como indica la
+[guía de instalación](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/getting-started/installation/).
+PyFly se distribuye mediante GitHub Releases. Una instalación base no necesita
+SDK de inteligencia artificial. Activa la integración administrada en el árbol efectivo de configuración:
 
 ```yaml
 pyfly:

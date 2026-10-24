@@ -59,6 +59,39 @@ def project_root() -> Path:
 
 
 class TestInstaller:
+    def test_local_source_copy_excludes_environments_before_copying(self, tmp_path: Path):
+        source = tmp_path / "checkout"
+        source.mkdir()
+        (source / "pyproject.toml").write_text('[project]\nname = "pyfly"\n')
+        (source / ".source-config").write_text("keep local source configuration")
+        build = source / "book" / "build"
+        build.mkdir(parents=True)
+        (build / "build.py").write_text("print('source, not an artifact')")
+        excluded = (".venv", ".venv-hotfix-313", "venv", ".worktrees", ".git", "__pycache__", ".pytest_cache")
+        for name in excluded:
+            folder = source / name
+            folder.mkdir()
+            (folder / "disposable").write_text("must not be copied")
+        destination = tmp_path / "installation"
+        script = INSTALLER_PATH.read_text()
+        match = re.search(r'install_pyfly\(\) \{.*?    success "Source copied"', script, re.DOTALL)
+        assert match is not None
+        copy_stage = match.group() + "\n}\ninstall_pyfly\n"
+        environment = {**os.environ, "SOURCE_DIR": str(source), "INSTALL_DIR": str(destination)}
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", "info() { :; }\nsuccess() { :; }\n" + copy_stage],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        copied = destination / "source"
+        assert (copied / "pyproject.toml").read_bytes() == (source / "pyproject.toml").read_bytes()
+        assert (copied / ".source-config").is_file()
+        assert (copied / "book/build/build.py").is_file()
+        assert all(not (copied / name).exists() for name in excluded)
+
     def test_installer_exists(self):
         assert INSTALLER_PATH.exists(), f"install.sh not found at {INSTALLER_PATH}"
 

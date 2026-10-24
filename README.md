@@ -13,7 +13,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.10.08-brightgreen" alt="Version: 26.10.08"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.10.09-brightgreen" alt="Version: 26.10.09"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -61,7 +61,7 @@
 
 It covers the whole stack: dependency injection, configuration & profiles, the web layer, the Spring-Data `Repository` (derived queries, pagination, specifications, projections), DDD aggregates & `Money`, CQRS, domain events & event sourcing, messaging, HTTP clients, sagas, caching & resilience, security, observability, testing, scheduling, and going to production. Spring developers get a **Spring parity** callout at every turn.
 
-**📥 Download the books shipped with v26.10.08:** **[English PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-by-example.pdf)** · **[English EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-by-example.epub)** · **[Spanish PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-by-example-es.pdf)** · **[Spanish EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.08/pyfly-by-example-es.epub)**. For a specific version, use its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases), or build from source with `bash book/build/run.sh --out-dir book/release-output`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
+**📥 Download the books shipped with v26.10.09:** **[English PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example.pdf)** · **[English EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example.epub)** · **[Spanish PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example-es.pdf)** · **[Spanish EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example-es.epub)**. For a specific version, use its [tagged release](https://github.com/fireflyframework/fireflyframework-pyfly/releases), or build from source with `bash book/build/run.sh --out-dir book/release-output`. Run the companion sample with `cd samples/lumen && uv run --extra dev pytest` and `uv run pyfly run --server uvicorn`.
 
 ---
 
@@ -851,26 +851,29 @@ See **[`samples/lumen/`](samples/lumen/README.md)** for an end-to-end DDD micros
 
 > **Note:** PyFly is distributed exclusively via [GitHub Releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases). It is **not** published to PyPI.
 
-**Upgrading to v26.10.08:** Agentic is now a native optional module. Migrate standalone imports and public names using the [migration guide](docs/modules/agentic/migration.md); install the `agentic` extras explicitly.
+**Upgrading to v26.10.09:** Native pattern redaction remains enabled by default; the `pii` extra and Presidio backend are removed. Remove the `presidio` configuration block and use `engine: regex`; legacy `auto` selects regex. See the [logging migration](docs/modules/logging.md#upgrading-from-the-removed-presidio-backend).
+
+**From v26.10.08:** Agentic is a native optional module. Migrate standalone imports and public names using the [migration guide](docs/modules/agentic/migration.md); install the `agentic` extras explicitly.
 
 **Earlier v26.10.07 behavior:** security header defaults now preserve explicit response
 policies. A response with `Referrer-Policy: no-referrer` keeps that single value;
 missing headers still receive configured defaults. This applies to both public
 Starlette security header adapters. Review explicit policies deliberately: the
 framework does not rank their strength. See [security headers](docs/modules/security.md#security-headers).
-The [dependency update notes](docs/dependency-updates.md) still apply to the optional PII extra.
+See the [dependency update notes](docs/dependency-updates.md) for the current
+hotfix baseline and the migration from the removed Presidio backend.
 
 ### Install from GitHub Release (Recommended)
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.8-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.9-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.8-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.9-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.8-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.9-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -883,7 +886,7 @@ curl -fsSL https://get.pyfly.io/ | bash
 curl -fsSL https://raw.githubusercontent.com/fireflyframework/fireflyframework-pyfly/main/install.sh | bash
 ```
 
-The installer clones the repo, creates a virtual environment, installs PyFly with the `full` application extra by default, and adds `pyfly` to your PATH. Add `pii` explicitly if you need Presidio redaction. You can customize with environment variables:
+The installer clones the repo, creates a virtual environment, installs PyFly with the `full` application extra by default, and adds `pyfly` to your PATH. Native pattern redaction is included and enabled by default; no extra or model download is required. You can customize with environment variables:
 
 ```bash
 # Install to a custom directory
@@ -1058,7 +1061,7 @@ PyFly ships with **40 fully-implemented modules** organized into five layers —
 | **Container** | Dependency injection, stereotypes, bean factories | Spring DI (built-in) |
 | **Context** | ApplicationContext, events, lifecycle hooks, conditions | Spring ApplicationContext |
 | **Config** | Decentralized auto-configuration via `@auto_configuration` entry points | Spring Auto-Configuration |
-| **Logging** | Unified structured logging — intercepts all loggers (framework + third-party) through one formatter; Spring-style config (`pyfly.logging.*` — patterns, file output, rotation, external config file); PII redaction on by default (regex; optional Microsoft Presidio via `pyfly[pii]`) | `fireflyframework-observability` |
+| **Logging** | Unified structured logging — intercepts all loggers (framework + third-party) through one formatter; Spring-style config (`pyfly.logging.*` — patterns, file output, rotation, external config file); PII redaction on by default (native regex) | `fireflyframework-observability` |
 
 ### Application Layer
 
@@ -1154,7 +1157,7 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [IDP (Identity Provider)](docs/modules/idp.md) — Keycloak / AWS Cognito / Azure AD / internal-DB adapters
 - [ECM (Content Management)](docs/modules/ecm.md) — Documents, folders, e-signature workflows
 - [Admin Dashboard](docs/modules/admin.md) — Embedded management dashboard, server mode, custom views
-- [Logging](docs/modules/logging.md) — Unified structured logging, Spring-style `pyfly.logging.*` config, PII redaction (`pyfly[pii]` for Presidio NER)
+- [Logging](docs/modules/logging.md) — Unified structured logging, Spring-style `pyfly.logging.*` config, PII redaction (native regex)
 
 ### Adapter Reference
 
@@ -1201,6 +1204,7 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
+- **`v26.10.09`** (2026-10-24) — remove Presidio and the `pii` extra while keeping native pattern redaction enabled, refresh compatible dependencies, and reduce the admin logo size.
 - **`v26.10.08`** (2026-10-24) — integrate the native optional `pyfly.agentic` module, application-owned runtime and agents/tools/knowledge/workflows, with complete migration guidance and English/Spanish book chapters.
 - **`v26.10.07`** (2026-10-21) — preserve explicit response security policies, fill missing defaults once, and keep unrelated headers and repeated cookies unchanged.
 - **`v26.10.06`** (2026-10-14) — OpenTelemetry service identity for newly created trace and metric providers honors standard resource environment variables while preserving explicit PyFly overrides.

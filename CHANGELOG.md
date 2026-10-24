@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.09 (2026-10-24)
+
+### Changed
+
+- Remove the Presidio backend, its spaCy/model setup, the `pii` extra and the
+  dedicated Presidio CI lane. Native pattern redaction stays enabled by default.
+  The default engine is `regex`; legacy `auto` selects regex. Explicit
+  `presidio` selection fails with migration guidance; remove the old nested
+  configuration and rebuild application dependency locks.
+- Consolidate compatible dependency updates from Dependabot PR #193 and pin
+  native Agentic to Pydantic AI 2.59.0. Preserve Monty 0.0.18 and the compatible
+  Ragas 0.2.6 / LangChain community 0.3 adapter; document why incompatible major upgrades
+  remain excluded.
+- Reduce the admin console's canonical brand-kit logo size in the header.
+- Stage installer source without copying local virtual environments, worktrees
+  or caches, avoiding large duplicate trees while preserving source dotfiles and
+  the book build tools.
+
+### Documentation
+
+- Update installation, logging, dependency and Agentic guides, current release
+  links, and both English and Spanish books for the hotfix and redaction
+  migration. Historical release records retain their original dependency facts.
+
 ## v26.10.08 (2026-10-24)
 
 ### Added

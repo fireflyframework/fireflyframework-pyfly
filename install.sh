@@ -28,7 +28,7 @@ set -euo pipefail
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-PYFLY_VERSION="26.10.08"
+PYFLY_VERSION="26.10.09"
 PYFLY_REPO="https://github.com/fireflyframework/fireflyframework-pyfly.git"
 DEFAULT_INSTALL_DIR="$HOME/.pyfly"
 MIN_PYTHON_MAJOR=3
@@ -368,14 +368,15 @@ install_pyfly() {
     info "Copying PyFly source..."
     if [ "$SOURCE_DIR" != "$INSTALL_DIR/source" ]; then
         rm -rf "$INSTALL_DIR/source"
-        cp -r "$SOURCE_DIR" "$INSTALL_DIR/source"
-        rm -rf "$INSTALL_DIR/source/.worktrees" \
-               "$INSTALL_DIR/source/.venv" \
-               "$INSTALL_DIR/source/.pytest_cache" \
-               "$INSTALL_DIR/source/.mypy_cache" \
-               "$INSTALL_DIR/source/.ruff_cache" \
-               "$INSTALL_DIR/source/htmlcov" \
-               "$INSTALL_DIR/source/.coverage"
+        mkdir -p "$INSTALL_DIR/source"
+        # Exclude disposable trees before copying, including named virtual environments.
+        if ! tar -C "$SOURCE_DIR" \
+            --exclude='.git' --exclude='.worktrees' --exclude='.venv*' --exclude='venv' \
+            --exclude='__pycache__' --exclude='.pytest_cache' --exclude='.mypy_cache' \
+            --exclude='.ruff_cache' --exclude='htmlcov' --exclude='.coverage' \
+            -cf - . | tar -C "$INSTALL_DIR/source" -xf -; then
+            fatal "Failed to copy PyFly source. Check available disk space and source permissions."
+        fi
     fi
     success "Source copied"
 

@@ -17,10 +17,9 @@ import pathlib
 import tomllib
 
 
-def test_pii_extra_declared():
+def test_redaction_does_not_require_an_nlp_extra():
     data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
     extras = data["project"]["optional-dependencies"]
-    assert "pii" in extras
-    joined = " ".join(extras["pii"]).lower()
-    assert "presidio-analyzer" in joined
-    assert "presidio-anonymizer" in joined
+    assert "pii" not in extras
+    dependencies = data["project"]["dependencies"] + [requirement for group in extras.values() for requirement in group]
+    assert all("presidio" not in dependency.lower() for dependency in dependencies)

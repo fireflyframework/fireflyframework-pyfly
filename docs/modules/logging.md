@@ -190,7 +190,7 @@ message for sensitive entities before writing to any output.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `redaction.enabled` | bool | `true` | Master switch — set to `false` to disable entirely |
-| `redaction.engine` | string | `auto` | `regex` (always available), `presidio` (requires `pyfly[pii]`), or `auto` (uses Presidio if installed, falls back to regex) |
+| `redaction.engine` | string | `regex` | Native pattern redaction. Legacy `auto` is accepted as an alias for `regex`; `presidio` is rejected with migration guidance. |
 | `redaction.entities` | list[string] | see below | Entity names to detect and mask |
 | `redaction.mask` | string | `placeholder` | Mask style: `placeholder` (`<EMAIL>`), `partial` (`****1111`), or `hash` (`<EMAIL:a1b2c3d4>`) |
 | `redaction.extra-patterns` | map[string, string] | `{}` | Additional named regex patterns to redact (e.g. `{"EMP": "EMP-\\d{4}"}`) |
@@ -198,9 +198,6 @@ message for sensitive entities before writing to any output.
 | `redaction.deny-fields` | list[string] | `["password", "token", "secret"]` | Structured log fields whose value is always replaced with `<REDACTED>` |
 | `redaction.allow-fields` | list[string] | `[]` | When set, only these structured fields (plus `event`) are scanned; others are skipped |
 | `redaction.streams.enabled` | bool | `false` | Opt-in: wrap `sys.stdout`/`sys.stderr` with the redactor |
-| `redaction.presidio.languages` | list[string] | `["en"]` | Languages passed to Presidio's `AnalyzerEngine` |
-| `redaction.presidio.score-threshold` | float | `0.5` | Minimum Presidio confidence score to trigger redaction |
-| `redaction.presidio.model` | string | `en_core_web_lg` | spaCy model Presidio's NLP engine loads (download it with `python -m spacy download <model>`; use a smaller model like `en_core_web_sm` for lighter footprints) |
 
 Default entities detected by the regex engine:
 
@@ -219,8 +216,7 @@ the log line it appeared on — silently, and only sometimes.
 
 Those shapes are now carved out of the message **before** any entity pattern
 runs, and the entity rules only ever see the gaps between them. A pattern
-therefore cannot match across a protected identifier, whichever engine is in
-use. The built-in protected shapes are:
+therefore cannot match across a protected identifier. The built-in protected shapes are:
 
 | Name | Shape |
 |------|-------|
@@ -247,43 +243,32 @@ and matches compact E.164, separated international, `(212) 555-0143`,
 with no separator is no longer matched; write it with a separator or with its
 country code.
 
-### Upgrading to Presidio (NER-based redaction)
+### Upgrading from the removed Presidio backend
 
-Install the optional extra from the release artifact:
+Starting with v26.10.09, PyFly uses its native regex redactor exclusively.
+Redaction remains enabled by default, without an extra, spaCy model, Git source
+package or model download. The `pii` extra and Presidio backend have been removed.
 
-```bash
-pip install "pyfly[pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-26.10.7-py3-none-any.whl"
-```
-
-Version 26.10.07 pins the official Presidio anonymizer source fix for
-cryptography 50. This extra requires Git and GitHub access during installation;
-existing pip installations must explicitly reinstall the pinned anonymizer
-source before upgrading. See [dependency update notes](../dependency-updates.md#presidio-and-cryptography)
-for the complete procedure.
-
-You also need a spaCy model (Presidio defaults to `en_core_web_lg`):
-
-```bash
-python -m spacy download en_core_web_lg   # or en_core_web_sm for a lighter footprint
-```
-
-Then set `engine: auto` (default) or `engine: presidio`. Presidio detects with its
-full recognizer set (named-entity recognition), catching PII that regex cannot —
-free-text **names**, locations, etc. — and pyfly then runs the regex pass over the
-result so token-types Presidio has no recognizer for (JWT, bearer tokens, URL
-credentials) are still masked. If the model isn't installed, redaction falls back
-to the regex engine rather than failing.
+Remove `pii` from your PyFly dependency selection, remove the entire
+`pyfly.logging.redaction.presidio` block, and replace `engine: presidio` with
+`engine: regex`. Explicit `presidio` selection fails with migration guidance;
+legacy `engine: auto` selects regex and never loads an installed NLP backend.
+Rebuild your application environment from its updated lock to drop unused
+Presidio/spaCy dependencies, then run `python -m pip check`.
 
 ```yaml
 pyfly:
   logging:
     redaction:
-      engine: auto          # uses Presidio when installed, regex otherwise
+      enabled: true
+      engine: regex
       mask: partial
-      presidio:
-        languages: [en, es]
-        score-threshold: 0.6
 ```
+
+The native patterns detect the entity shapes listed above. They do not provide
+named-entity recognition for arbitrary names, street addresses or locations in
+free text. Avoid logging those values; use `deny-fields` for structured fields
+and `extra-patterns` for known application-specific formats.
 
 ### Opt-in stdout/stderr wrapper
 

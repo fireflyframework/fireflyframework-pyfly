@@ -10,7 +10,7 @@ configuration, extras and application-owned persistence.
 Install the same optional dependencies and development tools used by CI:
 
 ```bash
-uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+uv sync --locked --all-extras --group dev --group agentic-dev
 uv run --no-sync pytest tests/agentic -q
 ```
 

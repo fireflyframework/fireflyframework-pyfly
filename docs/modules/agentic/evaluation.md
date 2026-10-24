@@ -354,9 +354,10 @@ and the orchestrator `run_judge`.
 
 ## Qualified dependency baseline
 
-Native Agentic pins **Pydantic AI 2.55.0**, matching the source-qualified API and
+Native Agentic pins **Pydantic AI 2.59.0**, matching the source-qualified API and
 provider contracts. `agentic-script-execution` pins **pydantic-monty 0.0.18**.
-The optional `agentic-evaluation` extra requires **datasets >=5.0.1** so resolution
-does not fall back to an incompatible older dependency graph. Preserve these
-constraints when locking an application; a dependency change needs its own
-compatibility qualification.
+The optional `agentic-evaluation` extra retains **Ragas 0.2.6**, the compatible
+**LangChain community 0.3** adapter and **datasets >=5.0.1**. Ragas 0.4 conflicts with the
+CLI Rich 15 baseline; datasets 5.1 conflicts with the Hugging Face integration's
+`hf-xet<1.5` constraint. Preserve the complete graph when locking an application;
+see the [hotfix dependency notes](../../dependency-updates.md). A future major upgrade needs separate adapter qualification.

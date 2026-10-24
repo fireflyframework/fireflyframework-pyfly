@@ -108,7 +108,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | Guide | Description |
 |-------|-------------|
 | [Observability](modules/observability.md) | Prometheus metrics, OpenTelemetry tracing, structured logging, health checks |
-| [Logging](modules/logging.md) | `get_logger`, unified structured logging (intercepts all loggers), Spring-style `pyfly.logging.*` config, PII redaction (regex default; Presidio NER via `pyfly[pii]`) |
+| [Logging](modules/logging.md) | `get_logger`, unified structured logging (intercepts all loggers), Spring-style `pyfly.logging.*` config, PII redaction (native regex) |
 | [Scheduling](modules/scheduling.md) | Cron jobs, fixed-rate tasks, fixed-delay tasks, async execution |
 
 ### Integration

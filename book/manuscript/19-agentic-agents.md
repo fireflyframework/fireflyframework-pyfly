@@ -6,9 +6,18 @@ Lumen's support team needs to explain wallet review policy. The assistant reads 
 
 Our complete companion is `samples/agentic-book`. Its real Pydantic AI `TestModel` generates deterministic responses without credentials or provider requests. This makes the examples reproducible on Python 3.12 and 3.13. It does not establish the accuracy, cost or latency of a production model. The test data, policy IDs and effects are fictional.
 
+This hotfix uses Pydantic AI 2.59.0. Optional sandbox execution retains Monty
+0.0.18; optional evaluation retains Ragas 0.2.6, the compatible LangChain community 0.3
+adapter and datasets >=5.0.1. Resolve the complete application graph: newer Monty,
+Ragas and datasets releases have API or dependency conflicts described in the
+[dependency notes](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/).
+
 ## 19.1. Enable the module deliberately
 
-Install the optional core with `pip install 'pyfly[agentic]'`. Base PyFly installations need no AI SDK. Enable managed integration in the effective configuration tree:
+Install the optional core from the official v26.10.09 release wheel, selecting
+`pyfly[agentic]`, as shown in the
+[installation guide](https://fireflyframework.github.io/fireflyframework-pyfly/docs/modules/agentic/getting-started/installation/).
+PyFly is distributed through GitHub Releases. Base installations need no AI SDK. Enable managed integration in the effective configuration tree:
 
 ```yaml
 pyfly:

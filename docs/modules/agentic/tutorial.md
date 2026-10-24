@@ -123,7 +123,7 @@ source .venv/bin/activate
 python -m pip install -e ".[agentic]"
 ```
 
-This installs the framework with Pydantic AI `==2.55.0`, its explicitly
+This installs the framework with Pydantic AI `==2.59.0`, its explicitly
 declared agent provider integrations, Pydantic, Jinja2, HTTPX, pricing metadata,
 and OpenTelemetry. Storage and document-processing libraries remain optional extras.
 

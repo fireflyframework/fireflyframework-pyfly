@@ -54,20 +54,11 @@ class StreamsRedactionProperties:
 
 
 @dataclass
-class PresidioProperties:
-    """Microsoft Presidio engine settings (used when engine=presidio|auto)."""
-
-    languages: list[str] = field(default_factory=lambda: ["en"])
-    score_threshold: float = 0.5
-    model: str = "en_core_web_lg"  # spaCy model Presidio's NLP engine loads
-
-
-@dataclass
 class RedactionProperties:
     """PII redaction settings (pyfly.logging.redaction.*)."""
 
     enabled: bool = True
-    engine: str = "auto"  # regex | presidio | auto
+    engine: str = "regex"  # auto remains an alias for native regex redaction
     entities: list[str] = field(
         default_factory=lambda: [
             "EMAIL",
@@ -90,7 +81,6 @@ class RedactionProperties:
     allow_fields: list[str] = field(default_factory=list)
     deny_fields: list[str] = field(default_factory=lambda: ["password", "token", "secret"])
     streams: StreamsRedactionProperties = field(default_factory=StreamsRedactionProperties)
-    presidio: PresidioProperties = field(default_factory=PresidioProperties)
 
 
 @config_properties(prefix="pyfly.logging")

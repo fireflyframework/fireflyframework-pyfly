@@ -91,5 +91,6 @@ The console embeds the canonical Python family assets from
 `b64a50e289b853cab54e5d59bc1b092b48c5eec4` (version 0.2.0); its own
 `src/pyfly/admin/static/assets/brand-origin.json` records the upstream generator,
 fonts, notices and asset hashes. No logo was reconstructed for the screenshot.
-Screenshot SHA-256: `a298f803f91c7810dfd126a20384232cdbbd4bc860c2dff31740ef55af302f3a`.
+The v26.10.09 capture includes the compact 124-pixel logo and 94-pixel brand row.
+Screenshot SHA-256: `d6ae38713c847de850465fa6efe49f5398896f43a7d928e6ce7a8c3a4619b9d4`.
 The canonical generator's banner is byte-identical to `assets/banner.svg`.

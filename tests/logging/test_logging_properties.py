@@ -22,7 +22,7 @@ def test_defaults():
     assert props.level == {"root": "INFO"}
     assert props.format == "console"
     assert props.redaction.enabled is True
-    assert props.redaction.engine == "auto"
+    assert props.redaction.engine == "regex"
     assert "EMAIL" in props.redaction.entities
     assert props.redaction.deny_fields == ["password", "token", "secret"]
     assert props.redaction.streams.enabled is False
@@ -45,7 +45,6 @@ def test_relaxed_nested_kebab_keys_bind():
                         "extra-patterns": {"EMP": "EMP-\\d+"},
                         "deny-fields": ["pw"],
                         "streams": {"enabled": True},
-                        "presidio": {"score-threshold": 0.7, "languages": ["en", "es"]},
                     },
                 }
             }
@@ -63,5 +62,3 @@ def test_relaxed_nested_kebab_keys_bind():
     assert props.redaction.extra_patterns == {"EMP": "EMP-\\d+"}
     assert props.redaction.deny_fields == ["pw"]
     assert props.redaction.streams.enabled is True
-    assert props.redaction.presidio.score_threshold == 0.7
-    assert props.redaction.presidio.languages == ["en", "es"]

@@ -189,20 +189,18 @@ Ejecuta `uv run python -m lumen.logging_demo` de nuevo. La salida muestra el val
 
 Esa pasada de redacción se ejecuta para *cada* logger del proceso, incluidos los que están dentro de bibliotecas de terceros, razón por la cual atrapa fugas que tú no escribiste.
 
-El motor de expresiones regulares viene con cada instalación. El motor NER respaldado por Presidio —que además atrapa nombres y direcciones en texto libre— está disponible mediante el extra `[pii]` y se activa automáticamente cuando se instala:
+El motor nativo de expresiones regulares viene con cada instalación y sigue
+activado por defecto. Desde v26.10.09 se eliminan el backend Presidio y el extra
+`pii`. No hace falta instalar modelos spaCy ni paquetes desde código fuente.
+Al actualizar, elimina `pii` de las dependencias y todo el bloque
+`redaction.presidio`; sustituye `engine: presidio` por `engine: regex`. La
+selección explícita de `presidio` falla con instrucciones de migración. El valor
+heredado `auto` selecciona únicamente expresiones regulares.
 
-```bash
-uv add "pyfly[observability,pii] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.06/pyfly-26.10.6-py3-none-any.whl"
-uv run python -m spacy download en_core_web_sm
-```
-
-En v26.10.06, el extra PII requiere Git y acceso a GitHub: fija una corrección
-oficial del código fuente de Presidio para poder instalar cryptography 50.
-Ese código conserva el mismo número de versión que el paquete anterior de PyPI.
-Las instalaciones existentes con pip deben reinstalar explícitamente el
-anonimizador fijado antes de actualizar; sigue el [procedimiento de migración](https://fireflyframework.github.io/fireflyframework-pyfly/docs/dependency-updates/#presidio-and-cryptography)
-y termina con `python -m pip check`. El motor de expresiones regulares no necesita
-este extra.
+Los patrones detectan formatos conocidos; no reconocen nombres personales ni
+direcciones postales arbitrarias en texto libre. Evita registrar esos valores,
+usa `deny-fields` para campos estructurados sensibles y `extra-patterns` para
+formatos conocidos.
 
 Configura la redacción en `pyfly.yaml`:
 
@@ -210,17 +208,13 @@ Configura la redacción en `pyfly.yaml`:
 pyfly:
   logging:
     redaction:
-      enabled: true          # default; set false to disable entirely
-      engine: auto           # regex | presidio | auto (presidio if installed)
-      mask: placeholder      # placeholder (<EMAIL>) | partial (****@acme.com)
+      enabled: true          # false desactiva la redacción
+      engine: regex          # predeterminado; auto es un alias
+      mask: placeholder      # placeholder | partial | hash
       deny-fields:
         - password
         - token
         - secret
-      presidio:
-        model: en_core_web_sm
-        score-threshold: 0.6
-        languages: [en]
 ```
 
 `deny-fields` enumera los *nombres* de los campos de log estructurado cuyos valores se sustituyen incondicionalmente por `<REDACTED>`. Úsalo para campos como `password`, donde sabes que el valor es sensible sin inspeccionar el contenido.
@@ -1640,7 +1634,7 @@ capítulo Lumen:
 
 - Emite **logs JSON estructurados** con identificadores de correlación, campos
   vinculados al contexto asíncrono y redacción automática de PII mediante
-  expresiones regulares y, opcionalmente, NER con Presidio.
+  patrones nativos de expresiones regulares.
 - Exporta **métricas Prometheus** desde `MetricsRegistry`, etiquetadas con
   histogramas de duración `@timed` y contadores de invocación `@counted`,
   recolectadas en `/actuator/prometheus`.
@@ -1669,8 +1663,8 @@ capítulo Lumen:
    valor de campo (`customer_email="alice@example.com"`) y un campo `token` con una
    cadena arbitraria. Ejecuta Lumen localmente con `format: console`, observa que
    el correo se sustituye por `<EMAIL>` y que el valor del campo token se sustituye
-   por `<REDACTED>`. Luego cambia a `engine: presidio` (tras instalar
-   `pyfly[pii]` y `en_core_web_sm`) y compara la salida.
+   por `<REDACTED>`. Añade un identificador ficticio de empleado y una
+   regla `extra-patterns` para su formato conocido; comprueba que también se oculta.
 
 2. **HealthIndicator personalizado.** Escribe un `StripeHealthIndicator` que llame
    a `https://status.stripe.com/api/v2/status.json` con `httpx`, parsee

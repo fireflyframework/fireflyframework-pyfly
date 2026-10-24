@@ -303,6 +303,10 @@ pip install -e ".[full]"                             # Everything
 
 ---
 
+The source installer excludes existing virtual environments, worktrees and
+caches when staging a checkout; project source dotfiles and book build tools are
+preserved.
+
 ## Available Extras
 
 Each extra pulls in the third-party libraries needed for a specific framework module. Install only what your application needs to keep the dependency footprint minimal.
@@ -328,15 +332,14 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | `cache` | redis[hiredis] | Caching with Redis backend |
 | `client` | httpx | Resilient HTTP client with retry and circuit breaker |
 | `observability` | prometheus-client, opentelemetry-api, opentelemetry-sdk, structlog | Metrics, distributed tracing, structured logging |
-| `pii` | presidio-analyzer, presidio-anonymizer | Microsoft Presidio NER-based PII redaction (upgrades the default regex redactor in `pyfly.logging`) |
 | `security` | pyjwt[crypto], bcrypt, cryptography | JWT token generation/verification, password hashing |
 | `scheduling` | croniter | Cron expression parsing for scheduled tasks |
 | `cli` | click, rich, jinja2, questionary | CLI tools (pyfly new, run, info, doctor, db) |
-| `full` | Bundled application extras (excludes `pii`, `testing`, `testcontainers`, and `argon2`) | Broad framework installation; add optional PII/testing/password backends explicitly |
+| `full` | Bundled application extras (excludes `testing`, `testcontainers`, and `argon2`) | Broad framework installation; add optional testing/password backends explicitly |
 
-The optional `pii` extra in v26.10.07 requires Git and GitHub access for the
-immutable upstream anonymizer fix. See the [dependency update notes](dependency-updates.md#presidio-and-cryptography)
-before upgrading an existing PII installation.
+Native pattern-based PII redaction is included and enabled by default. Starting
+with v26.10.09, the `pii` extra and Presidio backend are removed. Existing
+applications should follow the [redaction migration](modules/logging.md#upgrading-from-the-removed-presidio-backend).
 
 ### Choosing Extras
 
@@ -528,7 +531,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.10.08
+    ✓ pyfly v26.10.09
 
   All checks passed!
 ```

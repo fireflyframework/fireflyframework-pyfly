@@ -7,21 +7,22 @@ wallet offer route, shared targeting fixture, runtime gates and operator workflo
 
 | Edition | PDF | EPUB |
 |---|---|---|
-| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-by-example.epub) |
-| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-by-example-es.epub) |
+| English | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example.epub) |
+| Spanish | [PDF](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example-es.pdf) | [EPUB](https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.09/pyfly-by-example-es.epub) |
 
-These books are rebuilt from the `v26.10.07` software tag. The independently
+These books are rebuilt from the `v26.10.09` software tag. The independently
 published [2026-10-14 edition](https://github.com/fireflyframework/fireflyframework-pyfly/releases/tag/books-26.10.14)
 retains its original assets. For other editions, open the
 [tagged releases](https://github.com/fireflyframework/fireflyframework-pyfly/releases)
 and download the books attached to that tag.
 
-The checkout adds a final native Agentic part (Chapters 19–21): agents and tools,
+The books include the native Agentic part (Chapters 19–21): agents and tools,
 knowledge and reasoning, workflows and operations. The current native refresh adds
 async working facts in the application Data unit, encryption/migration boundaries,
-native HTTP/events/plugins and the guarded Agentic admin console. The release links above remain
-historical; they do not contain the new chapters. Locally rebuilt editions must
-record the checkout commit and dirty source hashes until a new release is published.
+native HTTP/events/plugins and the guarded Agentic admin console. The hotfix
+refresh replaces the removed Presidio setup with native regex
+redaction and migration guidance in both languages. Local candidate builds must
+record the checkout commit and dirty source hashes until the release is published.
 
 ## Sources and examples
 

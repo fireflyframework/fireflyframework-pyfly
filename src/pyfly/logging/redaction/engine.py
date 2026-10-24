@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Redactor engines: fast regex (default) + optional Presidio."""
+"""Native pattern-based redaction for logging."""
 
 from __future__ import annotations
 
@@ -144,82 +144,14 @@ class RegexRedactor:
         return result
 
 
-class PresidioRedactor:
-    """Microsoft Presidio (NER) redactor — used when the pyfly[pii] extra is installed."""
-
-    def __init__(self, props: RedactionProperties) -> None:
-        from presidio_analyzer import AnalyzerEngine  # type: ignore[import-not-found, import-untyped, unused-ignore]
-        from presidio_analyzer.nlp_engine import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
-            NlpEngineProvider,
-        )
-        from presidio_anonymizer import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
-            AnonymizerEngine,
-        )
-
-        language = (props.presidio.languages or ["en"])[0]
-        # Build the NLP engine for the configured spaCy model (default
-        # en_core_web_lg) so the model is explicit and swappable (e.g. CI uses the
-        # tiny en_core_web_sm). Typed as Any so redact() type-checks independently
-        # of presidio's own type surface; the no-untyped-call ignores cover
-        # presidio's untyped constructors, unused-ignore covers the not-installed
-        # env (where the imported names are Any).
-        nlp_engine: Any = NlpEngineProvider(  # type: ignore[no-untyped-call, unused-ignore]
-            nlp_configuration={
-                "nlp_engine_name": "spacy",
-                "models": [{"lang_code": language, "model_name": props.presidio.model}],
-            }
-        ).create_engine()
-        self._analyzer: Any = AnalyzerEngine(nlp_engine=nlp_engine)  # type: ignore[no-untyped-call, unused-ignore]
-        self._anonymizer: Any = AnonymizerEngine()  # type: ignore[no-untyped-call, unused-ignore]
-        self._language = language
-        self._threshold = props.presidio.score_threshold
-        # Regex pass runs after presidio to also mask token-types presidio has no
-        # recognizer for (JWT, bearer tokens, URL credentials).
-        self._fallback = RegexRedactor(props.entities, props.mask, props.extra_patterns, props.preserve_patterns)
-        self._preserve = compile_preserve_patterns(props.preserve_patterns)
-
-    def redact(self, text: Any) -> Any:
-        if not isinstance(text, str) or not text:
-            return text
-        # Presidio's recognizers are as capable of reading a uuid as a phone
-        # number as the regex engine was, so it too only ever sees the gaps
-        # between the protected identifier spans.
-        result = _redact_around_protected(text, self._preserve, self._analyze_and_anonymize)
-        # Always run the regex pass too, for the token-types presidio misses.
-        # It protects the same spans again on its own.
-        return self._fallback.redact(result)
-
-    def _analyze_and_anonymize(self, text: str) -> str:
-        if not text:
-            return text
-        try:
-            # Detect with presidio's full recognizer set (its entity names differ
-            # from the regex engine's, so we do NOT restrict to props.entities).
-            findings = self._analyzer.analyze(text=text, language=self._language)
-            findings = [r for r in findings if r.score >= self._threshold]
-            if findings:
-                anonymized: str = self._anonymizer.anonymize(text=text, analyzer_results=findings).text
-                return anonymized
-        except Exception:  # noqa: BLE001 — never let redaction crash logging
-            pass
-        return text
-
-
 def build_redactor(props: RedactionProperties) -> Redactor | None:
     """Resolve the configured redactor, or None when redaction is disabled."""
     if not props.enabled:
         return None
     engine = props.engine.lower().strip()
-    if engine in ("presidio", "auto"):
-        # Construction fails with ImportError when presidio isn't installed, or
-        # e.g. OSError when it's installed but its NLP model isn't downloaded.
-        # Either way, fall back to the regex engine — a logging misconfiguration
-        # must never crash the application (audit-grade robustness).
-        try:
-            return PresidioRedactor(props)
-        except Exception as exc:  # noqa: BLE001 — any presidio failure -> regex fallback
-            if engine == "presidio":
-                _logger.warning("presidio PII engine unavailable (%s); falling back to regex redaction", exc)
-            else:
-                _logger.info("presidio not available (%s); using regex PII redaction (install pyfly[pii])", exc)
+    if engine not in ("regex", "auto"):
+        raise ValueError(
+            "pyfly.logging.redaction.engine supports regex (or auto as a regex alias); "
+            "remove obsolete NLP engine settings and use regex"
+        )
     return RegexRedactor(props.entities, props.mask, props.extra_patterns, props.preserve_patterns)

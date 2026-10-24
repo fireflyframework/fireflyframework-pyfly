@@ -50,7 +50,7 @@ def test_agentic_selection_generates_explicit_native_config(tmp_path: Path, inte
     dependencies = tomllib.loads((project / "pyproject.toml").read_text())["project"]["dependencies"]
     assert dependencies == [
         "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/"
-        "releases/download/v26.10.08/pyfly-26.10.8-py3-none-any.whl"
+        "releases/download/v26.10.09/pyfly-26.10.9-py3-none-any.whl"
     ]
 
 
@@ -66,7 +66,7 @@ def test_agentic_selection_generates_explicit_native_config(tmp_path: Path, inte
 )
 @pytest.mark.parametrize(
     ("version", "tag", "wheel_version"),
-    [("26.10.08", "v26.10.08", "26.10.8"), ("26.1.02", "v26.01.02", "26.1.2")],
+    [("26.10.09", "v26.10.09", "26.10.9"), ("26.1.02", "v26.01.02", "26.1.2")],
 )
 def test_agentic_scaffold_pins_official_wheel_for_cli_version(
     tmp_path: Path,
@@ -155,7 +155,7 @@ def test_new_plain_core_then_add_agentic_pins_native_release(tmp_path: Path) -> 
     assert requirement.extras == {"agentic"}
     assert requirement.url == (
         "https://github.com/fireflyframework/fireflyframework-pyfly/releases/"
-        "download/v26.10.08/pyfly-26.10.8-py3-none-any.whl"
+        "download/v26.10.09/pyfly-26.10.9-py3-none-any.whl"
     )
 
 
@@ -169,7 +169,7 @@ def test_add_agentic_to_unversioned_dependency_preserves_extras_and_literal_mark
     tail = " " + rest if rest.startswith(";") else rest
     assert dependency == (
         "pyfly[agentic,web] @ https://github.com/fireflyframework/fireflyframework-pyfly/"
-        "releases/download/v26.10.08/pyfly-26.10.8-py3-none-any.whl" + tail
+        "releases/download/v26.10.09/pyfly-26.10.9-py3-none-any.whl" + tail
     )
     assert Requirement(dependency).extras == {"agentic", "web"}
 
@@ -185,7 +185,7 @@ def test_add_agentic_rejects_version_constraint_without_mutation(tmp_path: Path,
     assert added.exit_code == 1, added.output
     assert "version constraint" in added.output
     assert "official release wheel" in added.output
-    assert "v26.10.08/pyfly-26.10.8-py3-none-any.whl" in added.output
+    assert "v26.10.09/pyfly-26.10.9-py3-none-any.whl" in added.output
     assert manifest.read_text() == original
 
 
@@ -193,7 +193,7 @@ def test_add_agentic_rejects_version_constraint_without_mutation(tmp_path: Path,
 def test_add_list_remove_agentic_preserves_direct_wheel_reference(tmp_path: Path, separator: str) -> None:
     reference = (
         separator + "https://github.com/fireflyframework/fireflyframework-pyfly/releases/"
-        "download/v26.10.08/pyfly-26.10.8-py3-none-any.whl ; python_version >= '3.12'"
+        "download/v26.10.09/pyfly-26.10.9-py3-none-any.whl ; python_version >= '3.12'"
     )
     manifest = tmp_path / "pyproject.toml"
     manifest.write_text('[project]\nname = "app"\ndependencies = ["pyfly[web]' + reference + '"]\n')

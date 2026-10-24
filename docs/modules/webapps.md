@@ -487,5 +487,5 @@ static mounts at the same path.
 
 Run backend tests with `uv run pytest`. Run the new real-backend tests with
 `PYFLY_INTEGRATION_REQUIRE_DOCKER=1 uv run pytest -m integration tests/integration/test_admin_data_postgres.py tests/integration/test_admin_data_mongo.py`.
-For browser tests, install `uv sync --all-extras --no-extra pii --group dev --group browser`,
+For browser tests, install `uv sync --locked --all-extras --group dev --group browser`,
 then `uv run playwright install chromium` and `uv run pytest -m browser tests/browser`.

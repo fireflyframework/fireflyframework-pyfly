@@ -1,56 +1,48 @@
-# Dependency updates in v26.10.05
+# Dependency updates in v26.10.09
 
-This release consolidates Dependabot [PR #171](https://github.com/fireflyframework/fireflyframework-pyfly/pull/171)
-and [PR #157](https://github.com/fireflyframework/fireflyframework-pyfly/pull/157),
-refreshes `uv.lock`, and updates the independent site and book toolchains.
-Python 3.12 and 3.13 remain the tested versions. SQLAlchemy 2.0.50 and later
-remain supported, including the separate 2.0 compatibility lane; the primary
-lock selects 2.1.4. Beanie's existing Python `<3.14` restriction still applies
-to the document-data extra. The proven asyncmy minimum stays at 0.2.11
-while the lock updates to 0.2.16; the proposed 0.2.15 floor would needlessly
-exclude an already qualified driver version.
+This hotfix consolidates compatible updates from Dependabot
+[PR #193](https://github.com/fireflyframework/fireflyframework-pyfly/pull/193).
+The declared constraints are in `pyproject.toml`; `uv.lock` records the exact
+repository selection. Applications must resolve and validate their own locks.
+Python 3.12 and 3.13 remain the qualification targets.
 
-## Presidio and cryptography
+## Native redaction and Presidio removal
 
-The published `presidio-anonymizer==2.2.364` requires cryptography below 49,
-which conflicts with the patched cryptography 50 line. The `pii` extra therefore
-uses the official upstream [merged fix](https://github.com/data-privacy-stack/presidio/pull/2231)
-at immutable commit
-[`5e2fcea990aa3b99660d2aea9121d0ba74a8940b`](https://github.com/data-privacy-stack/presidio/commit/5e2fcea990aa3b99660d2aea9121d0ba74a8940b).
-This source revision retains the upstream distribution version `2.2.364`;
-it is not a new published Presidio release. The lock resolves cryptography
-50.0.2. PyFly does not override upstream package metadata or disable the PII extra.
+The `pii` extra, Presidio backend and its source-pinned anonymizer dependency are
+removed. Native regex redaction remains enabled by default. Remove `pii` from
+your PyFly extras, remove `pyfly.logging.redaction.presidio`, and select
+`engine: regex`. Legacy `auto` selects regex; explicit `presidio` is rejected.
+Recreate the application environment from the new lock to remove unused
+Presidio/spaCy packages. See the [logging migration](modules/logging.md#upgrading-from-the-removed-presidio-backend).
 
-Installing `pyfly[pii]` requires Git, access to GitHub, and the ability to build
-the upstream Python source package with Poetry Core. These requirements apply
-only when selecting `pii`; `full` does not include `pii`. Keep the direct source
-reference when generating deployment locks or dependency inventories. An
-index-only `presidio-anonymizer==2.2.364` entry is not an equivalent replacement.
-The source pin can return to a normal version constraint after upstream publishes
-a release that supports cryptography 50 and that release is qualified.
+The previous Git/GitHub source-build and spaCy-model requirements no longer
+apply to redaction. Historical v26.10.05–08 facts remain in the changelog;
+do not reuse their removed backend installation instructions for this hotfix.
 
-For an existing pip installation, first reinstall the named anonymizer from the
-exact source reference. Pip can otherwise retain the old index package because
-both sources report version `2.2.364`, even with `--upgrade`. Then upgrade PyFly to v26.10.07, which retains this source requirement:
+## Agentic compatibility boundaries
 
-```bash
-python -m pip install --upgrade --force-reinstall "presidio-anonymizer @ git+https://github.com/data-privacy-stack/presidio.git@5e2fcea990aa3b99660d2aea9121d0ba74a8940b#subdirectory=presidio-anonymizer"
-python -m pip install --upgrade "pyfly[pii,security] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/download/v26.10.07/pyfly-26.10.7-py3-none-any.whl"
-python -m pip check
-python -m spacy download en_core_web_sm
-```
+| Dependency | Hotfix selection | Compatibility boundary |
+| --- | --- | --- |
+| Pydantic AI | `==2.59.0` | Preserve provider extras and the native runtime contracts. |
+| NumPy | `>=2.5.4` | The removed NLP dependency graph no longer imposes its NumPy restriction. |
+| pydantic-monty | `==0.0.18` | Monty 1.2 uses a worker-pool API and removes the interpreter's `run_async`; a sandbox adapter migration needs separate qualification. |
+| Ragas | `>=0.2.6,<0.2.7` | Ragas 0.4 introduces Instructor's `rich<15` constraint, conflicting with the CLI's Rich 15 baseline. |
+| LangChain community | `>=0.3.31,<0.4` | Retain the compatible community adapter alongside Ragas 0.2.6; provider adapters resolve independently. |
+| LangChain provider adapters | Anthropic `>=1.7.6`, Ollama `>=1.1.0`, OpenAI `>=1.7.2` | These 1.x adapters resolve with the retained community adapter; the community cap does not hold all LangChain packages at 0.3. |
+| datasets | `>=5.0.1` | Retain the compatible release: 5.1 requires an hf-xet range incompatible with Pydantic AI's Hugging Face integration (`hf-xet<1.5`). |
 
-Configure `pyfly.logging.redaction.presidio.model: en_core_web_sm` when using
-that smaller model; the default remains `en_core_web_lg`. See
-[PII redaction](modules/logging.md#pii-redaction) for configuration.
+The last row is a compatible minimum, not a claim that every newer release can
+coexist with all extras. Let the resolver honor the complete graph rather than
+forcing individual requested major versions. Keep optional evaluation and
+sandbox dependencies out of installations that do not need them.
 
-The cryptography upgrade avoids the remaining 48.x
-[PKCS7 decryption](https://github.com/pyca/cryptography/security/advisories/GHSA-g6cj-pr64-35w5),
-[name-constraints](https://github.com/pyca/cryptography/security/advisories/GHSA-m2h6-j472-rp4c),
-and [certificate path-building](https://github.com/pyca/cryptography/security/advisories/GHSA-jwv3-5hgf-82ww)
-advisories. [Cryptography 49 removed support](https://cryptography.io/en/latest/changelog/#v49-0-0)
-for macOS x86_64 and 32-bit Windows; users on those platforms must migrate to
-a supported platform and Python installation before this upgrade.
+## Earlier v26.10.05 refresh
+
+The earlier release consolidated Dependabot
+[PR #171](https://github.com/fireflyframework/fireflyframework-pyfly/pull/171)
+and [PR #157](https://github.com/fireflyframework/fireflyframework-pyfly/pull/157).
+The following adapter notes and version table describe that earlier refresh;
+the current hotfix's declared constraints and lock take precedence.
 
 ## Adapter and tooling compatibility
 
@@ -68,16 +60,17 @@ PATH configuration from the user's shell profiles.
 
 All 14 `actions/setup-python` uses are pinned to v7.0.0 commit
 `5fda3b95a4ea91299a34e894583c3862153e4b97`. The removed `pip-install` input was
-not used by these workflows. Book builds use WeasyPrint 70 and CairoSVG 2.9.1
+not used by these workflows. At that release, book builds used WeasyPrint 70 and CairoSVG 2.9.1
 or later, including the upstream security fixes; both English and Spanish
 PDF/EPUB editions are rebuilt from the software tag.
 
-## Requested updates and resolved versions
+## Historical v26.10.05 requested updates and resolved versions
 
 The requested floor comes from the original Dependabot proposal. The resolved
 version is the release lock, or the separately installed site/book toolchain.
-Presidio anonymizer uses the source revision described above. SQLAlchemy's
-proposal changed only a comment: its actual floor remains `>=2.0.50`.
+This table records v26.10.05, not the current hotfix lock. Removed Presidio
+packages are omitted; their original release record remains in the changelog.
+SQLAlchemy's proposal changed only a comment: its floor then remained `>=2.0.50`.
 
 | Package | Dependabot requested floor | Resolved version |
 |---|---|---|
@@ -105,8 +98,6 @@ proposal changed only a comment: its actual floor remains `>=2.0.50`.
 | `opentelemetry-instrumentation-starlette` | `opentelemetry-instrumentation-starlette>=0.66b0` | `0.66b1` |
 | `opentelemetry-sdk` | `opentelemetry-sdk>=1.45.0` | `1.45.1` |
 | `pika` | `pika>=1.4.4` | `1.4.4` |
-| `presidio-analyzer` | `presidio-analyzer >=2.2.364` | `2.2.364` |
-| `presidio-anonymizer` | `presidio-anonymizer>=2.2.364` | `2.2.364` |
 | `prometheus-client` | `prometheus-client>=0.26.0` | `0.26.0` |
 | `pydantic` | `pydantic>=2.13.5` | `2.14.1` |
 | `pygments` | `Pygments>=2.21.0,<3` | `2.21.0` |

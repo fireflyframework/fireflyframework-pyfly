@@ -10984,17 +10984,17 @@
   ],
   "extras": {
     "agentic": [
-      "pydantic-ai[ag-ui,bedrock,cohere,groq,huggingface,mistral,retries,spec,temporal,ui,xai]==2.55.0",
-      "pydantic>=2.13,<3",
-      "pydantic-settings>=2.14.2,<3",
+      "pydantic-ai[ag-ui,bedrock,cohere,groq,huggingface,mistral,retries,spec,temporal,ui,xai]==2.59.0",
+      "pydantic>=2.14.1,<3",
+      "pydantic-settings>=2.16.1,<3",
       "jinja2>=3.1.0",
       "httpx>=0.28.0",
-      "opentelemetry-api>=1.29.0",
-      "opentelemetry-sdk>=1.29.0",
-      "genai-prices>=0.1.9,<0.2",
-      "markdown-it-py>=3.0",
+      "opentelemetry-api>=1.45.1",
+      "opentelemetry-sdk>=1.45.1",
+      "genai-prices>=0.1.13,<0.2",
+      "markdown-it-py>=4.2.0",
       "pyyaml>=6.0",
-      "python-dotenv>=1.0.0"
+      "python-dotenv>=1.2.4"
     ],
     "agentic-relational": [
       "pyfly[agentic,data-relational]"
@@ -11007,7 +11007,7 @@
     ],
     "agentic-security": [
       "pyfly[agentic]",
-      "cryptography>=50.0.0"
+      "cryptography>=50.0.2"
     ],
     "agentic-script-execution": [
       "pyfly[agentic]",
@@ -11015,35 +11015,35 @@
     ],
     "agentic-embeddings": [
       "pyfly[agentic]",
-      "numpy>=1.26.0"
+      "numpy>=2.5.4"
     ],
     "agentic-openai-embeddings": [
       "pyfly[agentic]",
-      "openai>=1.0.0"
+      "openai>=3.35.1"
     ],
     "agentic-cohere-embeddings": [
       "pyfly[agentic]",
-      "cohere>=5.0.0"
+      "cohere>=7.2.0"
     ],
     "agentic-google-embeddings": [
       "pyfly[agentic]",
-      "google-generativeai>=0.8.0"
+      "google-generativeai>=0.8.6"
     ],
     "agentic-mistral-embeddings": [
       "pyfly[agentic]",
-      "mistralai>=1.0.0"
+      "mistralai>=3.3.0"
     ],
     "agentic-voyage-embeddings": [
       "pyfly[agentic]",
-      "voyageai>=0.3.0"
+      "voyageai>=0.5.0"
     ],
     "agentic-azure-embeddings": [
       "pyfly[agentic]",
-      "openai>=1.0.0"
+      "openai>=3.35.1"
     ],
     "agentic-bedrock-embeddings": [
       "pyfly[agentic]",
-      "boto3>=1.35.0"
+      "boto3>=1.43.116"
     ],
     "agentic-ollama-embeddings": [
       "pyfly[agentic]",
@@ -11051,53 +11051,53 @@
     ],
     "agentic-reasoning-eval": [
       "pyfly[agentic]",
-      "numpy>=2.0.0",
-      "pandas>=2.2.0"
+      "numpy>=2.5.4",
+      "pandas>=3.0.6"
     ],
     "agentic-vectorstores-chroma": [
       "pyfly[agentic]",
-      "chromadb>=0.5.0"
+      "chromadb>=1.5.9"
     ],
     "agentic-vectorstores-sqlite-vec": [
       "pyfly[agentic]",
-      "sqlite-vec>=0.1.6"
+      "sqlite-vec>=0.1.9"
     ],
     "agentic-vectorstores-pinecone": [
       "pyfly[agentic]",
-      "pinecone>=5.0.0"
+      "pinecone>=10.1.0"
     ],
     "agentic-vectorstores-qdrant": [
       "pyfly[agentic]",
-      "qdrant-client>=1.12.0"
+      "qdrant-client>=1.19.1"
     ],
     "agentic-vectorstores-pgvector": [
       "pyfly[agentic,data-relational,postgresql]"
     ],
     "agentic-watch": [
       "pyfly[agentic]",
-      "watchfiles>=0.24.0"
+      "watchfiles>=1.3.0"
     ],
     "agentic-binary": [
       "pyfly[agentic]",
-      "pypdf>=6.19.0",
-      "Pillow>=12.3.0",
-      "pillow-heif>=0.18",
+      "pypdf>=6.21.1",
+      "Pillow>=13.0.0",
+      "pillow-heif>=1.8.1",
       "cairosvg>=2.9.1",
       "py7zr>=1.1.4",
-      "extract-msg>=0.51"
+      "extract-msg>=0.56.1"
     ],
     "agentic-all": [
       "pyfly[agentic,agentic-postgres,agentic-mongodb,agentic-security,agentic-embeddings,agentic-openai-embeddings,agentic-cohere-embeddings,agentic-google-embeddings,agentic-mistral-embeddings,agentic-voyage-embeddings,agentic-azure-embeddings,agentic-bedrock-embeddings,agentic-ollama-embeddings,agentic-vectorstores-chroma,agentic-vectorstores-pinecone,agentic-vectorstores-qdrant,agentic-vectorstores-pgvector,agentic-vectorstores-sqlite-vec,agentic-watch,agentic-binary,agentic-script-execution]"
     ],
     "agentic-evaluation": [
       "pyfly[agentic]",
-      "numpy>=1.26.0",
+      "numpy>=2.5.4",
       "ragas>=0.2.6,<0.2.7",
       "datasets>=5.0.1",
       "langchain-community>=0.3.31,<0.4",
-      "langchain-anthropic>=0.3",
-      "langchain-ollama>=0.3",
-      "langchain-openai>=0.3"
+      "langchain-anthropic>=1.7.6",
+      "langchain-ollama>=1.1.0",
+      "langchain-openai>=1.7.2"
     ]
   },
   "source_optional_dependencies": {
@@ -11197,14 +11197,14 @@
     ]
   },
   "dependency_adaptations": {
-    "pydantic-ai": "Pin 2.55.0 for qualified native SDK behavior.",
+    "pydantic-ai": "Pin 2.59.0 for qualified native SDK behavior.",
     "pydantic-monty": "Pin 0.0.18; newer 1.x API differs.",
     "dev": "Standalone dev extra is the native agentic-dev dependency group.",
     "all": "Self-reference rewritten to pyfly and native agentic-* extras.",
     "relational": "New agentic-relational extra composes agentic,data-relational for framework-owned SQLite/SQL storage.",
-    "postgres": "Use PyFly Data relational units, SQLAlchemy asyncio, Alembic, SQLite and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.31.0 rather than standalone 0.30.0.",
+    "postgres": "Use PyFly Data relational units, SQLAlchemy asyncio, Alembic, SQLite and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.32.0 rather than standalone 0.30.0.",
     "mongodb": "Replace standalone Motor/PyMongo connection ownership with PyFly Data Document and Beanie 2.2+ using native asynchronous PyMongo. Motor is intentionally removed; compose agentic,data-document.",
-    "vectorstores-pgvector": "Replace standalone asyncpg pools with PyFly Data relational transaction ownership and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.31.0.",
+    "vectorstores-pgvector": "Replace standalone asyncpg pools with PyFly Data relational transaction ownership and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.32.0.",
     "evaluation": "Preserve evaluation integration and add datasets>=5.0.1 explicitly for current Ragas dataset conversion."
   },
   "supporting_extras": {
@@ -11217,7 +11217,7 @@
       "beanie>=2.2.0"
     ],
     "postgresql": [
-      "asyncpg>=0.31.0"
+      "asyncpg>=0.32.0"
     ]
   },
   "source_dependencies": [
@@ -11236,7 +11236,7 @@
   "dependency_translations": {
     "postgres": {
       "native_extra": "agentic-postgres",
-      "treatment": "Use PyFly Data relational units, SQLAlchemy asyncio, Alembic, SQLite and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.31.0 rather than standalone 0.30.0."
+      "treatment": "Use PyFly Data relational units, SQLAlchemy asyncio, Alembic, SQLite and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.32.0 rather than standalone 0.30.0."
     },
     "mongodb": {
       "native_extra": "agentic-mongodb",
@@ -11308,7 +11308,7 @@
     },
     "vectorstores-pgvector": {
       "native_extra": "agentic-vectorstores-pgvector",
-      "treatment": "Replace standalone asyncpg pools with PyFly Data relational transaction ownership and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.31.0."
+      "treatment": "Replace standalone asyncpg pools with PyFly Data relational transaction ownership and PostgreSQL adapters; compose agentic,data-relational,postgresql. Native asyncpg minimum is 0.32.0."
     },
     "watch": {
       "native_extra": "agentic-watch",

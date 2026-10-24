@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - run: uv run ruff check src/ tests/ examples/ scripts/
       - run: uv run ruff format --check src/ tests/ examples/ scripts/
       - run: uv run python scripts/verify_agentic_migration.py
@@ -44,7 +44,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - run: uv run mypy src/pyfly --strict
 
   test:
@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - name: Run tests
         run: >
           uv run pytest tests/
@@ -95,7 +95,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - name: Install the SQLAlchemy 2.0 line
         run: |
           uv pip install "sqlalchemy[asyncio]>=2.0.50,<2.1"
@@ -122,7 +122,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - name: Install the SQLAlchemy 2.0 line
         run: |
           uv pip install "sqlalchemy[asyncio]>=2.0.50,<2.1"
@@ -145,7 +145,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - name: Run integration tests (Docker required — fail, don't skip)
         env:
           PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
@@ -178,7 +178,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - name: Run the ${{ matrix.lane }} lane (Docker required — fail, don't skip)
         env:
           PYFLY_INTEGRATION_REQUIRE_DOCKER: "1"
@@ -203,7 +203,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev
       - name: Measure offline HTTP and TestModel streaming overhead
         run: >
           uv run pytest tests/agentic/performance -m nightly -q --benchmark-only
@@ -293,7 +293,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: uv sync --all-extras --no-extra pii --group dev --group agentic-dev --group browser
+      - run: uv sync --locked --all-extras --group dev --group agentic-dev --group browser
       - run: uv run playwright install --with-deps chromium
       - uses: actions/download-artifact@v8
         with:
