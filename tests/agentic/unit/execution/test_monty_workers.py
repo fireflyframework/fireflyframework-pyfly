@@ -18,20 +18,20 @@ from pyfly.agentic.exceptions import SandboxUnavailableError  # noqa: E402
 from pyfly.agentic.execution import ExecutionLimits, MontyEnvironment  # noqa: E402
 
 
-def _workers() -> set[int]:
+def _children() -> list[list[str]]:
     if shutil.which("ps") is None:
         pytest.skip("worker process inventory requires ps")
     rows = subprocess.check_output(["ps", "-ww", "-axo", "pid=,ppid=,command="], text=True)
-    found = set()
+    found = []
     for row in rows.splitlines():
         fields = row.strip().split(None, 2)
-        if (
-            len(fields) == 3
-            and int(fields[1]) == os.getpid()
-            and Path(fields[2].split()[0]).name in ("monty", "monty.exe")
-        ):
-            found.add(int(fields[0]))
+        if len(fields) == 3 and int(fields[1]) == os.getpid():
+            found.append(fields)
     return found
+
+
+def _workers() -> set[int]:
+    return {int(pid) for pid, _, command in _children() if Path(command.split()[0]).name in ("monty", "monty.exe")}
 
 
 async def test_async_tools_run_on_owner_loop_with_context_without_guest_await():
@@ -105,11 +105,17 @@ async def test_cancellation_cancels_host_coroutine_and_reaps_worker():
 
     env = MontyEnvironment()
     task = asyncio.create_task(env.run_code("wait_here()", external_functions={"wait_here": wait_here}))
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    assert _workers() - before
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert _workers() - before, {
+            "children": _children(),
+            "COLUMNS": os.environ.get("COLUMNS"),
+            "TERM": os.environ.get("TERM"),
+        }
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     assert cleaned.is_set() and _workers() == before
     following = await env.run_code("21 * 2")
     assert following.success and following.output == 42
