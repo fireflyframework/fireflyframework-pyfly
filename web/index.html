@@ -96,7 +96,7 @@
     </section>
 
     <!-- ============================== STATS ============================== -->
-    <section class="stats" aria-label="PyFly at a glance">
+    <section class="stats" aria-label="pyfly at a glance">
       <div class="wrap stats__inner">
         <div class="stat"><span class="stat__num">40</span><span class="stat__label">Modules</span></div>
         <div class="stat"><span class="stat__num">5</span><span class="stat__label">Layers</span></div>
@@ -108,12 +108,12 @@
     <!-- ============================== WHY ============================== -->
     <section class="section" id="why">
       <div class="wrap">
-        <p class="eyebrow">Why PyFly</p>
+        <p class="eyebrow">Why pyfly</p>
         <h2 class="section__title">Python gives you infinite choice.<br/>What it doesn't give you is <span class="accent">cohesion</span>.</h2>
         <p class="lede">
           Every new service starts with two weeks of decisions — web framework, ORM, message broker,
           DI wiring, project layout. Six months later a second team makes entirely different choices.
-          Now you have two codebases with nothing in common. <strong>PyFly makes these decisions for you</strong> —
+          Now you have two codebases with nothing in common. <strong>pyfly makes these decisions for you</strong> —
           one cohesive, full-stack programming model where every module is designed to work together.
         </p>
         <div class="why-grid">
@@ -140,7 +140,7 @@
     <section class="section section--tint" id="code">
       <div class="wrap">
         <p class="eyebrow">No boilerplate. No manual wiring.</p>
-        <h2 class="section__title">Write the logic. PyFly wires the rest.</h2>
+        <h2 class="section__title">Write the logic. pyfly wires the rest.</h2>
         <p class="lede">The DI container resolves dependencies from type hints, validates request bodies, and publishes domain events — all out of the box. Same model, whether you're building a controller, a CQRS bus, or a distributed saga.</p>
 
         <div class="code-panel">
@@ -256,15 +256,15 @@ user = <span class="c-kw">await</span> queries.dispatch(<span class="c-cls">Find
         <h2 class="section__title">Cohesive, layered, and hexagonal.</h2>
         <p class="lede">Five layers on an async core. Every external system reached through a Protocol port. The right adapters wired automatically at startup — so you can swap PostgreSQL for MongoDB, or Kafka for RabbitMQ, without touching a line of business logic.</p>
         <figure class="figure">
-          <img src="assets/architecture.svg" alt="PyFly architecture at a glance: one front door over five layers — Cross-Cutting, Integration, Infrastructure, Application, Foundation — on an async core (asyncio, uvloop, ASGI)." loading="lazy" />
+          <img src="assets/architecture.svg" alt="pyfly architecture at a glance: one front door over five layers — Cross-Cutting, Integration, Infrastructure, Application, Foundation — on an async core (asyncio, uvloop, ASGI)." loading="lazy" />
         </figure>
         <div class="figure-pair">
           <figure class="figure">
-            <img src="assets/hexagonal.svg" alt="PyFly hexagonal architecture: an application core depending only on Protocol ports, with swappable adapters implementing each port." loading="lazy" />
+            <img src="assets/hexagonal.svg" alt="pyfly hexagonal architecture: an application core depending only on Protocol ports, with swappable adapters implementing each port." loading="lazy" />
             <figcaption>Ports &amp; adapters — depend on Protocols, swap implementations freely.</figcaption>
           </figure>
           <figure class="figure">
-            <img src="assets/auto-configuration.svg" alt="PyFly auto-configuration: entry-point discovery, conditional guards, then bind / fall back / skip." loading="lazy" />
+            <img src="assets/auto-configuration.svg" alt="pyfly auto-configuration: entry-point discovery, conditional guards, then bind / fall back / skip." loading="lazy" />
             <figcaption>Auto-configuration — detect installed libraries, bind the right adapters.</figcaption>
           </figure>
         </div>
@@ -277,9 +277,9 @@ user = <span class="c-kw">await</span> queries.dispatch(<span class="c-cls">Find
       <div class="wrap">
         <p class="eyebrow">Featured Patterns</p>
         <h2 class="section__title">More than a web framework.</h2>
-        <p class="lede">PyFly ships production-grade implementations of the distributed patterns that power real microservices — each a first-class module with port-and-adapter design, CLI scaffolding, metrics, tracing, and persistence.</p>
+        <p class="lede">pyfly ships production-grade implementations of the distributed patterns that power real microservices — each a first-class module with port-and-adapter design, CLI scaffolding, metrics, tracing, and persistence.</p>
         <figure class="figure">
-          <img src="assets/distributed-patterns.svg" alt="PyFly distributed transaction patterns: a saga DAG with reverse-order compensation, alongside Saga, Workflow, and TCC summary cards." loading="lazy" />
+          <img src="assets/distributed-patterns.svg" alt="pyfly distributed transaction patterns: a saga DAG with reverse-order compensation, alongside Saga, Workflow, and TCC summary cards." loading="lazy" />
         </figure>
         <div class="pat-grid">
           <div class="pat-card">
@@ -422,9 +422,9 @@ user = <span class="c-kw">await</span> queries.dispatch(<span class="c-cls">Find
       <div class="wrap">
         <p class="eyebrow">The Firefly Ecosystem</p>
         <h2 class="section__title">One programming model across every runtime.</h2>
-        <p class="lede">PyFly is the green firefly of the Firefly Framework family — the same cohesive model on Java/Spring Boot, .NET, Rust, Go, and Angular.</p>
+        <p class="lede">pyfly is the green firefly of the Firefly Framework family — the same cohesive model on Java/Spring Boot, .NET, Rust, Go, and Angular.</p>
         <figure class="figure">
-          <img src="assets/ecosystem.svg" alt="The Firefly Framework family: Java/Spring Boot, .NET, PyFly (Python, highlighted), Rust, Go CLI, Angular frontend, and GenAI — all sharing one programming model." loading="lazy" />
+          <img src="assets/ecosystem.svg" alt="The Firefly Framework family: Java/Spring Boot, .NET, pyfly (Python, highlighted), Rust, Go CLI, Angular frontend, and GenAI — all sharing one programming model." loading="lazy" />
         </figure>
       </div>
     </section>
