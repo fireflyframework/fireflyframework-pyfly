@@ -11019,7 +11019,7 @@
     ],
     "agentic-openai-embeddings": [
       "pyfly[agentic]",
-      "openai>=3.35.1"
+      "openai>=3.36.0"
     ],
     "agentic-cohere-embeddings": [
       "pyfly[agentic]",
@@ -11039,7 +11039,7 @@
     ],
     "agentic-azure-embeddings": [
       "pyfly[agentic]",
-      "openai>=3.35.1"
+      "openai>=3.36.0"
     ],
     "agentic-bedrock-embeddings": [
       "pyfly[agentic]",
@@ -11079,7 +11079,7 @@
     ],
     "agentic-binary": [
       "pyfly[agentic]",
-      "pypdf>=6.21.1",
+      "pypdf>=6.21.2",
       "Pillow>=13.0.0",
       "pillow-heif>=1.8.1",
       "cairosvg>=2.9.1",

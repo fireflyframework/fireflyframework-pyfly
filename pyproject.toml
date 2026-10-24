@@ -163,7 +163,7 @@ web = [
     "python-multipart>=0.0.32",
 ]
 data-relational = [
-    # Requires SQLAlchemy >= 2.1.6 (2.0.49 broke pool pre-ping on the MySQL/MariaDB async drivers, C089) and is
+    # The 2.0.50 floor excludes broken MySQL/MariaDB async pre-ping in 2.0.49 (C089). SQLAlchemy is
     # tested on the 2.0 and 2.1 lines: the lock holds the latest release, and CI runs the suite on the newest 2.0
     # release too (test-sqlalchemy-2-0). No upper bound; what differs between the lines is bridged in
     # pyfly.data.relational.sqlalchemy.compat.

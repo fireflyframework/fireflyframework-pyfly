@@ -8,6 +8,26 @@ The declared constraints are in `pyproject.toml`; `uv.lock` records the exact
 repository selection. Applications must resolve and validate their own locks.
 Python 3.12 and 3.13 remain the qualification targets.
 
+## Repository dependency automation
+
+Dependabot uses the `uv` ecosystem so Python updates include `uv.lock`, matching
+CI's `uv sync --locked` checks. The `increase-if-necessary` strategy retains an
+existing supported requirement when it already allows the updated dependency;
+it still updates the resolved lock. The Python dependency group includes both
+runtime and development dependencies.
+
+The separate `pip` entry keeps maintaining the documentation requirements while
+excluding `pyproject.toml` and `uv.lock`, which belong to the `uv` entry.
+
+Intentional changes to Agentic extra requirements must also update the reviewed
+contracts in `scripts/agentic-migration-manifest.json`. Regenerate the lock and
+run `scripts/verify_agentic_migration.py` before submitting those changes. Keep
+the SQLAlchemy 2.0.50 floor and the separate 2.0/2.1 qualification lanes; a newer
+locked patch does not require dropping supported application combinations.
+
+See [uv's Dependabot integration](https://docs.astral.sh/uv/guides/integration/dependabot/)
+and [GitHub's versioning strategies](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#versioning-strategy).
+
 ## Native redaction and Presidio removal
 
 The `pii` extra, Presidio backend and its source-pinned anonymizer dependency are

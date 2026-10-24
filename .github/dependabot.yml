@@ -1,11 +1,12 @@
 version: 2
 updates:
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: "/"
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: weekly
     groups:
-      dev-dependencies:
+      python-dependencies:
         patterns: ["*"]
     ignore:
       # Preserve the proven driver floor; uv.lock already selects newer patches.
@@ -26,6 +27,15 @@ updates:
         versions: [">=0.2.7"]
       - dependency-name: langchain-community
         versions: [">=0.4.0"]
+
+  - package-ecosystem: pip
+    directory: "/"
+    exclude-paths: ["pyproject.toml", "uv.lock"]
+    schedule:
+      interval: weekly
+    groups:
+      documentation-dependencies:
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: "/"
