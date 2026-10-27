@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.12` | 2026-10-27 | Typed bounded SSE lifecycle, native OIDC policy hooks, explicit embedding credentials/endpoints and early property binding. |
 | `26.10.11` | 2026-10-24 | Preserve supported dependency floors, use lockfile-only project updates and refresh book tooling and both editions. |
 | `26.10.10` | 2026-10-24 | Monty 0.0.23 worker-backed execution, preserved Code Mode API and updated EN/ES tutorials. |
 | `26.10.09` | 2026-10-24 | Native regex redaction replaces Presidio; dependency hotfix and smaller admin branding. |
@@ -109,20 +110,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.11"
+print(pyfly.__version__)  # → "26.10.12"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.11
+pyfly --version            # → pyfly, version 26.10.12
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.11) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.12) (Python 3.13.9)
 ```
 
 ---
