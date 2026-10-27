@@ -1,3 +1,5 @@
+# Copyright 2026 Firefly Software Foundation & Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Ollama (local) embedding provider."""
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ class OllamaEmbedder(BaseEmbedder):
     Parameters:
         model: Ollama model. Defaults to ``"nomic-embed-text"``.
         base_url: Ollama server URL. Defaults to ``"http://localhost:11434"``.
+        api_key: Optional bearer credential for the selected Ollama endpoint.
     """
 
     def __init__(
@@ -30,13 +33,15 @@ class OllamaEmbedder(BaseEmbedder):
         dimensions: int | None = None,
         *,
         base_url: str = "http://localhost:11434",
+        api_key: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(model=model, dimensions=dimensions, **kwargs)
         if httpx is None:
             raise ImportError("The 'httpx' package is required for OllamaEmbedder. Install it with: pip install httpx")
         self._base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=120.0)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=120.0, headers=headers)
 
     async def _embed_batch(self, texts: list[str], **kwargs: Any) -> list[list[float]]:
         """Embed a single batch of texts via the Ollama HTTP API."""

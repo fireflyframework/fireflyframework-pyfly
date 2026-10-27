@@ -1,8 +1,13 @@
+# Copyright 2026 Firefly Software Foundation & Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the Ollama embedding provider."""
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
 
 from pyfly.agentic.embeddings.providers.ollama import OllamaEmbedder
 from pyfly.agentic.embeddings.types import EmbeddingResult
@@ -46,3 +51,32 @@ class TestOllamaEmbedder:
     def test_default_model(self, mock_httpx):
         embedder = OllamaEmbedder()
         assert embedder.model == "nomic-embed-text"
+
+
+@pytest.mark.parametrize("key", [None, "selected-test-credential"])
+async def test_selected_endpoint_and_credential_are_forwarded_and_client_is_closed(monkeypatch, key):
+    original_client = httpx.AsyncClient
+    clients, requests = [], []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"embeddings": [[0.5] * 64]})
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(respond)
+        instance = original_client(*args, **kwargs)
+        clients.append(instance)
+        return instance
+
+    monkeypatch.setenv("OLLAMA_API_KEY", "ambient-key-must-not-be-used")
+    monkeypatch.setenv("OPENAI_API_KEY", "another-provider-key-must-not-be-used")
+    monkeypatch.setattr("pyfly.agentic.embeddings.providers.ollama.httpx.AsyncClient", client)
+    async with OllamaEmbedder(
+        model="selected-model", dimensions=64, base_url="https://selected-ollama.example.test/custom/", api_key=key
+    ) as embedder:
+        result = await embedder.embed(["Controlled knowledge"])
+        assert result.embeddings == [[0.5] * 64]
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://selected-ollama.example.test/custom/api/embed"
+    assert requests[0].headers.get("Authorization") == ("Bearer " + key if key else None)
+    assert clients[0].is_closed
