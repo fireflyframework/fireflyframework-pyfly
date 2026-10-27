@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -32,12 +33,40 @@ SSE_HEADERS = {
     "X-Accel-Buffering": "no",
 }
 
+T = TypeVar("T")
+
+
+class _Missing:
+    pass
+
+
+_MISSING = _Missing()
+
+
+@dataclass(frozen=True)
+class SseEvent(Generic[T]):
+    """Typed metadata; omitting data permits a comment-only heartbeat."""
+
+    data: T | _Missing = _MISSING
+    event: str | None = None
+    id: str | None = None
+    retry: int | None = None
+    comment: str | None = None
+
+    def encode(self, *, max_bytes: int | None = None) -> str:
+        frame = format_sse_event(self.data, event=self.event, id=self.id, retry=self.retry, comment=self.comment)
+        if max_bytes is not None and len(frame.encode("utf-8")) > max_bytes:
+            raise ValueError("SSE event exceeds the configured size limit")
+        return frame
+
 
 def format_sse_event(
     data: Any,
     event: str | None = None,
     id: str | None = None,
     retry: int | None = None,
+    *,
+    comment: str | None = None,
 ) -> str:
     """Format a single Server-Sent Event string.
 
@@ -62,6 +91,16 @@ def format_sse_event(
     """
     lines: list[str] = []
 
+    for name, value in (("id", id), ("event", event)):
+        if value is not None and (not isinstance(value, str) or any(c in value for c in ("\r", "\n", "\0"))):
+            raise ValueError(f"SSE {name} must be a single line without NUL")
+    if retry is not None and (type(retry) is not int or retry < 0):
+        raise ValueError("SSE retry must be a nonnegative integer")
+    if comment is not None:
+        if not isinstance(comment, str) or "\0" in comment:
+            raise ValueError("SSE comment must be text without NUL")
+        lines.extend(": " + line for line in comment.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+
     if id is not None:
         lines.append(f"id: {id}")
     if event is not None:
@@ -69,14 +108,16 @@ def format_sse_event(
     if retry is not None:
         lines.append(f"retry: {retry}")
 
+    if isinstance(data, _Missing):
+        return "\n".join([*lines, "", ""])
     if isinstance(data, BaseModel):
         payload = data.model_dump_json()
-    elif isinstance(data, (dict, list)):
-        payload = json.dumps(data)
+    elif data is None or isinstance(data, (dict, list, bool, int, float)):
+        payload = json.dumps(data, allow_nan=False)
     else:
         payload = str(data)
 
-    for line in payload.splitlines():
+    for line in payload.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         lines.append(f"data: {line}")
 
     lines.append("")

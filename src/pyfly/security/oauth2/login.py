@@ -19,18 +19,46 @@ import base64
 import hashlib
 import logging
 import secrets
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from pyfly.kernel.exceptions import SecurityException
 from pyfly.security.context import SecurityContext
-from pyfly.security.oauth2.client import ClientRegistrationRepository
+from pyfly.security.oauth2.client import ClientRegistration, ClientRegistrationRepository
+from pyfly.security.oauth2.ports import (
+    OAuth2AuthenticationSuccessHandler,
+    OAuth2AuthorizationRequestCustomizer,
+    OidcTokenValidatorFactory,
+)
 from pyfly.session.session import HttpSession
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from pyfly.security.oauth2.resource_server import ClaimMappings
+
+_RESERVED_AUTHORIZATION_PARAMETERS = frozenset(
+    {
+        "response_type",
+        "response_mode",
+        "client_id",
+        "client_secret",
+        "redirect_uri",
+        "scope",
+        "state",
+        "nonce",
+        "code_challenge",
+        "code_challenge_method",
+        "code_verifier",
+        "request",
+        "request_uri",
+    }
+)
 
 _OAUTH2_STATE_KEY = "oauth2_state"
 _OAUTH2_NONCE_KEY = "oauth2_nonce"
@@ -81,9 +109,22 @@ class OAuth2LoginHandler:
         self,
         client_repository: ClientRegistrationRepository,
         concurrency: Any = None,
+        *,
+        authorization_request_customizer: OAuth2AuthorizationRequestCustomizer | None = None,
+        authentication_success_handler: OAuth2AuthenticationSuccessHandler | None = None,
+        id_token_validator_factory: OidcTokenValidatorFactory | None = None,
+        claim_mappings: ClaimMappings | None = None,
+        require_oidc_id_token: bool = False,
+        success_uri: str = "/",
     ) -> None:
         self._client_repository = client_repository
         self._concurrency = concurrency  # optional SessionConcurrencyController
+        self._authorization_request_customizer = authorization_request_customizer
+        self._authentication_success_handler = authentication_success_handler
+        self._id_token_validator_factory = id_token_validator_factory
+        self._claim_mappings = claim_mappings
+        self._require_oidc_id_token = require_oidc_id_token
+        self._success_uri = success_uri
 
     def routes(self) -> list[Route]:
         """Return the Starlette routes for the OAuth2 login flow."""
@@ -109,6 +150,27 @@ class OAuth2LoginHandler:
                 status_code=400,
             )
 
+        extras: dict[str, str] = {}
+        if self._authorization_request_customizer is not None:
+            supplied = await self._authorization_request_customizer.customize(request, registration)
+            if not isinstance(supplied, Mapping) or len(supplied) > 32:
+                raise SecurityException("Invalid authorization customization", code="INVALID_OAUTH2_CUSTOMIZATION")
+            for key, value in supplied.items():
+                if (
+                    not isinstance(key, str)
+                    or not isinstance(value, str)
+                    or not key
+                    or len(key) > 128
+                    or key.casefold() in _RESERVED_AUTHORIZATION_PARAMETERS
+                    or len(value) > 4096
+                    or any(char in key + value for char in ("\r", "\n", "\0"))
+                ):
+                    raise SecurityException("Invalid authorization customization", code="INVALID_OAUTH2_CUSTOMIZATION")
+                extras[key] = value
+            if len(urlencode(extras).encode("utf-8")) > 8192:
+                raise SecurityException(
+                    "Authorization customization exceeds its size limit", code="INVALID_OAUTH2_CUSTOMIZATION"
+                )
         session: HttpSession = request.state.session
         state = secrets.token_urlsafe(32)
         session.set_attribute(_OAUTH2_STATE_KEY, state)
@@ -129,6 +191,7 @@ class OAuth2LoginHandler:
             session.set_attribute(_OAUTH2_PKCE_VERIFIER_KEY, verifier)
             params["code_challenge"] = challenge
             params["code_challenge_method"] = "S256"
+        params.update(extras)
         authorization_url = f"{registration.authorization_uri}?{urlencode(params)}"
 
         logger.debug("Redirecting to OAuth2 provider: %s", registration.provider_name or registration_id)
@@ -212,7 +275,18 @@ class OAuth2LoginHandler:
         session.remove_attribute(_OAUTH2_NONCE_KEY)
         security_context: SecurityContext | None = None
         id_token = token_response.get("id_token")
-        if id_token and getattr(registration, "jwks_uri", ""):
+        can_validate = bool(getattr(registration, "jwks_uri", "")) or self._id_token_validator_factory is not None
+        if self._require_oidc_id_token and (
+            not isinstance(id_token, str)
+            or not id_token
+            or not can_validate
+            or not getattr(registration, "issuer_uri", "")
+            or not nonce
+        ):
+            return JSONResponse(
+                {"error": "oidc_id_token_required", "message": "A verified OIDC ID token is required"}, status_code=401
+            )
+        if id_token and can_validate:
             security_context = self._validate_id_token(registration, id_token, nonce)
             if security_context is None:
                 return JSONResponse(
@@ -234,11 +308,19 @@ class OAuth2LoginHandler:
                 status_code=401,
             )
 
+        if self._authentication_success_handler is not None:
+            success: Callable[[Request, ClientRegistration, SecurityContext], Awaitable[object]] = (
+                self._authentication_success_handler.on_success
+            )
+            result = await success(request, registration, security_context)
+            if result is not None:
+                raise SecurityException("Invalid authentication success result", code="INVALID_OAUTH2_SUCCESS_HANDLER")
+
         # Rotate the session id on successful authentication to prevent session
         # fixation — the pre-auth id (which an attacker may have fixed) is dropped.
         session.rotate_id(on_login=True)
         session.set_attribute(_SECURITY_CONTEXT_KEY, security_context)
-        redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or "/"
+        redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or self._success_uri
         session.remove_attribute(_REDIRECT_URI_KEY)
 
         # Enforce per-principal session concurrency (Spring maximumSessions) — the principal
@@ -362,13 +444,17 @@ class OAuth2LoginHandler:
         validation fails (bad signature/issuer/audience/nonce).
         """
         from pyfly.kernel.exceptions import SecurityException
-        from pyfly.security.oauth2.resource_server import JWKSTokenValidator
+        from pyfly.security.oauth2.resource_server import ClaimMappings, JWKSTokenValidator, build_security_context
 
-        validator = JWKSTokenValidator(
-            jwks_uri=registration.jwks_uri,
-            issuer=getattr(registration, "issuer_uri", "") or None,
-            # An OIDC id_token's audience is the client_id.
-            audiences=[registration.client_id],
+        validator = (
+            self._id_token_validator_factory.create(registration)
+            if self._id_token_validator_factory
+            else JWKSTokenValidator(
+                jwks_uri=registration.jwks_uri,
+                issuer=getattr(registration, "issuer_uri", "") or None,
+                # An OIDC id_token's audience is the client_id.
+                audiences=[registration.client_id],
+            )
         )
         try:
             claims = validator.validate(id_token)
@@ -376,11 +462,23 @@ class OAuth2LoginHandler:
             logger.warning("OIDC id_token validation failed: %s", exc)
             return None
 
-        if nonce is not None and claims.get("nonce") != nonce:
+        if (self._require_oidc_id_token and not nonce) or (nonce is not None and claims.get("nonce") != nonce):
             logger.warning("OIDC id_token nonce mismatch")
             return None
 
-        return validator.to_security_context(id_token)
+        expected_issuer = getattr(registration, "issuer_uri", "")
+        audience = claims.get("aud")
+        if expected_issuer and claims.get("iss") != expected_issuer:
+            return None
+        if audience != registration.client_id and not (
+            isinstance(audience, list) and registration.client_id in audience
+        ):
+            return None
+        if (isinstance(audience, list) and len(audience) > 1 and claims.get("azp") != registration.client_id) or (
+            claims.get("azp") is not None and claims["azp"] != registration.client_id
+        ):
+            return None
+        return build_security_context(claims, self._claim_mappings or ClaimMappings())
 
     async def _fetch_user_info(self, registration: Any, access_token: str) -> dict[str, Any]:
         """Fetch user info from the OAuth2 provider's userinfo endpoint."""

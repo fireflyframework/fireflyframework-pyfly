@@ -16,8 +16,15 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from packaging.requirements import Requirement
+from packaging.version import Version
 
+from pyfly import __version__
 from pyfly.cli.main import cli
+
+CURRENT_WHEEL = (
+    "https://github.com/fireflyframework/fireflyframework-pyfly/releases/"
+    f"download/v{__version__}/pyfly-{Version(__version__)}-py3-none-any.whl"
+)
 
 
 def test_catalog_exposes_agentic() -> None:
@@ -48,10 +55,7 @@ def test_agentic_selection_generates_explicit_native_config(tmp_path: Path, inte
     assert config["agentic"] == {"enabled": True}
     assert "data" not in config
     dependencies = tomllib.loads((project / "pyproject.toml").read_text())["project"]["dependencies"]
-    assert dependencies == [
-        "pyfly[agentic] @ https://github.com/fireflyframework/fireflyframework-pyfly/"
-        "releases/download/v26.10.11/pyfly-26.10.11-py3-none-any.whl"
-    ]
+    assert dependencies == [f"pyfly[agentic] @ {CURRENT_WHEEL}"]
 
 
 @pytest.mark.parametrize(
@@ -153,10 +157,7 @@ def test_new_plain_core_then_add_agentic_pins_native_release(tmp_path: Path) -> 
     manifest = tomllib.loads((project / "pyproject.toml").read_text())
     (requirement,) = [Requirement(item) for item in manifest["project"]["dependencies"]]
     assert requirement.extras == {"agentic"}
-    assert requirement.url == (
-        "https://github.com/fireflyframework/fireflyframework-pyfly/releases/"
-        "download/v26.10.11/pyfly-26.10.11-py3-none-any.whl"
-    )
+    assert requirement.url == (CURRENT_WHEEL)
 
 
 @pytest.mark.parametrize("rest", ["", "; python_version >= '3.12'", "  ; python_version >= '3.12'"])
@@ -167,10 +168,7 @@ def test_add_agentic_to_unversioned_dependency_preserves_extras_and_literal_mark
     assert added.exit_code == 0, added.output
     (dependency,) = tomllib.loads(manifest.read_text())["project"]["dependencies"]
     tail = " " + rest if rest.startswith(";") else rest
-    assert dependency == (
-        "pyfly[agentic,web] @ https://github.com/fireflyframework/fireflyframework-pyfly/"
-        "releases/download/v26.10.11/pyfly-26.10.11-py3-none-any.whl" + tail
-    )
+    assert dependency == (f"pyfly[agentic,web] @ {CURRENT_WHEEL}" + tail)
     assert Requirement(dependency).extras == {"agentic", "web"}
 
 
@@ -185,7 +183,7 @@ def test_add_agentic_rejects_version_constraint_without_mutation(tmp_path: Path,
     assert added.exit_code == 1, added.output
     assert "version constraint" in added.output
     assert "official release wheel" in added.output
-    assert "v26.10.11/pyfly-26.10.11-py3-none-any.whl" in added.output
+    assert CURRENT_WHEEL in added.output
     assert manifest.read_text() == original
 
 

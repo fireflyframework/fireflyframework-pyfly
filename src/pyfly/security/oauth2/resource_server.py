@@ -32,6 +32,7 @@ do bespoke claim mapping) transparently overrides the default via
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from http.client import HTTPException
 from typing import Any
@@ -107,6 +108,7 @@ class ClaimMappings:
     # Claims copied verbatim (string-coerced) into ``SecurityContext.attributes``
     # (e.g. ``tid``, ``preferred_username``, ``employeeid``).
     attribute_claims: tuple[str, ...] = field(default_factory=tuple)
+    raw_attribute_claims: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _resolve_claim_path(payload: dict[str, Any], path: str) -> list[Any]:
@@ -412,11 +414,15 @@ def build_security_context(payload: dict[str, Any], mappings: ClaimMappings) -> 
                     permissions.append(part)
 
     # Attributes: copy configured claims verbatim (string-coerced).
-    attributes: dict[str, str] = {}
+    attributes: dict[str, Any] = {}
     for claim in m.attribute_claims:
         vals = _flatten_strs(_resolve_claim_path(payload, claim))
         if vals:
             attributes[claim] = vals[0]
+    for claim in m.raw_attribute_claims:
+        values = _resolve_claim_path(payload, claim)
+        if values:
+            attributes[claim] = deepcopy(values[0] if len(values) == 1 else values)
 
     return SecurityContext(
         user_id=user_id,

@@ -370,6 +370,9 @@ class OAuth2ResourceServerAutoConfiguration:
     @bean
     @conditional_on_missing_bean(JWKSTokenValidator)
     def jwks_token_validator(self, config: Config) -> JWKSTokenValidator:
+        from pyfly.security.oauth2.properties import ResourceServerProperties
+        from pyfly.security.oauth2.resource_server import ClaimMappings, JWKSTokenValidator
+
         props = config.bind(ResourceServerProperties)
 
         jwks_uri = props.jwks_uri
@@ -392,6 +395,7 @@ class OAuth2ResourceServerAutoConfiguration:
             scope_claims=tuple(props.scope_claim_list()),
             authority_prefix=props.authority_prefix,
             attribute_claims=tuple(props.attribute_claim_list()),
+            raw_attribute_claims=tuple(props.raw_attribute_claim_list()),
         )
 
         return JWKSTokenValidator(
@@ -604,16 +608,58 @@ class OAuth2LoginAutoConfiguration:
         self,
         client_registration_repository: InMemoryClientRegistrationRepository,
         container: Container,
+        config: Config | None = None,
     ) -> OAuth2LoginHandler:
         # Wire session concurrency control if a controller bean is present (opt-in via
         # pyfly.session.concurrency.enabled); otherwise the handler enforces no cap.
+        from pyfly.security.oauth2.login import OAuth2LoginHandler
         from pyfly.session.concurrency import SessionConcurrencyController
 
         try:
             concurrency = container.resolve(SessionConcurrencyController)
         except (NoSuchBeanError, NoUniqueBeanError):
             concurrency = None
-        return OAuth2LoginHandler(client_repository=client_registration_repository, concurrency=concurrency)
+        from pyfly.security.oauth2.ports import (
+            OAuth2AuthenticationSuccessHandler,
+            OAuth2AuthorizationRequestCustomizer,
+            OidcTokenValidatorFactory,
+        )
+
+        def optional(kind: type[Any]) -> Any:
+            try:
+                return container.resolve(kind)
+            except NoSuchBeanError:
+                return None
+
+        selected = config or Config({})
+        prefix = "pyfly.security.oauth2.login."
+        mappings = optional(ClaimMappings) if ClaimMappings is not object else None
+        if mappings is None and ClaimMappings is not object:
+            from pyfly.security.oauth2.resource_server import ClaimMappings as LoginClaimMappings
+
+            defaults = LoginClaimMappings()
+
+            def claims(key: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
+                return tuple(_csv_or_list(selected.get(prefix + key, list(fallback))))
+
+            mappings = LoginClaimMappings(
+                principal_claims=claims("principal-claim-names", defaults.principal_claims),
+                authority_claims=claims("authorities-claim-names", defaults.authority_claims),
+                scope_claims=claims("scope-claim-names", defaults.scope_claims),
+                attribute_claims=claims("attribute-claims", defaults.attribute_claims),
+                raw_attribute_claims=claims("raw-attribute-claims", ()),
+                authority_prefix=str(selected.get(prefix + "authority-prefix", "")),
+            )
+        return OAuth2LoginHandler(
+            client_repository=client_registration_repository,
+            concurrency=concurrency,
+            authorization_request_customizer=optional(OAuth2AuthorizationRequestCustomizer),
+            authentication_success_handler=optional(OAuth2AuthenticationSuccessHandler),
+            id_token_validator_factory=optional(OidcTokenValidatorFactory),
+            claim_mappings=mappings,
+            require_oidc_id_token=_as_bool(selected.get(prefix + "require-oidc-id-token", False)),
+            success_uri=str(selected.get(prefix + "success-uri", "/")),
+        )
 
     @bean
     @conditional_on_missing_bean(OAuth2SessionSecurityFilter)

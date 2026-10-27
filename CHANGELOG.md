@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.12 (2026-10-27)
+
+### Added
+
+- Typed SSE events with IDs, retry hints and comments, a bounded asynchronous
+  emitter, optional heartbeats and an asynchronous response-factory preflight.
+  A single pull-driven producer owns stream iteration and cleanup so native
+  agent context managers remain valid across yields and disconnects. The
+  existing finite emitter and synchronous response construction remain available.
+- Optional native OAuth2 authorization-parameter and verified-authentication
+  hooks, a public ID-token validator factory, configurable login claim mappings
+  and strict OIDC mode. Reserved state, nonce, PKCE and client parameters remain
+  framework controlled; policy denial happens before session identity publication.
+- Opt-in raw verified claim mappings preserve structured JSON attributes without
+  changing existing string-only attribute mappings.
+
+### Fixed
+
+- Forward an explicitly configured OpenAI embedding API base URL to the SDK
+  instead of silently selecting its ambient/default endpoint.
+- Forward explicitly configured Ollama embedding bearer credentials to the selected HTTP endpoint.
+- Bind configuration properties before eager factories resolve dependent services,
+  preserving explicit user factories and late registration.
+- Include IANA time zone data so named zones remain available without an
+  operating-system time zone database.
+- Redact client registration credentials from generated representations.
+
 ## v26.10.11 (2026-10-24)
 
 ### Changed

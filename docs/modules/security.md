@@ -1767,6 +1767,41 @@ cooperative cancellation rather than a hard wall-clock guarantee.
 
 ---
 
+## Browser login extension points
+
+The framework owns the authorization-code flow, PKCE, state, nonce, ID-token
+signature/issuer/audience/authorized-party checks, session rotation and persistence.
+Applications may register optional beans implementing these public ports from
+`pyfly.security.oauth2`:
+
+- `OAuth2AuthorizationRequestCustomizer.customize(request, registration)` is
+  asynchronous and returns additional provider parameters. Reserved protocol
+  fields cannot be overridden. Validate deployment-approved provider hints in
+  this hook; do not forward arbitrary query parameters.
+- `OAuth2AuthenticationSuccessHandler.on_success(request, registration, context)`
+  is asynchronous and runs after identity verification, before rotation or
+  publishing a new session identity. It returns `None`; raising an application
+  security exception denies login without persisting that identity.
+- `OidcTokenValidatorFactory.create(registration)` returns a native
+  `JWKSTokenValidator`, allowing a bounded application-owned JWKS transport.
+  The native login handler still checks nonce, issuer, client audience and `azp`.
+
+Enable `pyfly.security.oauth2.login.require-oidc-id-token: true` for OIDC-only
+browser identity. This requires an ID token, issuer, nonce and configured
+validator/JWKS endpoint. Generic OAuth userinfo fallback remains the default
+for existing clients. An optional `ClaimMappings` bean customizes verified
+identity mapping; otherwise login configuration accepts `principal-claim-names`,
+`authorities-claim-names`, `scope-claim-names`, `attribute-claims`,
+`raw-attribute-claims` and `authority-prefix` beneath that same login prefix.
+`success-uri` configures the post-login destination.
+
+`ClaimMappings.raw_attribute_claims` is an explicit allowlist of verified JSON
+attributes such as numeric `auth_time` or list-valued `amr`. These values are
+deep-copied. Existing `attribute_claims` retains string-only behavior. Resource
+servers support the equivalent `raw-attribute-claims` configuration. Keep both
+allowlists narrow; token attributes are not a substitute for current application
+authorization. Client registration representations redact `client_secret`.
+
 ## Secure-by-Default & Hardening
 
 PyFly's security defaults are chosen to fail closed. The behaviours below are active without extra configuration; operators should understand them before deploying.

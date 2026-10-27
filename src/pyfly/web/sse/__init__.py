@@ -29,10 +29,13 @@ Usage::
 """
 
 from pyfly.web.sse.decorators import sse_mapping
-from pyfly.web.sse.response import SseEmitter, format_sse_event
+from pyfly.web.sse.emitter import AsyncSseEmitter
+from pyfly.web.sse.response import SseEmitter, SseEvent, format_sse_event
 
 __all__ = [
+    "AsyncSseEmitter",
     "SseEmitter",
+    "SseEvent",
     "format_sse_event",
     "sse_mapping",
 ]
