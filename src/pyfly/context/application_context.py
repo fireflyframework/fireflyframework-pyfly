@@ -424,6 +424,9 @@ class ApplicationContext:
         # 1b. Evaluate @conditional_on_* decorators (pass 1: property/class)
         self._evaluate_conditions()
 
+        # User factories can eagerly resolve a property-dependent graph.
+        self._bind_config_properties()
+
         # 2. Process user @configuration classes and their @bean methods
         self._process_configurations(auto=False)
 
@@ -441,7 +444,7 @@ class ApplicationContext:
         # 3. Auto-discover BeanPostProcessors from registered beans
         self._discover_post_processors()
 
-        # 3b. Bind @config_properties beans from config (audit #118)
+        # 3b. Bind properties registered by configurations or post-processors.
         self._bind_config_properties()
 
         # 4. Eagerly resolve all singletons (sorted by @order)
@@ -1641,7 +1644,7 @@ class ApplicationContext:
                 continue
             reg.factory = lambda c=cls: self._config.bind(c)
             count += 1
-        self._wiring_counts["config_properties"] = count
+        self._wiring_counts["config_properties"] = self._wiring_counts.get("config_properties", 0) + count
         if count:
             logger.debug("Bound %d @config_properties bean(s)", count)
 
