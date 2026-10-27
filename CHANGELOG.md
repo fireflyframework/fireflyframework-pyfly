@@ -27,6 +27,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Forward an explicitly configured OpenAI embedding API base URL to the SDK
   instead of silently selecting its ambient/default endpoint.
 - Forward explicitly configured Ollama embedding bearer credentials to the selected HTTP endpoint.
+- Bind configuration properties before eager factories resolve dependent services,
+  preserving explicit user factories and late registration.
+- Include IANA time zone data so named zones remain available without an
+  operating-system time zone database.
 - Redact client registration credentials from generated representations.
 
 ## v26.10.11 (2026-10-24)
