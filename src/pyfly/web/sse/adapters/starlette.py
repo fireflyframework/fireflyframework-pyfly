@@ -22,29 +22,141 @@ and :class:`~pyfly.websocket.adapters.starlette.WebSocketRegistrar`.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from typing import Any
+import asyncio
+import inspect
+import math
+from collections.abc import AsyncGenerator, AsyncIterable, Awaitable, Mapping
+from dataclasses import dataclass
+from typing import Any, overload
 
+import anyio
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
 
 from pyfly.web.adapters.starlette.resolver import ParameterResolver
-from pyfly.web.sse.response import SSE_HEADERS, format_sse_event
+from pyfly.web.sse.response import SSE_HEADERS, SseEvent, format_sse_event
 
 _CONTROLLER_STEREOTYPES = ("rest_controller", "controller")
 
 
-async def _wrap_generator(generator: AsyncGenerator[Any, None]) -> AsyncGenerator[str, None]:
-    """Wrap an async generator, auto-formatting non-string yields as SSE events."""
-    async for item in generator:
-        if isinstance(item, str):
-            yield item
-        else:
-            yield format_sse_event(item)
+@dataclass
+class _SourceLifecycle:
+    source: AsyncIterable[Any]
+    started: bool = False
 
 
-def make_sse_response(generator: AsyncGenerator[Any, None]) -> StreamingResponse:
+async def _wrap_generator(
+    lifecycle: _SourceLifecycle, *, heartbeat_interval: float | None, max_event_bytes: int
+) -> AsyncGenerator[str, None]:
+    requests: asyncio.Queue[asyncio.Future[tuple[str | None, BaseException | None, bool]]] = asyncio.Queue(1)
+
+    async def produce() -> None:
+        iterator = aiter(lifecycle.source)
+        lifecycle.started = True
+        try:
+            while True:
+                slot = await requests.get()
+                try:
+                    item = await anext(iterator)
+                    frame = (
+                        item.encode(max_bytes=max_event_bytes)
+                        if isinstance(item, SseEvent)
+                        else (item if isinstance(item, str) else format_sse_event(item))
+                    )
+                    if len(frame.encode("utf-8")) > max_event_bytes:
+                        raise ValueError("SSE event exceeds the configured size limit")
+                except StopAsyncIteration:
+                    slot.set_result((None, None, True))
+                    return
+                except BaseException as error:
+                    slot.set_result((None, error, True))
+                    return
+                slot.set_result((frame, None, False))
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                await close()
+
+    producer = asyncio.create_task(produce(), name="pyfly-sse-producer")
+    terminal = False
+    try:
+        while True:
+            if producer.done():
+                await producer
+                return
+            slot = asyncio.get_running_loop().create_future()
+            requests.put_nowait(slot)
+            while not slot.done():
+                done, _ = await asyncio.wait(
+                    {slot, producer}, timeout=heartbeat_interval, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    yield ": heartbeat\n\n"
+                elif producer.done() and not slot.done():
+                    await producer
+                    return
+            frame, error, terminal = slot.result()
+            if error is not None:
+                raise error
+            if terminal:
+                return
+            assert frame is not None
+            yield frame
+    finally:
+        with anyio.CancelScope(shield=True):
+            if not terminal:
+                producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+
+
+class _ClosingSseResponse(StreamingResponse):
+    def __init__(self, *args: Any, lifecycle: _SourceLifecycle, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._source_lifecycle = lifecycle
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                close = getattr(self.body_iterator, "aclose", None)
+                if close is not None:
+                    await close()
+                if not self._source_lifecycle.started:
+                    close_source = getattr(self._source_lifecycle.source, "aclose", None)
+                    if close_source is not None:
+                        await close_source()
+
+
+@overload
+def make_sse_response(
+    generator: AsyncIterable[Any],
+    *,
+    heartbeat_interval: float | None = None,
+    max_event_bytes: int = 1048576,
+    headers: Mapping[str, str] | None = None,
+) -> StreamingResponse: ...
+
+
+@overload
+def make_sse_response(
+    generator: Awaitable[AsyncIterable[Any]],
+    *,
+    heartbeat_interval: float | None = None,
+    max_event_bytes: int = 1048576,
+    headers: Mapping[str, str] | None = None,
+) -> Awaitable[StreamingResponse]: ...
+
+
+def make_sse_response(
+    generator: AsyncIterable[Any] | Awaitable[AsyncIterable[Any]],
+    *,
+    heartbeat_interval: float | None = None,
+    max_event_bytes: int = 1048576,
+    headers: Mapping[str, str] | None = None,
+) -> StreamingResponse | Awaitable[StreamingResponse]:
     """Wrap an async generator in a ``StreamingResponse`` with SSE headers.
 
     Yields that are already strings are passed through unchanged (the caller
@@ -61,10 +173,37 @@ def make_sse_response(generator: AsyncGenerator[Any, None]) -> StreamingResponse
     StreamingResponse
         A streaming response with ``text/event-stream`` media type.
     """
-    return StreamingResponse(
-        _wrap_generator(generator),
+    if heartbeat_interval is not None and (
+        isinstance(heartbeat_interval, bool) or not math.isfinite(heartbeat_interval) or heartbeat_interval <= 0
+    ):
+        raise ValueError("SSE heartbeat interval must be finite and positive")
+    if type(max_event_bytes) is not int or max_event_bytes < 1:
+        raise ValueError("SSE maximum event size must be a positive integer")
+    if inspect.isawaitable(generator):
+
+        async def prepare() -> StreamingResponse:
+            source = await generator
+            response = make_sse_response(
+                source, heartbeat_interval=heartbeat_interval, max_event_bytes=max_event_bytes, headers=headers
+            )
+            assert isinstance(response, StreamingResponse)
+            return response
+
+        return prepare()
+    if not hasattr(generator, "__aiter__"):
+        raise TypeError("An SSE source must be an async iterable")
+    response_headers = {**SSE_HEADERS, **dict(headers or {})}
+    for key, value in response_headers.items():
+        if key.lower() == "content-length" or (
+            key.lower() == "content-type" and value.split(";", 1)[0] != "text/event-stream"
+        ):
+            raise ValueError("SSE content headers are managed by the response")
+    lifecycle = _SourceLifecycle(generator)
+    return _ClosingSseResponse(
+        _wrap_generator(lifecycle, heartbeat_interval=heartbeat_interval, max_event_bytes=max_event_bytes),
+        lifecycle=lifecycle,
         media_type="text/event-stream",
-        headers=SSE_HEADERS,
+        headers=response_headers,
     )
 
 
@@ -129,6 +268,12 @@ class SSERegistrar:
 
             kwargs = await _cache["resolver"].resolve(request)
             generator = _cache["method"](**kwargs)
-            return make_sse_response(generator)
+            if inspect.isawaitable(generator):
+                generator = await generator
+            if isinstance(generator, Response):
+                return generator
+            response = make_sse_response(generator)
+            assert isinstance(response, Response)
+            return response
 
         return lazy_sse_endpoint

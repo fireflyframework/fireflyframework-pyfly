@@ -1624,6 +1624,49 @@ The function returns a fully-formed SSE event string terminated by a double newl
 
 **Source:** `src/pyfly/web/sse/response.py`
 
+### Typed live streams and lifecycle
+
+`SseEvent[T]` carries `data`, `event`, `id`, `retry` and `comment`. IDs and
+event names cannot contain CR, LF or NUL; retry values are nonnegative
+integers. Omitted data permits a comment-only heartbeat. JSON objects are
+payloads, not implicit event envelopes.
+
+```python
+from pyfly.web.sse import SseEvent
+from pyfly.web.sse.adapters.starlette import make_sse_response
+
+async def prepare_stream(request):
+    await authorize(request)  # completes before response headers
+    async def events():
+        async with open_native_agent_stream() as stream:
+            async for item in stream:
+                yield SseEvent(data=item.payload, event=item.kind, id=item.cursor)
+    return events()
+
+response = await make_sse_response(
+    prepare_stream(request), heartbeat_interval=15,
+    max_event_bytes=1_048_576, headers={"Cache-Control": "no-store"},
+)
+```
+
+The factory overload awaits authorization before constructing the response.
+For an existing async iterable, `make_sse_response` still returns a response
+synchronously. Coroutine `@sse_mapping` handlers may return either a prepared
+response or an async iterable. Native agent streams remain inside their public
+async context for the entire stream lifetime.
+
+One producer task owns iteration, serialization and closure. The consumer
+requests one event at a time; heartbeats never cancel a pending source read.
+Disconnect closes the source and releases native contexts. It does not cancel
+a durable background run: persistent replay, cursor authorization and explicit
+run cancellation belong to the application. A source's own unbounded buffers
+are outside this adapter's backpressure guarantee.
+
+`AsyncSseEmitter(capacity=256, max_event_bytes=1_048_576)` supports live producers
+with awaited `send`. A full buffer blocks producers. `close` drains queued
+events; `aclose` discards them and releases blocked senders. It has one consumer
+and is transient; it is not a durable event log.
+
 ### SseEmitter
 
 The `SseEmitter` class provides a queue-based interface for building SSE events. It is itself an async iterable, making it suitable for passing to a streaming response:

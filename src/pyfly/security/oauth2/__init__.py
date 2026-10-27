@@ -33,6 +33,11 @@ from pyfly.security.oauth2.client import (
 from pyfly.security.oauth2.endpoints import AuthorizationServerEndpoints
 from pyfly.security.oauth2.jwks import AsyncJWKSFetcher, JWKSFetcher
 from pyfly.security.oauth2.login import OAuth2LoginHandler
+from pyfly.security.oauth2.ports import (
+    OAuth2AuthenticationSuccessHandler,
+    OAuth2AuthorizationRequestCustomizer,
+    OidcTokenValidatorFactory,
+)
 from pyfly.security.oauth2.properties import ResourceServerProperties
 from pyfly.security.oauth2.resource_server import (
     ClaimMappings,
@@ -57,6 +62,9 @@ __all__ = [
     "JWKSTokenValidator",
     "KeyValueTokenStore",
     "OAuth2LoginHandler",
+    "OAuth2AuthenticationSuccessHandler",
+    "OAuth2AuthorizationRequestCustomizer",
+    "OidcTokenValidatorFactory",
     "OAuth2SessionSecurityFilter",
     "OpaqueTokenIntrospector",
     "ResourceServerProperties",

@@ -29,7 +29,7 @@ class ClientRegistration:
 
     registration_id: str
     client_id: str
-    client_secret: str = ""
+    client_secret: str = field(default="", repr=False)
     authorization_grant_type: str = "authorization_code"
     redirect_uri: str = ""
     scopes: list[str] = field(default_factory=list)

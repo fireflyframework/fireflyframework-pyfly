@@ -101,6 +101,7 @@ class ResourceServerProperties:
     authority_prefix: str = ""
     scope_claim_names: str = "scp,scope"
     attribute_claims: str = ""
+    raw_attribute_claims: str = ""
 
     # --- sender-constrained tokens (RFC 9449 DPoP / RFC 8705 mTLS) --------
     # When true, a token carrying a ``cnf`` claim must be accompanied by proof of
@@ -135,6 +136,9 @@ class ResourceServerProperties:
 
     def attribute_claim_list(self) -> list[str]:
         return _csv(self.attribute_claims)
+
+    def raw_attribute_claim_list(self) -> list[str]:
+        return _csv(self.raw_attribute_claims)
 
     def exclude_pattern_list(self) -> list[str]:
         return _csv(self.exclude_patterns)

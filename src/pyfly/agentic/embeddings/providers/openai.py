@@ -22,6 +22,8 @@ class OpenAIEmbedder(BaseEmbedder):
         model: OpenAI model name. Defaults to ``"text-embedding-3-small"``.
         dimensions: Output dimensions (supported by text-embedding-3-*).
         api_key: OpenAI API key. Falls back to ``OPENAI_API_KEY`` env var.
+        base_url: Explicit OpenAI-compatible API endpoint; forwarded to the SDK.
+            When omitted, the SDK retains its normal environment/default behavior.
     """
 
     def __init__(
@@ -30,10 +32,11 @@ class OpenAIEmbedder(BaseEmbedder):
         dimensions: int | None = None,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(model=model, dimensions=dimensions, **kwargs)
-        self._client = AsyncOpenAI(api_key=api_key)
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def _embed_batch(self, texts: list[str], **kwargs: Any) -> list[list[float]]:
         """Embed a single batch of texts via the OpenAI API."""
