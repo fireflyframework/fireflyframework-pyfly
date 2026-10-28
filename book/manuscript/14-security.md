@@ -1662,9 +1662,15 @@ injection attack and **revokes the refresh token already issued from that code**
 
 ### Refresh rotation and reuse detection
 
-Use a refresh token issued to the same confidential client. The native server
-requires client authentication for refresh; `lumen-mobile` can exchange a PKCE
-code but cannot refresh without a secret.
+Use a refresh token issued to the same registered client. Confidential clients
+authenticate with their secret; `lumen-mobile` can rotate its user refresh token
+without a secret after acquiring the original grant with PKCE. Rotation preserves
+the user's subject and records the application separately in `client_id`.
+
+When upgrading from a version before v26.10.13, acquire a new grant. Older refresh
+records do not contain enough information to establish their original owner and
+grant type. Users authorize again; machine clients request a new client-credentials
+token. Existing access JWTs retain their normal expiry and validation policy.
 
 This example refreshes the `lumen-reconciler` machine grant. Each accepted
 refresh issues a new token and marks the previous token consumed:

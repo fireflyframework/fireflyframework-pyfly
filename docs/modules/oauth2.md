@@ -584,6 +584,21 @@ already-rotated (used) refresh token is treated as theft and **revokes the entir
 token family** (`INVALID_GRANT`). A token whose family was already revoked is
 likewise refused.
 
+Authorization-code refresh families retain the authenticated resource owner across
+rotations and server restarts. Access tokens keep that owner's `sub` and carry the
+registered application in a separate `client_id` claim; machine grants retain the
+client as their subject. Introspection distinguishes the owner from the application.
+Public authorization-code clients may rotate their client-bound refresh tokens
+without a client secret. PKCE remains mandatory when acquiring the original grant.
+
+Refresh records issued before v26.10.13 do not record their original grant type
+and subject. They require a new grant after upgrading: users repeat the
+authorization-code flow, and machine clients acquire a new client-credentials
+token. The current registration cannot establish a historical token's origin.
+Changing a registration's grant type also invalidates typed refresh families
+created for its previous grant type. Existing access JWTs retain their normal
+expiry and validation policy.
+
 A rotation is one atomic step of the token store: the presented token is consumed
 only if it is still unused and unexpired and its family still active, and the
 successor is stored in the same step. Of N requests presenting one refresh token at
@@ -733,9 +748,9 @@ credential strings; [`RFC 6749 §2.3.1`](https://www.rfc-editor.org/rfc/rfc6749#
 defines the wire format. `OpaqueTokenIntrospector` uses the same credential
 encoding when authenticating a token-introspection request.
 
-The native server permits a public client without a secret to use
-`authorization_code` only. Refresh requires a confidential client and its
-registered secret. The server issues access tokens with its configured audience;
+The native server permits a public authorization-code client without a secret to
+acquire and rotate its user grant. Confidential clients must authenticate with
+their registered secret. The server issues access tokens with its configured audience;
 it does not implement per-request RFC 8707 resource selection.
 
 The first-party server's machine-grant HTTP response includes a refresh token.

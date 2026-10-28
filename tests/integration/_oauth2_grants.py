@@ -25,11 +25,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import time
 from collections.abc import Awaitable
+from dataclasses import replace
 from typing import Any
 
 from pyfly.kernel.exceptions import SecurityException
-from pyfly.security.oauth2.authorization_server import AuthorizationServer
+from pyfly.security.oauth2.authorization_server import REFRESH_TOKEN, AuthorizationServer, TokenRecord
 from pyfly.security.oauth2.client import ClientRegistration, InMemoryClientRegistrationRepository
 
 CONCURRENCY = 20
@@ -239,6 +241,80 @@ async def expired_grants_are_refused(store: Any) -> None:
     assert isinstance(expired_code, SecurityException) and "expired" in str(expired_code).lower()
 
 
+async def resource_owner_survives_refresh_and_server_restart(store: Any) -> None:
+    authorization_server = server(store)
+    issued = await redeem(authorization_server, await code_for(authorization_server))
+    for _ in range(3):
+        authorization_server = server(store)
+        issued = await refresh(authorization_server, issued["refresh_token"], client_id="web")
+        claims = await authorization_server.introspect(issued["access_token"], requesting_client_id="web")
+        assert claims["active"] is True and claims["sub"] == "alice" and claims["client_id"] == "web"
+
+
+async def legacy_user_refresh_requires_reauthorization(store: Any) -> None:
+    authorization_server = server(store)
+    await authorization_server._grants.issue(
+        TokenRecord(
+            token_id="legacy-user",
+            kind=REFRESH_TOKEN,
+            client_id="web",
+            expires_at=int(time.time()) + 3600,
+            data={"scope": "read"},
+            family_id="legacy-user-family",
+        )
+    )
+    refused = await attempt(refresh(authorization_server, "legacy-user", client_id="web"))
+    assert isinstance(refused, SecurityException) and refused.code == "INVALID_GRANT"
+
+
+async def legacy_untyped_machine_refresh_requires_a_new_grant(store: Any) -> None:
+    authorization_server = server(store)
+    await authorization_server._grants.issue(
+        TokenRecord(
+            token_id="legacy-machine",
+            kind=REFRESH_TOKEN,
+            client_id="svc",
+            expires_at=int(time.time()) + 3600,
+            data={"scope": "read"},
+            family_id="legacy-machine-family",
+        )
+    )
+    refused = await attempt(refresh(authorization_server, "legacy-machine"))
+    assert isinstance(refused, SecurityException) and refused.code == "INVALID_GRANT"
+
+
+async def legacy_user_grant_is_not_reclassified_after_registration_changes(store: Any) -> None:
+    await server(store)._grants.issue(
+        TokenRecord(
+            token_id="legacy-reconfigured",
+            kind=REFRESH_TOKEN,
+            client_id="web",
+            expires_at=int(time.time()) + 3600,
+            data={"scope": "read"},
+            family_id="legacy-reconfigured-family",
+        )
+    )
+    current = AuthorizationServer(
+        SECRET,
+        InMemoryClientRegistrationRepository(replace(WEB, authorization_grant_type="client_credentials")),
+        store,
+    )
+    refused = await attempt(refresh(current, "legacy-reconfigured", client_id="web"))
+    assert isinstance(refused, SecurityException) and refused.code == "INVALID_GRANT"
+
+
+async def a_pending_code_requires_its_registered_grant_at_redemption(store: Any) -> None:
+    code = await code_for(server(store))
+    changed = AuthorizationServer(
+        SECRET,
+        InMemoryClientRegistrationRepository(replace(WEB, authorization_grant_type="client_credentials")),
+        store,
+    )
+    refused = await attempt(redeem(changed, code))
+    assert isinstance(refused, SecurityException) and refused.code == "UNAUTHORIZED_CLIENT"
+    assert "access_token" in await redeem(server(store), code)
+
+
 async def only_a_refresh_token_is_one(store: Any) -> None:
     """A code or a pushed request_uri presented as a refresh token is unknown. The key-value layout keys a
     refresh token by its bare id and the other records by ``kind:id``, so introspecting ``par:<request_uri>``
@@ -257,6 +333,11 @@ async def only_a_refresh_token_is_one(store: Any) -> None:
 
 
 SEQUENTIAL_SCENARIOS = (
+    a_pending_code_requires_its_registered_grant_at_redemption,
+    legacy_user_grant_is_not_reclassified_after_registration_changes,
+    resource_owner_survives_refresh_and_server_restart,
+    legacy_user_refresh_requires_reauthorization,
+    legacy_untyped_machine_refresh_requires_a_new_grant,
     a_request_uri_belongs_to_its_client,
     rotation_chain_and_replay,
     a_wrong_client_does_not_consume_the_token,

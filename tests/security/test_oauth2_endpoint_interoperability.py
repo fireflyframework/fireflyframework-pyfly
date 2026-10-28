@@ -150,6 +150,20 @@ async def test_invalid_pkce_binding_is_rejected_without_consuming_the_valid_code
 
 
 @pytest.mark.parametrize("mode", ["asgi", "tcp"])
+@pytest.mark.parametrize("public", [False, True])
+async def test_rotating_user_tokens_keep_owner_and_client_over_http(mode: str, public: bool) -> None:
+    async with provider(mode, registration(public=public)) as (native, browser, client):
+        authorization_code, verifier = await code(browser, "client")
+        issued = await client.exchange_code(authorization_code, redirect_uri=CALLBACK, code_verifier=verifier)
+        for _ in range(2):
+            assert issued.refresh_token is not None
+            issued = await client.refresh_token(issued.refresh_token)
+            claims = await native.introspect(issued.access_token, requesting_client_id="client")
+            assert claims["active"] is True
+            assert claims["sub"] == "fixture-resource-owner" and claims["client_id"] == "client"
+
+
+@pytest.mark.parametrize("mode", ["asgi", "tcp"])
 async def test_code_replay_rejects_and_revokes_the_original_native_refresh_family(mode: str) -> None:
     async with provider(mode, registration()) as (native, browser, client):
         authorization_code, verifier = await code(browser, "client")

@@ -13,6 +13,8 @@
 # limitations under the License.
 """PyFly OAuth2 — Authorization Server, Resource Server, Client Registration, and Login."""
 
+from typing import TYPE_CHECKING, Any
+
 from pyfly.security.oauth2.authorization_server import (
     AtomicTokenStore,
     AuthorizationServer,
@@ -30,9 +32,7 @@ from pyfly.security.oauth2.client import (
     google,
     keycloak,
 )
-from pyfly.security.oauth2.endpoints import AuthorizationServerEndpoints
 from pyfly.security.oauth2.jwks import AsyncJWKSFetcher, JWKSFetcher
-from pyfly.security.oauth2.login import OAuth2LoginHandler
 from pyfly.security.oauth2.ports import (
     OAuth2AuthenticationSuccessHandler,
     OAuth2AuthorizationRequestCustomizer,
@@ -46,6 +46,27 @@ from pyfly.security.oauth2.resource_server import (
     discover_oidc,
 )
 from pyfly.security.oauth2.session_security_filter import OAuth2SessionSecurityFilter
+
+if TYPE_CHECKING:
+    from pyfly.security.oauth2.endpoints import AuthorizationServerEndpoints
+    from pyfly.security.oauth2.login import OAuth2LoginHandler
+
+_HTTP_EXPORTS = {
+    "AuthorizationServerEndpoints": ("pyfly.security.oauth2.endpoints", "AuthorizationServerEndpoints"),
+    "OAuth2LoginHandler": ("pyfly.security.oauth2.login", "OAuth2LoginHandler"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    from importlib import import_module
+
+    if name in _HTTP_EXPORTS:
+        module, symbol = _HTTP_EXPORTS[name]
+        value = getattr(import_module(module), symbol)
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
+
 
 __all__ = [
     "AsyncJWKSFetcher",

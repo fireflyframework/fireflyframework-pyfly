@@ -432,7 +432,9 @@ async def test_a_code_replay_and_a_family_revocation_do_not_deadlock(relational_
             _PAUSED_TASK.set(True)
             await store.revoke_family(str(record.family_id))
 
-        late = grants.server(store)._new_refresh_token("web", "read", family_id="late-family")
+        late = grants.server(store)._new_refresh_token(
+            "web", "read", family_id="late-family", subject="alice", grant_type="authorization_code"
+        )
         with _pause_before_write(engine, 2, paused, resume):
             revoking = asyncio.create_task(revocation())
             await asyncio.wait_for(paused.wait(), 10)

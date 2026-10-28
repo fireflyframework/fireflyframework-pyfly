@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.13 (2026-10-28)
+
+### Fixed
+
+- Keep headless OAuth authorization and token-validation imports usable with the
+  security extra alone. HTTP endpoints and browser login load on demand when
+  their public exports are requested; existing type identities remain unchanged.
+- Preserve the authenticated resource owner's subject and originating grant type
+  throughout refresh-token rotation and persistent-store restarts. Access tokens
+  identify the registered application separately with `client_id`, so owned-token
+  introspection does not confuse an application with its user.
+- Permit public authorization-code clients to rotate their client-bound refresh
+  tokens after PKCE acquisition. Confidential clients still authenticate, machine
+  grants remain restricted to their registered grant type, and existing atomic
+  rotation/reuse defenses remain in place.
+- Reject refresh records whose original subject and grant type were not recorded.
+  After upgrading, existing user refresh sessions require authorization again;
+  machine callers acquire a new client-credentials token. The current client
+  registration cannot establish a historical grant's origin. Existing access
+  JWTs retain their normal expiry and validation policy.
+
 ## v26.10.12 (2026-10-27)
 
 ### Added
