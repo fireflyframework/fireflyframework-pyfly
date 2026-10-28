@@ -1676,9 +1676,17 @@ código**.
 
 ### Rotación de tokens de actualización y detección de reutilización
 
-Usa un token de actualización emitido al mismo cliente confidencial. El servidor
-nativo exige autenticación de cliente para refrescar: `lumen-mobile` puede
-canjear un código con PKCE, pero no puede refrescar sin secreto.
+Usa un token de actualización emitido al mismo cliente registrado. Los clientes
+confidenciales se autentican con su secreto; `lumen-mobile` puede rotar su token
+de usuario sin secreto después de obtener la concesión original con PKCE. La
+rotación conserva el sujeto del usuario e identifica la aplicación por separado
+en `client_id`.
+
+Al actualizar desde una versión anterior a v26.10.13, obtén una nueva concesión.
+Los registros antiguos no contienen información suficiente para establecer su
+propietario y tipo de concesión originales. Los usuarios autorizan de nuevo y los
+clientes de máquina solicitan un nuevo token de credenciales de cliente. Los JWT
+de acceso existentes mantienen su caducidad y política de validación habituales.
 
 El ejemplo actualiza la concesión de máquina de `lumen-reconciler`. Cada
 actualización aceptada emite un nuevo token y marca el anterior como consumido:

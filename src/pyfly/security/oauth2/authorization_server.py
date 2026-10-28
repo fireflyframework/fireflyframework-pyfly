@@ -632,7 +632,7 @@ class AuthorizationServer:
                 options={"require": ["exp"], "verify_aud": False},
             )
             active: dict[str, Any] = {"active": True, "token_type": "Bearer"}
-            for claim in ("sub", "scope", "iat", "exp", "iss", "aud"):
+            for claim in ("sub", "client_id", "scope", "iat", "exp", "iss", "aud"):
                 if claim in payload:
                     active[claim] = payload[claim]
             active.setdefault("client_id", payload.get("sub"))
@@ -692,13 +692,15 @@ class AuthorizationServer:
             raise SecurityException("Invalid client credentials", code="INVALID_CLIENT")
 
         # Client authentication: a confidential client (one with a registered
-        # secret) MUST present it. A public client (no secret) is permitted only
-        # for the authorization_code grant, where PKCE provides proof of possession.
+        # secret) MUST present it. Public authorization-code clients use PKCE on
+        # acquisition and the rotating, client-bound refresh family afterwards.
         is_public = not registration.client_secret
         if not is_public:
             if self.authenticate_client(client_id, client_secret) is None:
                 raise SecurityException("Invalid client credentials", code="INVALID_CLIENT")
-        elif grant_type != "authorization_code":
+        elif grant_type not in {"authorization_code", "refresh_token"} or (
+            registration.authorization_grant_type != "authorization_code"
+        ):
             raise SecurityException("Public clients may not use this grant", code="INVALID_CLIENT")
 
         if grant_type == "client_credentials":
@@ -716,6 +718,8 @@ class AuthorizationServer:
                 raise SecurityException("Refresh token required", code="INVALID_REQUEST")
             return await self._handle_refresh_token(registration, refresh_token, confirmation)
         elif grant_type == "authorization_code":
+            if registration.authorization_grant_type != "authorization_code":
+                raise SecurityException("Client is not authorized for authorization_code", code="UNAUTHORIZED_CLIENT")
             if code is None:
                 raise SecurityException("Authorization code required", code="INVALID_REQUEST")
             return await self._handle_authorization_code(registration, code, redirect_uri, code_verifier, confirmation)
@@ -759,6 +763,8 @@ class AuthorizationServer:
         # Exact redirect-URI match (RFC 9700 / OAuth 2.1) — never redirect on mismatch.
         if redirect_uri != registration.redirect_uri:
             raise SecurityException("redirect_uri does not match the registration", code="INVALID_REDIRECT_URI")
+        if registration.authorization_grant_type != "authorization_code":
+            raise SecurityException("Client is not authorized for authorization_code", code="UNAUTHORIZED_CLIENT")
         if response_type != "code":
             raise SecurityException(f"Unsupported response_type: {response_type}", code="UNSUPPORTED_RESPONSE_TYPE")
 
@@ -873,9 +879,12 @@ class AuthorizationServer:
 
         scope = str(record.data.get("scope", ""))
         user_id = record.data.get("user_id")
+        if not isinstance(user_id, str) or not user_id:
+            raise SecurityException("Authorization code has no resource owner", code="INVALID_GRANT")
 
         access_payload: dict[str, Any] = {
             "sub": user_id,
+            "client_id": registration.client_id,
             "scope": scope,
             "iat": now,
             "exp": now + self._access_token_ttl,
@@ -891,7 +900,13 @@ class AuthorizationServer:
         # Consume the code and issue the refresh token (a new family, recorded on the
         # code so a replay can revoke it) in one atomic step: of concurrent redemptions
         # one succeeds, and the others revoke what it issued (RFC 6749 §4.1.2).
-        refresh = self._new_refresh_token(registration.client_id, scope, family_id=secrets.token_urlsafe(16))
+        refresh = self._new_refresh_token(
+            registration.client_id,
+            scope,
+            family_id=secrets.token_urlsafe(16),
+            subject=user_id,
+            grant_type="authorization_code",
+        )
         outcome = await self._grants.redeem(code, refresh, now=now)
         if outcome is GrantOutcome.REPLAYED:
             raise SecurityException("Authorization code already used", code="INVALID_GRANT")
@@ -957,6 +972,7 @@ class AuthorizationServer:
 
         access_payload: dict[str, Any] = {
             "sub": registration.client_id,
+            "client_id": registration.client_id,
             "scope": " ".join(scopes),
             "iat": now,
             "exp": now + self._access_token_ttl,
@@ -971,7 +987,13 @@ class AuthorizationServer:
         access_token = self._encode(access_payload)
 
         scope_str = " ".join(scopes)
-        refresh = self._new_refresh_token(registration.client_id, scope_str, family_id=secrets.token_urlsafe(16))
+        refresh = self._new_refresh_token(
+            registration.client_id,
+            scope_str,
+            family_id=secrets.token_urlsafe(16),
+            subject=registration.client_id,
+            grant_type="client_credentials",
+        )
         await self._grants.issue(refresh)
         refresh_token_id = refresh.token_id
 
@@ -1014,12 +1036,24 @@ class AuthorizationServer:
             raise SecurityException("Invalid refresh token", code="INVALID_GRANT")
 
         scope = str(record.data.get("scope", ""))
+        subject = record.data.get("subject")
+        grant_type = record.data.get("grant_type")
+        # A current registration cannot establish a legacy token's original
+        # grant or owner. Untyped records require fresh authorization.
+        if not isinstance(subject, str) or not subject or grant_type != registration.authorization_grant_type:
+            raise SecurityException("Refresh token has no valid grant owner", code="INVALID_GRANT")
 
         # Rotate: consume the presented token (it is retained, so a later replay is
         # detected as reuse rather than "unknown") and mint its successor in the same
         # family, in one atomic step. Of concurrent rotations one succeeds; the others
         # are replays and revoke the family.
-        successor = self._new_refresh_token(registration.client_id, scope, family_id=record.family_id)
+        successor = self._new_refresh_token(
+            registration.client_id,
+            scope,
+            family_id=record.family_id,
+            subject=subject,
+            grant_type=grant_type,
+        )
         outcome = await self._grants.rotate(refresh_token, successor, now=now)
         if outcome is GrantOutcome.REPLAYED:
             raise SecurityException("Refresh token reuse detected", code="INVALID_GRANT")
@@ -1032,7 +1066,8 @@ class AuthorizationServer:
 
         # Issue new tokens
         access_payload: dict[str, Any] = {
-            "sub": registration.client_id,
+            "sub": subject,
+            "client_id": registration.client_id,
             "scope": scope,
             "iat": now,
             "exp": now + self._access_token_ttl,
@@ -1058,14 +1093,22 @@ class AuthorizationServer:
     # Refresh tokens and revocation
     # ------------------------------------------------------------------
 
-    def _new_refresh_token(self, client_id: str, scope: str, *, family_id: str) -> TokenRecord:
+    def _new_refresh_token(
+        self,
+        client_id: str,
+        scope: str,
+        *,
+        family_id: str,
+        subject: str,
+        grant_type: str,
+    ) -> TokenRecord:
         """A new refresh token of *family_id*, valid for the refresh-token lifetime."""
         return TokenRecord(
             token_id=secrets.token_urlsafe(32),
             kind=REFRESH_TOKEN,
             client_id=client_id,
             expires_at=int(time.time()) + self._refresh_token_ttl,
-            data={"scope": scope},
+            data={"scope": scope, "subject": subject, "grant_type": grant_type},
             family_id=family_id,
         )
 

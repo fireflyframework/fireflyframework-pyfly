@@ -113,6 +113,33 @@ class TestAuthorize:
 
 class TestCodeExchange:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("public", [False, True])
+    async def test_refresh_keeps_the_resource_owner_and_client_across_rotations(self, public: bool) -> None:
+        server = _server(public=public)
+        verifier = "v" * 64
+        code = await _authorize(server, challenge=_s256(verifier), scope="read")
+        result = await server.token(
+            grant_type="authorization_code",
+            client_id="web",
+            client_secret="" if public else "web-secret",
+            code=code["code"],
+            redirect_uri="https://app.example.com/cb",
+            code_verifier=verifier,
+        )
+        for _ in range(3):
+            result = await server.token(
+                grant_type="refresh_token",
+                client_id="web",
+                client_secret="" if public else "web-secret",
+                refresh_token=result["refresh_token"],
+            )
+            claims = pyjwt.decode(result["access_token"], _SECRET, algorithms=["HS256"])
+            assert claims["sub"] == "user-1"
+            assert claims["client_id"] == "web"
+            own = await server.introspect(result["access_token"], requesting_client_id="web")
+            assert own["active"] is True and own["sub"] == "user-1"
+
+    @pytest.mark.asyncio
     async def test_exchange_mints_tokens_and_id_token(self) -> None:
         server = _server()
         verifier = "verifier-" + "v" * 56
