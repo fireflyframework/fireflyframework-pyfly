@@ -27,7 +27,8 @@ import os
 import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -178,15 +179,24 @@ async def test_expired_rows_are_purged(relational_backend: RelationalBackend) ->
     assert await cache.get("live") == "kept" and await cache.get("forever") == "kept"
 
 
-async def test_writes_purge_expired_rows_once_per_interval(relational_backend: RelationalBackend) -> None:
-    cache = await _cache(relational_backend, purge_interval=timedelta(milliseconds=200))
+async def test_writes_purge_expired_rows_once_per_interval(
+    relational_backend: RelationalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    elapsed = 0.0
+    monkeypatch.setattr("pyfly.cache.adapters.postgres.time", SimpleNamespace(monotonic=lambda: elapsed))
+    cache = await _cache(relational_backend, purge_interval=timedelta(milliseconds=200), clock=lambda: now)
     for index in range(5):
         await cache.put(f"short-{index}", index, ttl=timedelta(milliseconds=1))
-    assert await _rows(cache.engine) == 5  # within the interval: no purge yet
+    now += timedelta(seconds=1)
+    elapsed = 0.199
+    await cache.put("before", "kept")
+    assert await _rows(cache.engine) == 6
 
-    await asyncio.sleep(0.3)
+    elapsed = 0.2
     await cache.put("trigger", "x")
-    assert await _rows(cache.engine) == 1
+    assert await _rows(cache.engine) == 2
+    assert await cache.get("before") == "kept"
 
 
 async def test_a_write_purges_one_batch_and_the_next_writes_the_rest(relational_backend: RelationalBackend) -> None:
