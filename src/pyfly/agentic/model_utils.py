@@ -1,4 +1,5 @@
 # Copyright 2026 Firefly Software Foundation
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -112,6 +113,18 @@ def normalize_model(model: str | Model | None) -> str | Model | None:
         if model.startswith(prefix):
             return f"{provider}:{model}"
     return model
+
+
+def _resolve_model(model: str | Model | None) -> str | Model | None:
+    """Apply framework Ollama profiles to newly owned string-selected models."""
+    normalized = normalize_model(model)
+    if isinstance(normalized, str) and normalized.startswith("ollama:"):
+        from pyfly.agentic.models import ModelFactory, ModelSpec
+
+        return ModelFactory().build_with_secret(
+            ModelSpec(provider="ollama", model=normalized.removeprefix("ollama:")), None
+        )
+    return normalized
 
 
 def extract_model_info(model: str | Model | None) -> tuple[str, str]:

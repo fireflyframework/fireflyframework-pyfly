@@ -1,4 +1,5 @@
 # Copyright 2026 Firefly Software Foundation
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -58,7 +59,7 @@ from pyfly.agentic.agents.middleware import MiddlewareChain, MiddlewareContext
 from pyfly.agentic.agents.registry import agent_registry
 from pyfly.agentic.config import AgenticConfig, get_config
 from pyfly.agentic.exceptions import AgentError, BudgetExceededError, RateLimitError
-from pyfly.agentic.model_utils import get_model_identifier, normalize_model
+from pyfly.agentic.model_utils import _resolve_model, get_model_identifier, normalize_model
 from pyfly.agentic.models.options import ModelOptions, resolve_model_options
 from pyfly.agentic.observability.budget import ScopeContext
 from pyfly.agentic.observability.cost_resolvers import UnknownModelCostError
@@ -429,7 +430,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
         resolved_capabilities = [*native_capabilities, *capabilities]
 
         self._agent: PydanticAgent[AgentDepsT, OutputT] = PydanticAgent(
-            normalize_model(resolved_model),
+            _resolve_model(resolved_model),
             instructions=instructions,
             output_type=effective_output_type,
             deps_type=deps_type,
@@ -1009,7 +1010,8 @@ class Agent(Generic[AgentDepsT, OutputT]):
         model = kwargs.get("model") or self._agent.model
         if isinstance(model, str) and "model" in kwargs:
             if model not in self._model_cache:
-                self._model_cache[model] = infer_model(cast(str, normalize_model(model)))
+                resolved = _resolve_model(model)
+                self._model_cache[model] = resolved if isinstance(resolved, Model) else infer_model(cast(str, resolved))
                 if self._runtime is not None:
                     self._owned_model_ids.add(id(self._model_cache[model]))
             model = self._model_cache[model]
@@ -1045,7 +1047,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
     def _prepare_model_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Translate portable options at the invocation boundary, never on shared model state."""
         if "model" in kwargs:
-            kwargs["model"] = normalize_model(kwargs["model"])
+            self._execution_state(kwargs)
         override = kwargs.pop("model_options", None)
         if self._model_options is None and override is None:
             return

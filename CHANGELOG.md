@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.16 (2026-10-29)
+
+### Fixed
+
+- Derive `supports_forced_tool_choice=False` for Ollama so the native SDK uses
+  automatic tool selection. Explicit measured profile overrides retain precedence;
+  native JSON schemas, reasoning fields and `max_tokens` budgets are preserved.
+- Apply the factory-derived Ollama profile to public string-selected agents and
+  per-run overrides. Preserve SDK endpoint/credential environment behavior,
+  supplied model identity and application-owned client lifecycles.
+
 ## v26.10.15 (2026-10-29)
 
 ### Added
