@@ -41,7 +41,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from pydantic_ai.models import Model
-from pydantic_ai.profiles import DEFAULT_PROFILE, ModelProfile
+from pydantic_ai.profiles import DEFAULT_PROFILE, ModelProfile, merge_profile
 
 from pyfly.agentic.model_utils import detect_model_family
 from pyfly.agentic.models.claude import (
@@ -315,6 +315,14 @@ def _derived_profile(spec: ModelSpec) -> ModelProfile:
 
     Unknown ids fall back to the SDK's default profile so measured overrides still apply.
     """
+    if spec.provider == "ollama":
+        from pydantic_ai.profiles.openai import OpenAIModelProfile
+        from pydantic_ai.providers.ollama import OllamaProvider
+
+        return merge_profile(
+            OllamaProvider.model_profile(spec.model),
+            OpenAIModelProfile(openai_chat_supports_max_completion_tokens=False),
+        )
     if is_claude(spec.model):
         if spec.provider == "bedrock":
             try:
@@ -349,11 +357,16 @@ def _profile_fields(spec: ModelSpec, derived: ModelProfile) -> set[str]:
         from pydantic_ai.providers.bedrock import BedrockModelProfile
 
         schema = BedrockModelProfile
-    elif is_claude(spec.model):
+    elif is_claude(spec.model) and spec.provider != "ollama":
         from pydantic_ai.profiles.anthropic import AnthropicModelProfile
 
         schema = AnthropicModelProfile
-    elif family == "openai" or spec.base_url or spec.model_class in {"OpenAIChatModel", "OpenAIResponsesModel"}:
+    elif (
+        spec.provider == "ollama"
+        or family == "openai"
+        or spec.base_url
+        or spec.model_class in {"OpenAIChatModel", "OpenAIResponsesModel"}
+    ):
         from pydantic_ai.profiles.openai import OpenAIModelProfile
 
         schema = OpenAIModelProfile
@@ -369,13 +382,14 @@ def profile_for(spec: ModelSpec) -> ModelProfile | None:
 
     ``None`` when there is nothing to correct and the SDK knows the model — which is the
     common case, and returning ``None`` rather than a reconstructed profile is what keeps the
-    SDK's own derivation in play. A Claude id always gets a profile, because the corrections in
-    :mod:`~pyfly.agentic.models.claude` are part of what "derived" means here.
+    SDK's own derivation in play. Claude ids and Ollama always get a profile because their
+    framework corrections are part of what "derived" means here.
     """
     derived = _derived_profile(spec)
+    corrected = is_claude(spec.model) or spec.provider == "ollama"
     overrides: Mapping[str, Any] = spec.profile_overrides
     if not overrides:
-        return derived if is_claude(spec.model) else None
+        return derived if corrected else None
 
     fields = _profile_fields(spec, derived)
     applicable = {key: value for key, value in overrides.items() if key in fields}
@@ -390,9 +404,7 @@ def profile_for(spec: ModelSpec) -> ModelProfile | None:
             sorted(ignored),
             type(derived).__name__,
         )
-    return (
-        cast("ModelProfile", {**derived, **applicable}) if applicable else (derived if is_claude(spec.model) else None)
-    )
+    return cast("ModelProfile", {**derived, **applicable}) if applicable else (derived if corrected else None)
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +434,11 @@ def _openai_provider(spec: ModelSpec, secret: str | None) -> Any:
             return AzureProvider(azure_endpoint=spec.base_url, api_version=spec.api_version, api_key=secret)
         except UserError as exc:
             raise ModelBuildError(f"Azure endpoint, API version or credential configuration is invalid: {exc}") from exc
+
+    if spec.provider == "ollama":
+        from pydantic_ai.providers.ollama import OllamaProvider
+
+        return OllamaProvider(base_url=spec.base_url, api_key=secret)
 
     from pydantic_ai.providers.openai import OpenAIProvider
 

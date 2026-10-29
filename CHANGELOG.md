@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.14 (2026-10-29)
+
+### Fixed
+
+- Build Ollama chat models with the native Ollama provider and serialize configured
+  token budgets through its supported `max_tokens` request field. Preserve model
+  reasoning fields, tool-schema capabilities and explicit measured profile overrides.
+  OpenAI, Azure and unknown compatible endpoints retain their existing behavior.
+
 ## v26.10.13 (2026-10-28)
 
 ### Fixed
