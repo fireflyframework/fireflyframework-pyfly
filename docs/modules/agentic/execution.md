@@ -88,6 +88,140 @@ override. Keep the runtime dependency installed on a supported platform.
 
 ---
 
+## Persistent synchronous sessions
+
+For iterative execution, `MontyEnvironment.create_session()` opens one dedicated
+Rust worker and retains guest globals, functions and imports across explicit
+`feed` calls. Create, use and close the session on the same thread. Registered
+callbacks execute directly on that thread, preserving application-owned thread
+leases; PyFly never moves them to an executor or an event loop.
+
+```python
+from pyfly.agentic.execution import (
+    ExecutionHalt,
+    ExecutionReject,
+    ExecutionSessionLimits,
+    MontyEnvironment,
+)
+
+observed: list[str] = []
+
+def read_source(source_id: str) -> str:
+    # The application checks authorization and records provenance before returning data.
+    observed.append(source_id)
+    return "The review period is 42 days."
+
+def finish(answer: str):
+    if not observed:
+        return ExecutionReject("read_required", "Read a source before finalizing.")
+    return ExecutionHalt({"answer": answer, "sources": list(observed)})
+
+with MontyEnvironment().create_session(
+    external_functions={"read_source": read_source, "final": finish},
+    limits=ExecutionSessionLimits(max_feeds=8, max_external_calls=16),
+) as session:
+    rejected = session.feed("final('42 days')")
+    assert rejected.status == "rejected"
+    assert rejected.feedback[0].code == "read_required"
+    assert rejected.state == "ready"
+
+    session.feed("source = read_source('policy-42')")
+    accepted = session.feed("final(source); read_source('must-not-run')")
+    assert accepted.status == "halted"
+    assert accepted.result.success
+    assert observed == ["policy-42"]
+```
+
+`ExecutionSession` is a public synchronous protocol, separate from the existing
+asynchronous `ExecutionEnvironment`. `feed(code, inputs=...)` returns an
+`ExecutionFeedResult` with `status`, `result` (the existing `ExecutionResult`),
+`state`, immutable trusted `feedback`, and cumulative `usage`. The session
+exposes `state`, `capabilities` and `usage` properties and an idempotent `close()`.
+Other-thread access and reentrant feed/close fail with `ExecutionSessionError`.
+Use the context manager to close on every exit. A closed, halted or broken
+session cannot reopen or accept another feed.
+
+The fixed callback registry is copied at creation. Inputs cannot shadow its
+names. Host arguments, inputs, callback results, accepted halt values and guest
+outputs must contain exact built-in data: `None`, booleans, integers, finite
+floats, strings, bytes, lists, tuples and dictionaries with exact string keys.
+Subclasses, cycles, arbitrary host objects and nesting beyond 100 levels are
+rejected. Each whole boundary payload is copied and checked against
+`max_value_bytes`; it is not a separate allowance for each member. Callback
+arguments count as one combined `(args, kwargs)` payload.
+
+The content-size meter charges 8 bytes per scalar/container, UTF-8/raw/integer
+bytes, 8 per sequence member and 16 per dictionary entry. It does not measure
+exact host heap or wire memory. Guest-defined classes can wrap explicit host
+functions, for example a guest `docs.keys()` calling a registered `docs_keys()`.
+Use native guest `import re`; never inject a host module or document object.
+No filesystem mount, OS handler or host-object dispatch is exposed. All
+`object_id` snapshot routes are denied, including lazy attribute lookups.
+
+### Accepted, rejected and ordinary outcomes
+
+- **`ExecutionHalt(value)`** is host-only control. After validating the value,
+  PyFly closes the paused worker without resuming the pending call. No guest
+  instructions or host calls after final execute. The result has `status=HALTED`
+  and normally `state=HALTED` with `result.success=True`. If cleanup fails after
+  acceptance, status remains `HALTED`, state is `BROKEN`, and success is false
+  with `ExecutionCleanupError`; the accepted value remains in `result.output`.
+  That accepted operation must never be retried or replayed.
+- **`ExecutionReject(code, message)`** records trusted `ExecutionFeedback`
+  (`code`, `message`, `function_name`, `call_index`), then resumes the guest with
+  a `ValueError` and drains that feed with every subsequent host callback denied.
+  Guest code may catch the exception and change its own variables. A clean drain
+  reports `REJECTED`/`READY`, keeping actual post-drain guest state for the next
+  explicit feed. This is not a rollback to the rejection boundary. A rejected callback that has already exceeded the lifetime closes without resuming and retains trusted feedback. A runaway
+  drain closes as `ERROR`/`BROKEN` and retains the trusted feedback.
+- **Ordinary callback exceptions** are delivered to the guest without trusted
+  rejection metadata. Guest runtime/syntax errors can leave the session ready;
+  PyFly copies and bounds native exception arguments and a fresh built-in message before SDK serialization; original host exception instances and custom string conversions never cross. Selected exact built-in exception types preserve their guest catch class; application-specific subclasses become a fresh `RuntimeError`. Invalid or oversized exception payloads fail closed. Resource exhaustion, crashes, unsupported snapshots, conversion failures and
+  driver uncertainty close it as broken. `KeyboardInterrupt` and `SystemExit`
+  propagate after cleanup.
+
+Only direct control values returned by a registered host callback have these
+effects. Guest dictionaries or printed text cannot forge trusted feedback.
+Guest stdout and stderr remain untrusted. No checkpoint restore, implicit
+retry, reset, replay or replacement session is provided. The application owns
+authorization, provenance, read-required rules and acceptance policy.
+
+### Persistent budgets and static checking
+
+`ExecutionSessionLimits` defaults to 30 seconds per worker turn/native VM budget,
+64 MiB guest memory, recursion depth 200, a cooperatively observed 300-second
+session lifetime, 32 feeds, 256 external calls, 4096 suspensions, 1 MiB captured
+output and 8 MiB per data payload. Unset nested `ExecutionLimits` fields inherit
+these session defaults, independently of one-shot environment defaults. All
+numeric ceilings must be positive and finite. Integer ceilings cannot exceed `sys.maxsize`; time ceilings cannot exceed `threading.TIMEOUT_MAX`, preventing native conversion overflow before worker creation. Configuration is copied before
+opening a worker; later caller mutation cannot change it.
+
+Counters are cumulative and checked before dispatch. Each admitted feed counts,
+including one with a syntax error; invalid API input does not. The SDK's bounded
+stream collector also charges per-entry overhead, so many tiny prints may hit
+its cap before the reported UTF-8 output-byte count reaches the ceiling.
+
+The fixed `execution.timeout_seconds` bounds each worker request and native VM
+compute; it is **not an end-to-end feed deadline**. Session lifetime checks run
+before/after requests and callbacks. A request admitted before expiry may finish
+after it, up to its fixed request timeout. A trusted synchronous callback cannot
+be forcibly interrupted: it must enforce its own I/O deadline and bounded work.
+If a deadline has passed when control returns, PyFly closes without another
+guest resume. `max_allocations` is explicitly unsupported.
+
+With pinned Monty SDK 0.0.23, `MontyEnvironment(type_check=True).create_session()`
+raises a clear `ValueError` **before worker creation**. The public SDK loses
+accumulated static context when `feed_start('retained = host()')` suspends for a
+host call: although the VM retains `retained`, its next static check reports it
+undefined. No public checker-update API exists; PyFly does not replay code or
+silently disable checking. The existing one-shot asynchronous `run_code` static
+checker is unchanged. This optional guest static analysis limitation does not
+change runtime data-only conversion, capability isolation or the typed public API.
+
+Darwin and Linux real-worker qualification are separate gates. Installing the
+optional extra/binary and passing a local probe does not establish downstream
+application, provider or production acceptance.
+
 ## Resource limits
 
 ```python
