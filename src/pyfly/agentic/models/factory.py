@@ -1,4 +1,5 @@
 # Copyright 2026 Firefly Software Foundation
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -321,7 +322,10 @@ def _derived_profile(spec: ModelSpec) -> ModelProfile:
 
         return merge_profile(
             OllamaProvider.model_profile(spec.model),
-            OpenAIModelProfile(openai_chat_supports_max_completion_tokens=False),
+            OpenAIModelProfile(
+                openai_chat_supports_max_completion_tokens=False,
+                supports_forced_tool_choice=False,
+            ),
         )
     if is_claude(spec.model):
         if spec.provider == "bedrock":

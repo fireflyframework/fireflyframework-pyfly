@@ -44,6 +44,20 @@ the SDK's required placeholder credential for a keyless local endpoint.
 Compatibility at the HTTP boundary does not establish every model's tool or
 structured-output capabilities.
 
+PyFly derives `supports_forced_tool_choice=False` for Ollama because its
+[compatibility API does not support `tool_choice`](https://github.com/ollama/ollama/blob/main/docs/api/openai-compatibility.mdx).
+Pydantic AI therefore selects tools automatically, including when a structured
+response normally requires a tool. Token budgets use `max_tokens`; native JSON
+schemas and the remaining SDK profile fields are preserved.
+
+These corrections also apply to `Agent(model="ollama:...")`, `AgentFactory` and
+per-run string model overrides. String selectors retain the SDK's
+`OLLAMA_BASE_URL` and `OLLAMA_API_KEY` behavior, including its error when the base
+URL is missing. Explicitly supplied model objects keep their identity, profile,
+client and caller-owned lifetime. For a gateway with verified forced-tool
+support, an explicit `ModelSpec.profile_overrides` entry such as
+`{"supports_forced_tool_choice": True}` takes precedence over the Ollama default.
+
 ## A complete local agent
 
 Save this script as `local_agent.py`. The script owns its newly constructed model

@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.16` | 2026-10-29 | Correct Ollama tool-forcing capabilities and string-agent model profiles. |
 | `26.10.15` | 2026-10-29 | Public persistent execution sessions with same-thread callbacks, explicit halt/reject controls and cumulative budgets. |
 | `26.10.14` | 2026-10-29 | Preserve Ollama chat profiles and serialize configured token budgets with `max_tokens`. |
 | `26.10.13` | 2026-10-28 | Preserve OAuth resource-owner/client identity, grant registration and refresh-family origin. Earlier refresh records require a new grant. |
@@ -113,20 +114,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.15"
+print(pyfly.__version__)  # → "26.10.16"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.15
+pyfly --version            # → pyfly, version 26.10.16
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.15) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.16) (Python 3.13.9)
 ```
 
 ---
