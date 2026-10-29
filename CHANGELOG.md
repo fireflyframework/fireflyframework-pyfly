@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.15 (2026-10-29)
+
+### Added
+
+- Add public synchronous persistent `ExecutionSession` instances through
+  `MontyEnvironment.create_session`, keeping callbacks on the creating thread
+  and guest variables/functions across explicitly counted feeds.
+- Add typed `ExecutionHalt` and `ExecutionReject` controls, trusted rejection
+  feedback, cumulative budgets, exact built-in data-only crossings and
+  deny-by-default OS/host-object snapshot dispatch. Accepted halt never resumes
+  guest code; rejected feeds drain with further host callbacks denied.
+- Add installed-wheel real-Monty qualification on Linux. Persistent static
+  `type_check=True` is explicitly unavailable with SDK 0.0.23 because suspended
+  callbacks lose checker context; one-shot asynchronous checking is unchanged.
+  Session lifetime checks are cooperative; trusted callbacks own I/O deadlines.
+
 ## v26.10.14 (2026-10-29)
 
 ### Fixed

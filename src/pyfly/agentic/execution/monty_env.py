@@ -29,11 +29,19 @@ import asyncio
 import inspect
 import keyword
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pydantic_monty import AsyncSnapshot, ResourceLimits
+
+    from pyfly.agentic.execution.session import ExecutionSession
+    from pyfly.agentic.execution.session_types import (
+        ExecutionHalt,
+        ExecutionReject,
+        ExecutionSessionLimits,
+        ExecutionValue,
+    )
 
 from pyfly.agentic.exceptions import SandboxUnavailableError
 from pyfly.agentic.execution.types import Capability, ExecutionLimits, ExecutionResult
@@ -46,8 +54,9 @@ class MontyEnvironment:
 
     Tier 0 (no ``external_functions``) is pure computation. Tier 1 exposes
     allow-listed host callables to the script via ``external_functions`` — the
-    basis of pyfly's Code Mode. Each invocation owns and closes its worker pool
-    and session; no interpreter state survives into another invocation.
+    basis of pyfly's Code Mode. Each run_code invocation owns and closes its worker pool
+    and session; no interpreter state survives into another invocation. Use
+    create_session for explicit synchronous persistence.
 
     Args:
         type_check: Run Monty's static type checker before execution.
@@ -69,6 +78,29 @@ class MontyEnvironment:
     @property
     def capabilities(self) -> frozenset[Capability]:
         return frozenset({Capability.COMPUTE, Capability.EXTERNAL_FUNCTIONS})
+
+    def create_session(
+        self,
+        *,
+        external_functions: Mapping[str, Callable[..., ExecutionValue | ExecutionHalt | ExecutionReject]] | None = None,
+        limits: ExecutionSessionLimits | None = None,
+    ) -> ExecutionSession:
+        """Open an explicit synchronous persistent session on the calling thread.
+
+        Callbacks stay on that thread; the caller must close the session or use
+        its context manager. Session limits are independent of one-shot defaults.
+        No interpreter state is shared with ``run_code`` or another session.
+        Persistent ``type_check=True`` fails before worker creation because
+        SDK 0.0.23 loses checker context after suspended callbacks; the one-shot
+        asynchronous checker is unchanged.
+        """
+        from pyfly.agentic.execution.monty_session import MontyExecutionSession
+
+        return MontyExecutionSession(
+            external_functions=external_functions,
+            limits=limits,
+            type_check=self._type_check,
+        )
 
     def _effective_limits(self, limits: ExecutionLimits | None) -> ExecutionLimits:
         base = self._default_limits

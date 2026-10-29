@@ -214,10 +214,89 @@ jobs:
           name: agentic-benchmarks-${{ matrix.python-version }}
           path: ${{ runner.temp }}/agentic-benchmarks.json
 
+  persistent-execution-wheel:
+    name: Persistent execution (installed wheel, Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: uv build --wheel
+      - name: Install the candidate outside the source environment
+        shell: bash
+        run: |
+          uv venv --python 3.13 "${RUNNER_TEMP}/persistent-wheel"
+          wheels=(dist/*.whl)
+          uv export --locked --extra agentic-script-execution --group dev --no-emit-project --output-file "${RUNNER_TEMP}/persistent-requirements.txt"
+          uv pip sync --require-hashes --python "${RUNNER_TEMP}/persistent-wheel/bin/python" "${RUNNER_TEMP}/persistent-requirements.txt"
+          uv pip install --no-deps --python "${RUNNER_TEMP}/persistent-wheel/bin/python" "${wheels[0]}"
+          mkdir -p "${RUNNER_TEMP}/persistent-tests"
+          cp tests/agentic/unit/execution/test_persistent_session.py tests/agentic/unit/execution/test_persistent_driver.py "${RUNNER_TEMP}/persistent-tests/"
+      - name: Require the real optional runtime and installed namespace
+        working-directory: ${{ runner.temp }}
+        run: |
+          persistent-wheel/bin/python - <<'PY'
+          import hashlib
+          import importlib.metadata
+          import json
+          import os
+          import platform
+          import sys
+          import tomllib
+          from pathlib import Path
+          import pydantic_monty
+          import pyfly
+          from pyfly.agentic.execution import MontyEnvironment
+          assert "site-packages" in pyfly.__file__, pyfly.__file__
+          assert pyfly.__version__ == importlib.metadata.version("pyfly")
+          with MontyEnvironment().create_session() as session:
+              assert session.feed("40 + 2").result.output == 42
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          lock = tomllib.loads((workspace / "uv.lock").read_text())
+          locked = {item["name"]: item for item in lock["package"]}
+          native = {}
+          for name in ("pydantic-monty", "pydantic-monty-client", "pydantic-monty-runtime"):
+              dist = importlib.metadata.distribution(name)
+              assert dist.version == "0.0.23"
+              tags = [line.split(": ", 1)[1] for line in dist.read_text("WHEEL").splitlines() if line.startswith("Tag: ")]
+              filenames = {f"{name.replace('-', '_')}-{dist.version}-{tag}.whl" for tag in tags}
+              upstream = next(item for item in locked[name]["wheels"] if item["url"].split("/")[-1] in filenames)
+              files = []
+              for entry in dist.files:
+                  if "__pycache__" in entry.parts or str(entry).endswith((".pyc", "/RECORD")):
+                      continue
+                  path = Path(dist.locate_file(entry)).resolve()
+                  assert path.is_relative_to(Path(sys.prefix).resolve()), path
+                  files.append({"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+              native[name] = {"version": dist.version, "locked_wheel": upstream, "files": files}
+          wheels = list((workspace / "dist").glob("*.whl"))
+          assert len(wheels) == 1
+          Path("persistent-native-runtime.json").write_text(json.dumps({
+              "scope": "Linux installed candidate; actual native runtime, not downstream acceptance",
+              "platform": platform.platform(), "python": sys.version, "namespace": pyfly.__file__,
+              "pyfly_wheel_sha256": hashlib.sha256(wheels[0].read_bytes()).hexdigest(), "native": native,
+          }, indent=2) + "\n")
+          print(pyfly.__version__, pyfly.__file__, pydantic_monty.__version__)
+          PY
+      - name: Run real persistent controls, isolation and cleanup contracts
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: persistent-wheel/bin/python -m pytest persistent-tests -q --import-mode=importlib
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: persistent-native-runtime-linux
+          path: ${{ runner.temp }}/persistent-native-runtime.json
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, typecheck, test, documentation]
+    needs: [lint, typecheck, test, documentation, persistent-execution-wheel]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
