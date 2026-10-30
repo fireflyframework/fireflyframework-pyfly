@@ -81,6 +81,43 @@ EventLoopPort          ApplicationServerPort          WebServerPort
 
 ## Server Selection
 
+### Public launch boundary
+
+Applications with a configured ASGI factory can use the public synchronous
+launch API with a complete, typed configuration:
+
+```python
+from pyfly.config.properties.server import ServerProperties
+from pyfly.core import Config
+from pyfly.server import launch
+
+properties = Config.from_sources(".").bind(ServerProperties)
+launch("my_application.main:app", properties)
+```
+
+`launch(app, properties, *, server=None, event_loop=None)` validates listener and
+TLS input, installs the selected event-loop policy, and then calls the native
+server port with a copy of `ServerProperties` carrying the concrete selected loop
+name. The caller's configuration stays unchanged. This retains TLS,
+HTTP mode, graceful shutdown and nested server tuning. `select_server()` and
+`select_event_loop()` expose the same installed-adapter selection policy without
+starting a server or installing a loop. Explicit unavailable adapter names fail
+instead of falling back.
+
+An application can supply explicit `ApplicationServerPort` and `EventLoopPort`
+overrides from its own composition. This boundary runs before asynchronous
+application startup. It does not import the application, create another context,
+or automatically resolve beans from an application context that has not started.
+The selected server retains its normal ASGI startup and shutdown lifecycle.
+
+`pyfly run` delegates to this boundary after its banner and worker preparation.
+Listener configuration uses native typed binding with profile, environment and
+`-D` precedence, including nested tuning; explicit CLI host, port, server and
+worker options override the bound values. Invalid listener or TLS configuration
+fails before serving. The development reload path uses uvicorn with the same TLS,
+backlog, keep-alive, shutdown and concurrency settings. Port `0` requests an
+ephemeral listener across the native adapters.
+
 PyFly supports three ASGI servers. When `pyfly.server.type` is set to `"auto"` (the default), the framework selects the highest-priority server that is installed.
 
 ### Granian (Default)

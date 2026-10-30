@@ -503,24 +503,4 @@ class PyFlyApplication:
     @staticmethod
     def _resolve_profiles_early(config_dir: Path | None) -> list[str]:
         """Resolve active profiles before full config load."""
-        import os
-
-        import yaml  # type: ignore[import-untyped]
-
-        env_profiles = os.environ.get("PYFLY_PROFILES_ACTIVE", "")
-        if env_profiles:
-            return [p.strip() for p in env_profiles.split(",") if p.strip()]
-
-        if config_dir is None:
-            return []
-
-        for candidate in [config_dir / "config" / "pyfly.yaml", config_dir / "pyfly.yaml"]:
-            if candidate.exists():
-                with open(candidate) as f:
-                    data = yaml.safe_load(f) or {}
-                profiles_value = (data.get("pyfly", {}) or {}).get("profiles", {})
-                active = profiles_value.get("active", "") if isinstance(profiles_value, dict) else ""
-                if active:
-                    return [p.strip() for p in str(active).split(",") if p.strip()]
-
-        return []
+        return Config.resolve_active_profiles(config_dir)

@@ -59,7 +59,7 @@ class UvicornServerAdapter:
         kwargs: dict[str, Any] = {
             "host": host,
             "port": port,
-            "loop": loop,
+            "loop": "winloop:new_event_loop" if loop == "winloop" else loop,
             "http": "auto",
             "log_level": "warning",
             "timeout_keep_alive": config.keep_alive_timeout,
@@ -81,7 +81,9 @@ class UvicornServerAdapter:
         """Start Uvicorn (blocking)."""
         workers = config.workers if config.workers > 0 else 1
         host = getattr(config, "host", None) or "0.0.0.0"
-        port = getattr(config, "port", None) or 8000
+        port = getattr(config, "port", None)
+        if port is None:
+            port = 8000
         loop = config.event_loop if config.event_loop != "auto" else "auto"
 
         kwargs = self._build_kwargs(host, port, loop, config)
@@ -99,11 +101,18 @@ class UvicornServerAdapter:
 
         uvicorn.run(app, **kwargs)
 
+    def serve_reload(self, app: str, config: Any, reload_dirs: list[str] | None = None) -> None:
+        """Run the development watcher with the normal TLS and listener settings."""
+        kwargs = self._build_kwargs(config.host, config.port, config.event_loop, config)
+        uvicorn.run(app, **kwargs, reload=True, reload_dirs=reload_dirs or None)
+
     async def serve_async(self, app: str | Any, config: Any) -> None:
         """Start Uvicorn (async)."""
         workers = config.workers if config.workers > 0 else 1
         host = getattr(config, "host", None) or "0.0.0.0"
-        port = getattr(config, "port", None) or 8000
+        port = getattr(config, "port", None)
+        if port is None:
+            port = 8000
         loop = config.event_loop if config.event_loop != "auto" else "auto"
 
         uvi_config = uvicorn.Config(app, **self._build_kwargs(host, port, loop, config))

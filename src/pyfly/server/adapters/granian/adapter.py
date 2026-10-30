@@ -61,7 +61,9 @@ class GranianServerAdapter:
         respawn = getattr(granian_props, "respawn_failed_workers", True) if granian_props else True
 
         host = getattr(config, "host", None) or "0.0.0.0"
-        port = getattr(config, "port", None) or 8000
+        port = getattr(config, "port", None)
+        if port is None:
+            port = 8000
 
         kwargs: dict[str, Any] = {
             "target": app if isinstance(app, str) else app,
