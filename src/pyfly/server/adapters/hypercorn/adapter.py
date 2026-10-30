@@ -52,7 +52,9 @@ class HypercornServerAdapter:
 
         workers = config.workers if config.workers > 0 else 1
         host = getattr(config, "host", None) or "0.0.0.0"
-        port = getattr(config, "port", None) or 8000
+        port = getattr(config, "port", None)
+        if port is None:
+            port = 8000
 
         hc_config = HypercornConfig()
         hc_config.bind = [f"{host}:{port}"]

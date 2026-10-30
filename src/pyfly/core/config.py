@@ -250,6 +250,24 @@ class Config:
                 result[full] = value
         return result
 
+    @staticmethod
+    def resolve_active_profiles(config_dir: Path | None) -> list[str]:
+        """Resolve startup profiles without creating an application context."""
+        env_profiles = os.environ.get("PYFLY_PROFILES_ACTIVE", "")
+        if env_profiles:
+            return [profile.strip() for profile in env_profiles.split(",") if profile.strip()]
+        if config_dir is None:
+            return []
+        for candidate in [config_dir / "config" / "pyfly.yaml", config_dir / "pyfly.yaml"]:
+            if candidate.exists():
+                with open(candidate) as source:
+                    data = yaml.safe_load(source) or {}
+                profiles_value = (data.get("pyfly", {}) or {}).get("profiles", {})
+                active = profiles_value.get("active", "") if isinstance(profiles_value, dict) else ""
+                if active:
+                    return [profile.strip() for profile in str(active).split(",") if profile.strip()]
+        return []
+
     @classmethod
     def from_sources(
         cls,

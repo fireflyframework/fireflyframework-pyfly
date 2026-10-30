@@ -23,6 +23,8 @@ from typing import Any
 import click
 
 from pyfly.cli.console import console
+from pyfly.config.properties.server import ServerProperties
+from pyfly.server.launcher import launch, select_event_loop, select_server, validate_server_properties
 
 
 def _to_env_key(key: str) -> str:
@@ -81,7 +83,7 @@ def _ensure_src_on_path() -> None:
 
 
 @click.command()
-@click.option("--host", default="0.0.0.0", help="Bind address.")
+@click.option("--host", default=None, help="Bind address (default: from configuration or 0.0.0.0).")
 @click.option("--port", default=None, type=int, help="Port number (default: from pyfly.yaml or 8080).")
 @click.option("--reload", "use_reload", is_flag=True, help="Enable auto-reload for development.")
 @click.option("--app", "app_path", default=None, help="Application import path (e.g. 'myapp.main:app').")
@@ -112,7 +114,7 @@ def _ensure_src_on_path() -> None:
     help="Extra directories to watch in --reload mode (repeatable).",
 )
 def run_command(
-    host: str,
+    host: str | None,
     port: int | None,
     use_reload: bool,
     app_path: str | None,
@@ -141,12 +143,18 @@ def run_command(
             console.print("[dim]Provide --app flag or create a pyfly.yaml in the current directory.[/dim]")
             raise SystemExit(1)
 
-    if port is None:
-        port = _read_port_from_config() or 8080
+    properties = _load_server_properties()
+    host = host if host is not None else properties.host
+    port = port if port is not None else properties.port
+    properties.host, properties.port = host, port
+    validate_server_properties(properties)
 
     # --reload falls back to uvicorn (only server with a built-in file watcher)
     if use_reload:
-        _run_with_uvicorn_reload(app_path, host, port, list(watch))
+        event_loop_adapter = _create_event_loop_adapter(properties.event_loop)
+        properties.event_loop = event_loop_adapter.name
+        event_loop_adapter.install()
+        _run_with_uvicorn_reload(app_path, host, port, list(watch), properties)
         return
 
     # Resolve server and event loop
@@ -155,10 +163,8 @@ def run_command(
         host,
         port,
         workers,
+        properties,
     )
-
-    if event_loop_adapter is not None:
-        event_loop_adapter.install()
 
     # Attach host/port to config
     config.host = host
@@ -200,7 +206,7 @@ def run_command(
     os.environ["_PYFLY_EVENT_LOOP"] = config.event_loop
     os.environ["_PYFLY_HTTP"] = config.http
 
-    server_adapter.serve(app_path, config)
+    launch(app_path, config, server=server_adapter, event_loop=event_loop_adapter)
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +271,10 @@ def _resolve_server_adapter(
     host: str,
     port: int,
     workers: int | None,
+    properties: ServerProperties | None = None,
 ) -> tuple[Any, Any, Any]:
     """Build a (server_adapter, event_loop_adapter, config) triple."""
-    config = _load_server_properties()
+    config = properties if properties is not None else _load_server_properties()
     if server_type:
         config.type = server_type
     if workers is not None:
@@ -278,105 +285,47 @@ def _resolve_server_adapter(
 
 
 def _create_server_adapter(server_type: str) -> Any:
-    """Create server adapter by type or auto-detect best available."""
-    if server_type in ("granian", "auto"):
-        try:
-            from pyfly.server.adapters.granian.adapter import GranianServerAdapter
-
-            return GranianServerAdapter()
-        except ImportError:
-            if server_type == "granian":
-                console.print("[error]granian is not installed.[/error]")
-                raise SystemExit(1) from None
-
-    if server_type in ("uvicorn", "auto"):
-        try:
-            from pyfly.server.adapters.uvicorn.adapter import UvicornServerAdapter
-
-            return UvicornServerAdapter()
-        except ImportError:
-            if server_type == "uvicorn":
-                console.print("[error]uvicorn is not installed.[/error]")
-                raise SystemExit(1) from None
-
-    if server_type in ("hypercorn", "auto"):
-        try:
-            from pyfly.server.adapters.hypercorn.adapter import HypercornServerAdapter
-
-            return HypercornServerAdapter()
-        except ImportError:
-            if server_type == "hypercorn":
-                console.print("[error]hypercorn is not installed.[/error]")
-                raise SystemExit(1) from None
-
-    console.print("[error]No ASGI server available.[/error]")
-    raise SystemExit(1)
+    """Use the public native selector, retaining CLI error presentation."""
+    try:
+        return select_server(server_type)
+    except ValueError as error:
+        raise click.BadParameter(str(error), param_hint="--server / pyfly.server.type") from error
 
 
 def _create_event_loop_adapter(event_loop: str) -> Any:
-    """Create event loop adapter by name or auto-detect."""
-    if event_loop in ("uvloop", "auto"):
-        try:
-            from pyfly.server.adapters.event_loop.uvloop_adapter import UvloopEventLoopAdapter
-
-            return UvloopEventLoopAdapter()
-        except ImportError:
-            if event_loop == "uvloop":
-                return None
-
-    if event_loop in ("winloop", "auto"):
-        try:
-            from pyfly.server.adapters.event_loop.winloop_adapter import WinloopEventLoopAdapter
-
-            return WinloopEventLoopAdapter()
-        except ImportError:
-            if event_loop == "winloop":
-                return None
-
-    from pyfly.server.adapters.event_loop.asyncio_adapter import AsyncioEventLoopAdapter
-
-    return AsyncioEventLoopAdapter()
+    """Use the public native selector; explicit unavailable loops fail closed."""
+    try:
+        return select_event_loop(event_loop)
+    except ValueError as error:
+        raise click.BadParameter(str(error), param_hint="pyfly.server.event-loop") from error
 
 
-def _load_server_properties() -> Any:
-    """Load ServerProperties from pyfly.yaml, falling back to defaults."""
-    from pyfly.config.properties.server import ServerProperties
+def _load_server_properties() -> ServerProperties:
+    """Bind the same typed, profile-aware configuration used by the application."""
+    from pyfly.core.config import Config
 
     try:
-        import yaml
-
-        config_path = Path("pyfly.yaml")
-        if config_path.exists():
-            with open(config_path) as f:
-                data = yaml.safe_load(f) or {}
-            server_data = (data.get("pyfly", {}) or {}).get("server", {}) or {}
-            return ServerProperties(
-                **{
-                    k.replace("-", "_"): v
-                    for k, v in server_data.items()
-                    if k.replace("-", "_") in ServerProperties.__dataclass_fields__ and not isinstance(v, dict)
-                }
-            )
-    except Exception:
-        pass
-    return ServerProperties()
+        profiles = Config.resolve_active_profiles(Path.cwd())
+        return Config.from_sources(Path.cwd(), active_profiles=profiles or None).bind(ServerProperties)
+    except (ValueError, TypeError) as error:
+        raise click.BadParameter(f"Invalid pyfly.server configuration: {error}") from error
 
 
-def _run_with_uvicorn_reload(app_path: str, host: str, port: int, reload_dirs: list[str] | None = None) -> None:
+def _run_with_uvicorn_reload(
+    app_path: str,
+    host: str,
+    port: int,
+    reload_dirs: list[str] | None = None,
+    properties: ServerProperties | None = None,
+) -> None:
     """Run with uvicorn in reload mode (development only)."""
     try:
-        import uvicorn
+        from pyfly.server.adapters.uvicorn.adapter import UvicornServerAdapter
     except ImportError:
         console.print("[error]uvicorn is required for --reload mode.[/error]")
         raise SystemExit(1) from None
-    uvicorn.run(
-        app_path,
-        host=host,
-        port=port,
-        reload=True,
-        reload_dirs=reload_dirs or None,
-        log_level="warning",
-    )
+    config = properties if properties is not None else ServerProperties(host=host, port=port)
+    UvicornServerAdapter().serve_reload(app_path, config, reload_dirs)
 
 
 # ---------------------------------------------------------------------------

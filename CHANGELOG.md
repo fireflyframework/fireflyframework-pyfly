@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.18 (2026-10-30)
+
+### Added
+
+- Expose `pyfly.server.launch` for synchronous launcher composition before the
+  ASGI application lifecycle. It selects native server and event-loop adapters
+  without creating a second application context or resolving asynchronous beans.
+- Share context-free active-profile resolution between application and CLI startup.
+
+### Fixed
+
+- Retain typed TLS, listener and tuning settings in CLI launch and development
+  reload. Explicit unavailable event loops fail before serving.
+- Carry the selected event loop into native server configuration without mutating
+  the caller's properties. Translate winloop to Uvicorn's custom factory contract.
+- Preserve ephemeral port zero across native server adapters and suppress private
+  filesystem details when TLS file validation fails.
+
 ## v26.10.17 (2026-10-30)
 
 ### Added
