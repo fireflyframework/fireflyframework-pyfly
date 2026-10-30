@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -34,3 +35,10 @@ class BoundedHttpClientPort(HttpClientPort, Protocol):
     """Optional bounded-response capability, separate from existing implementations."""
 
     async def request_bounded(self, method: str, url: str, *, max_response_bytes: int, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class StreamingHttpClientPort(HttpClientPort, Protocol):
+    """Optional incremental-response capability; its context owns response cleanup."""
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> AbstractAsyncContextManager[Any]: ...

@@ -310,6 +310,17 @@ variables, and `OTEL_EXPORTER_OTLP_TRACES_HEADERS` /
 Header values follow OpenTelemetry's percent-encoded `key=value` format; obtain
 credentials from the host's environment or secret manager, not agent prompts.
 
+For isolated contexts, set `pyfly.observability.tracing.otlp.headers` and
+`pyfly.observability.metrics.otlp.headers` to header mappings loaded from the
+host's secret store. An explicit mapping overrides ambient OTLP headers for that
+signal without mutating process environment; omitted mappings preserve standard
+OpenTelemetry environment behavior. Do not capture these credentials as span
+attributes or model content.
+
+Native web filters resolve the context's tracer provider after startup. Native
+pipeline/node spans also use the activated runtime's provider, so HTTP, Agentic,
+and model spans can share the same private exporter and W3C hierarchy.
+
 `register-global` defaults to `true` in PyFly observability; set it to `false`
 for isolated application contexts or workers. This keeps the provider local to
 the application. `AgenticRuntime` borrows supplied providers and does not shut

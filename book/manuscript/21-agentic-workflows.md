@@ -85,6 +85,8 @@ Failed streams must close their async scope even if startup, memory persistence 
 
 Headless programs can select only Agentic and observability auto-configurations through `ApplicationContext(config, auto_configurations=[...])`, then retrieve the runtime/providers as beans and call `await context.stop()` at shutdown. For per-operation model lifetimes, use `async with runtime.scope() as operation`; its agents/model state end with the scope while the application retains providers, memory and cumulative budgets. Set `pyfly.observability.metrics.exporter=none` to keep an offline DI provider without inheriting ambient OTLP endpoints.
 
+Applications can inject the native `ModelFactory` bean with a `ModelClientPolicy` bean to borrow the DI streaming HTTP port and set SDK retries/timeouts. Own each built model in the operation scope. OpenAI-compatible Chat/Responses and Ollama support this policy; other providers reject unsupported policy combinations. Transport retries and Pydantic AI per-call retry settings remain separate. Per-context OTLP header mappings avoid global environment changes. Native web and pipeline spans use the same private DI provider.
+
 ## 21.7. Qualify the service journey
 
 Run the companion tests from Chapter 19. They prove native registration, typed output, read-tool invocation, streaming, approved deferral, vector scope isolation, journal replay and a total-call budget. The broader framework suite is responsible for multi-application isolation and lifecycle edge cases; production acceptance also needs the actual provider and persistence lanes.

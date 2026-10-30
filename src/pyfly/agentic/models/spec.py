@@ -30,6 +30,38 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from pyfly.agentic.models.options import ModelOptions
 
+from pyfly.client.ports.outbound import HttpClientPort, StreamingHttpClientPort
+
+
+@dataclass(frozen=True)
+class ModelClientPolicy:
+    """Factory-owned SDK policy borrowing an application-owned native HTTP port.
+
+    ``max_retries`` controls SDK retries, separately from the port's transport retry
+    policy. A supplied port must support incremental response contexts. Timeout is
+    the SDK request deadline; connect_timeout additionally caps native-port connection waits.
+    """
+
+    max_retries: int = 0
+    http_client: HttpClientPort | None = field(default=None, repr=False, compare=False)
+    timeout: float | None = None
+    connect_timeout: float | None = None
+
+    def __post_init__(self) -> None:
+        import math
+
+        if type(self.max_retries) is not int or self.max_retries < 0:
+            raise ValueError("max_retries must be a non-negative integer")
+        if self.http_client is not None and not isinstance(self.http_client, StreamingHttpClientPort):
+            raise TypeError("Model client policy requires a StreamingHttpClientPort")
+        if self.connect_timeout is not None and self.http_client is None:
+            raise ValueError("connect_timeout requires a native HTTP client")
+        for name in ("timeout", "connect_timeout"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be a finite positive number")
+
+
 ThinkingStyle = Literal["none", "budget", "effort", "adaptive"]
 """How a model is asked to think.
 

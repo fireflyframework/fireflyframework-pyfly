@@ -85,6 +85,8 @@ Los streams deben cerrar su contexto async aunque fallen el arranque, la memoria
 
 Los programas sin servidor pueden seleccionar Agentic y observabilidad con `ApplicationContext(config, auto_configurations=[...])`, obtener runtime y proveedores como beans y cerrar con `await context.stop()`. Usa `async with runtime.scope() as operation` para limitar la vida de agentes y modelos por operación; la aplicación conserva proveedores, memoria y presupuestos acumulados. Configura `pyfly.observability.metrics.exporter=none` para mantener un proveedor DI sin exportación ni endpoints OTLP heredados.
 
+La aplicación puede inyectar el bean nativo `ModelFactory` con un bean `ModelClientPolicy` para reutilizar el puerto HTTP streaming de DI y fijar reintentos y tiempos del SDK. Registra cada modelo como recurso del scope de operación. La política admite Chat/Responses compatibles con OpenAI y Ollama; otros proveedores rechazan combinaciones no soportadas. Los reintentos del transporte y de cada llamada Pydantic AI siguen siendo independientes. Los mapas de headers OTLP por contexto evitan cambios globales del entorno. Las trazas web y de pipeline usan el mismo proveedor DI privado.
+
 ## 21.7. Validar el recorrido del servicio
 
 Ejecuta las pruebas del capítulo 19. Demuestran registro nativo, salida tipada, lectura de herramientas, streaming, aprobación, aislamiento vectorial, replay y presupuesto de llamadas. La suite del framework cubre aislamiento entre aplicaciones y extremos del ciclo de vida; la aceptación productiva requiere también proveedores y persistencia reales.

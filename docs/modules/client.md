@@ -539,6 +539,35 @@ pin DNS, validate peers, or authorize redirects. A transport implementing those
 rules must validate before writing and preserve TLS hostname verification; a
 response hook runs too late to prevent a disallowed outbound request.
 
+### Incremental native responses
+
+`StreamingHttpClientPort` is an optional capability beside `HttpClientPort`.
+The native `ClientAutoConfiguration` registers both types as the same adapter
+instance. Consume responses with `async with port.stream(method, url, ...) as response`
+and `response.aiter_bytes()`; exiting the context closes the response without
+closing a borrowed client. Timeout mappings accept `connect`, `read`, `write`,
+and `pool` seconds.
+
+For capability-bound requests, pass `suppress_cookies=True` to `stream`,
+`request`, or `request_bounded`. This strips pooled and supplied cookies without
+mutating the shared jar and disallows redirects, custom authentication flows,
+and client event hooks that could reintroduce cookies. Ordinary requests retain
+the client's cookie behavior.
+
+The native shared-client bean reads these application settings (separate from
+declarative retry and circuit-breaker settings):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `pyfly.client.timeout` | `30` | Request timeout in seconds |
+| `pyfly.client.trust-env` | `true` | Environment proxy/TLS configuration; set `false` for isolated transports |
+| `pyfly.client.follow-redirects` | `false` | Redirect policy |
+| `pyfly.client.transport-retries` | `0` | Connection retries; positive values require `trust-env=false` |
+| `pyfly.client.headers` | unset | Default header mapping, such as an admitted `Host` override |
+
+These settings configure the shared port. Declarative `@http_client` adapters
+retain their existing timeout and declarative retry configuration.
+
 ### Implementing a Custom Adapter
 
 ```python

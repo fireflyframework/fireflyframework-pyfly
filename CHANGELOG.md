@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Build OpenAI-compatible and Ollama models through a DI-owned `ModelFactory`
+  with explicit SDK retry/timeouts and a borrowed native streaming HTTP port.
+- Expose native incremental HTTP responses, cookie suppression, shared-client
+  transport configuration, and per-context OTLP header mappings.
 - Select native auto-configurations explicitly in headless `ApplicationContext`
   instances and create bounded operation runtimes with `AgenticRuntime.scope()`,
   borrowing DI providers and shared services without retaining per-operation models.
@@ -18,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Route native web and pipeline spans through private DI providers, preserve W3C
+  parentage, and finalize pipeline spans/tasks on cancellation.
 - Defer application-owned observability provider disposal until native operations
   and lifecycle beans drain, preserving spans completed during shutdown.
 - Fail startup clearly when configured OTLP export lacks its optional HTTP exporter.

@@ -192,10 +192,16 @@ class TracingAutoConfiguration:
                     "Tracing exporter 'otlp' requires opentelemetry-exporter-otlp-proto-http; "
                     "install it or explicitly select exporter=none|console"
                 ) from exc
+            exporter_options: dict[str, Any] = {}
+            headers = config.get("pyfly.observability.tracing.otlp.headers")
+            if headers is not None:
+                exporter_options["headers"] = headers
             exporter = (
-                OTLPSpanExporter(endpoint=TracingAutoConfiguration._otlp_traces_endpoint(otlp_endpoint))
+                OTLPSpanExporter(
+                    endpoint=TracingAutoConfiguration._otlp_traces_endpoint(otlp_endpoint), **exporter_options
+                )
                 if otlp_endpoint
-                else OTLPSpanExporter()
+                else OTLPSpanExporter(**exporter_options)
             )
             provider.add_span_processor(BatchSpanProcessor(exporter))
             return
@@ -305,7 +311,11 @@ class MeterProviderAutoConfiguration:
                 ) from exc
             else:
                 # Transfer ownership only after each enclosing constructor succeeds.
-                exporter = OTLPMetricExporter(endpoint=endpoint)
+                exporter_options: dict[str, Any] = {}
+                headers = config.get("pyfly.observability.metrics.otlp.headers")
+                if headers is not None:
+                    exporter_options["headers"] = headers
+                exporter = OTLPMetricExporter(endpoint=endpoint, **exporter_options)
                 self._pending_resource = exporter
                 reader = PeriodicExportingMetricReader(exporter)
                 self._pending_resource = reader

@@ -19,16 +19,20 @@ of the upstream distributed trace. No-op when opentelemetry is not installed.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import cast
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, cast
 
 from starlette.requests import Request
 from starlette.responses import Response
 
+from pyfly.container.exceptions import NoSuchBeanError
 from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
 from pyfly.observability.propagation import extract_context, has_otel
 from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
+
+if TYPE_CHECKING:
+    from pyfly.context.application_context import ApplicationContext
 
 try:
     from opentelemetry import trace
@@ -57,37 +61,86 @@ class TracingFilter(OncePerRequestFilter):
     :meth:`from_config` are the supported doors now.
     """
 
-    def __init__(self, exclude_patterns: Sequence[str] | None = None) -> None:
+    def __init__(
+        self,
+        exclude_patterns: Sequence[str] | None = None,
+        *,
+        tracer_provider: trace.TracerProvider | None = None,
+        tracer_provider_resolver: Callable[[], trace.TracerProvider | None] | None = None,
+    ) -> None:
+        if tracer_provider is not None and tracer_provider_resolver is not None:
+            raise ValueError("Supply either a tracer provider or a provider resolver")
         self.exclude_patterns = list(DEFAULT_EXCLUDE_PATTERNS if exclude_patterns is None else exclude_patterns)
+        self._tracer_provider = tracer_provider
+        self._tracer_provider_resolver = tracer_provider_resolver
 
     @classmethod
-    def from_config(cls, config: object | None) -> TracingFilter:
+    def from_config(
+        cls,
+        config: object | None,
+        *,
+        tracer_provider: trace.TracerProvider | None = None,
+        tracer_provider_resolver: Callable[[], trace.TracerProvider | None] | None = None,
+    ) -> TracingFilter:
         """Build the filter from ``pyfly.observability.tracing.exclude-patterns``.
 
         Accepts a YAML list or a comma-separated string; an absent key keeps the default.
         """
-        if config is None:
-            return cls()
-        raw = getattr(config, "get")(EXCLUDE_PATTERNS_KEY)  # noqa: B009 - Config is duck-typed here
+        raw = getattr(config, "get")(EXCLUDE_PATTERNS_KEY) if config is not None else None  # noqa: B009
+        patterns: list[str] | None
         if raw is None or raw == "":
-            return cls()
-        if isinstance(raw, str):
+            patterns = None
+        elif isinstance(raw, str):
             patterns = [p.strip() for p in raw.split(",") if p.strip()]
         else:
             patterns = [str(p).strip() for p in raw if str(p).strip()]
-        return cls(exclude_patterns=patterns)
+        return cls(
+            exclude_patterns=patterns,
+            tracer_provider=tracer_provider,
+            tracer_provider_resolver=tracer_provider_resolver,
+        )
+
+    @classmethod
+    def from_context(cls, context: ApplicationContext | None) -> TracingFilter:
+        """Resolve the application's provider per request, after boot and across restarts.
+
+        The filter borrows the provider. Context-free hosts and contexts without a tracing
+        bean retain the OpenTelemetry global-provider behavior.
+        """
+        if context is None:
+            return cls()
+
+        def resolve() -> trace.TracerProvider | None:
+            if trace is None:
+                return None
+            try:
+                return context.get_bean(trace.TracerProvider)  # type: ignore[type-abstract]
+            except NoSuchBeanError:
+                return None
+
+        return cls.from_config(context.config, tracer_provider_resolver=resolve)
 
     async def do_filter(self, request: Request, call_next: CallNext) -> Response:
         if not has_otel():
             return cast(Response, await call_next(request))
         parent = extract_context(request.headers)
-        tracer = trace.get_tracer("pyfly")
+        provider = self._tracer_provider
+        if self._tracer_provider_resolver is not None:
+            provider = self._tracer_provider_resolver()
+        tracer = provider.get_tracer("pyfly") if provider is not None else trace.get_tracer("pyfly")
         with tracer.start_as_current_span(
             f"{request.method} {request.url.path}",
             context=parent,
             kind=trace.SpanKind.SERVER,
+            record_exception=False,
+            set_status_on_exception=False,
         ) as span:
-            response = cast(Response, await call_next(request))
+            try:
+                response = cast(Response, await call_next(request))
+            except BaseException as error:
+                span.set_attribute("error.type", type(error).__name__)
+                span.set_status(trace.StatusCode.ERROR)
+                raise
             try:
                 span.set_attribute("http.request.method", request.method)
                 span.set_attribute("url.path", request.url.path)

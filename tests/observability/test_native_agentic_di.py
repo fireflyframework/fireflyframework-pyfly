@@ -43,8 +43,19 @@ async def test_native_di_providers_export_real_spans_and_metrics_and_close_once(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "Authorization=Bearer%20trace-test")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_METRICS_HEADERS", "Authorization=Bearer%20metric-test")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "Authorization=Bearer%20ambient-wrong" if agentic_first else "Authorization=Bearer%20trace-test",
+    )
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        "Authorization=Bearer%20ambient-wrong" if agentic_first else "Authorization=Bearer%20metric-test",
+    )
+    trace_options: dict[str, Any] = {"endpoint": endpoint}
+    metric_options: dict[str, Any] = {"endpoint": endpoint + "/v1/metrics"}
+    if agentic_first:
+        trace_options["headers"] = {"Authorization": "Bearer trace-test"}
+        metric_options["headers"] = {"Authorization": "Bearer metric-test"}
     before = trace.get_tracer_provider(), metrics.get_meter_provider()
     selections = [AgenticAutoConfiguration, TracingAutoConfiguration, MeterProviderAutoConfiguration]
     if not agentic_first:
@@ -56,11 +67,11 @@ async def test_native_di_providers_export_real_spans_and_metrics_and_close_once(
                     "app": {"name": "native-di"},
                     "agentic": {"enabled": True, "plugin-auto-discover": False, "cost-tracking-enabled": False},
                     "observability": {
-                        "tracing": {"register-global": False, "exporter": "otlp", "otlp": {"endpoint": endpoint}},
+                        "tracing": {"register-global": False, "exporter": "otlp", "otlp": trace_options},
                         "metrics": {
                             "register-global": False,
                             "exporter": "otlp",
-                            "otlp": {"endpoint": endpoint + "/v1/metrics"},
+                            "otlp": metric_options,
                         },
                     },
                 }

@@ -78,7 +78,7 @@ def create_management_app(
     filters: list[WebFilter] = [
         RequestContextFilter(),
         CorrelationFilter(),
-        TracingFilter.from_config(context.config),
+        TracingFilter.from_context(context),
         TransactionIdFilter(),
         SecurityHeadersFilter(),
     ]
