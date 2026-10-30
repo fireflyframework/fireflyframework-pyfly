@@ -7,6 +7,9 @@ consuming messages. It follows the hexagonal architecture pattern: a single
 logic against the port, and the framework wires in the correct adapter at
 runtime.
 
+For individually managed Kafka and RabbitMQ subscriptions, delivery retention,
+and shutdown confirmation, see [Managed message subscriptions](mcp.md#managed-message-subscriptions).
+
 ---
 
 ## Table of Contents

@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.19` | 2026-10-30 | MCP transport and managed Kafka and RabbitMQ subscriptions. |
 | `26.10.18` | 2026-10-30 | Public native launch boundary with consistent server settings, TLS, active profiles and event-loop selection. |
 | `26.10.17` | 2026-10-30 | Native telemetry lifecycle and default exception privacy; complete goal-decomposition step budgets. |
 | `26.10.16` | 2026-10-29 | Correct Ollama tool-forcing capabilities and string-agent model profiles. |
@@ -116,20 +117,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.18"
+print(pyfly.__version__)  # → "26.10.19"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.18
+pyfly --version            # → pyfly, version 26.10.19
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.18) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.19) (Python 3.13.9)
 ```
 
 ---

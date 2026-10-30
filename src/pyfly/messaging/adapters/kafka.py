@@ -27,8 +27,10 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import ssl
 from collections.abc import Callable
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from pyfly.kernel.lifecycle import CONSUMER_PHASE
 from pyfly.messaging.listener_container import (
@@ -36,6 +38,7 @@ from pyfly.messaging.listener_container import (
     KafkaListenerContainer,
     ListenerContainerSettings,
     ListenerOptions,
+    UnconfirmedDrainError,
     dead_letter_headers,
     listener_options,
 )
@@ -47,6 +50,53 @@ logger = logging.getLogger(__name__)
 #: Suffix of the dead-letter topic a record goes to after its last attempt: ``orders`` -> ``orders.DLT``.
 DEFAULT_DLT_SUFFIX = ".DLT"
 DLT_BACKOFF_SECONDS = 0.5
+
+
+@dataclass(frozen=True)
+class KafkaSecurity:
+    """Connection security shared by the producer and every consumer."""
+
+    security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = "PLAINTEXT"
+    ssl_context: ssl.SSLContext | None = field(default=None, repr=False)
+    sasl_mechanism: str = "PLAIN"
+    sasl_plain_username: str | None = None
+    sasl_plain_password: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.security_protocol not in {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"}:
+            raise ValueError("Unsupported Kafka security protocol")
+        if self.security_protocol in {"SSL", "SASL_SSL"} and self.ssl_context is None:
+            raise ValueError("Kafka TLS requires an SSL context")
+        if self.security_protocol.startswith("SASL"):
+            if self.sasl_mechanism not in {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"}:
+                raise ValueError("Unsupported Kafka SASL mechanism")
+            if not self.sasl_plain_username or not self.sasl_plain_password:
+                raise ValueError("Kafka SASL requires username and password")
+
+    def client_options(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"security_protocol": self.security_protocol}
+        if self.ssl_context is not None:
+            result["ssl_context"] = self.ssl_context
+        if self.security_protocol.startswith("SASL"):
+            result.update(
+                sasl_mechanism=self.sasl_mechanism,
+                sasl_plain_username=self.sasl_plain_username,
+                sasl_plain_password=self.sasl_plain_password,
+            )
+        return result
+
+
+class KafkaSubscription:
+    """An independently stoppable listener registration."""
+
+    def __init__(self, adapter: KafkaAdapter, key: tuple[str, str | None], handler: MessageHandler) -> None:
+        self._adapter = adapter
+        self._key = key
+        self._handler = handler
+        self._stopped = False
+
+    async def stop(self) -> None:
+        await self._adapter._stop_subscription(self)
 
 
 def record_headers(record: Any) -> dict[str, str]:
@@ -108,6 +158,7 @@ class KafkaAdapter:
         settings: ListenerContainerSettings | None = None,
         auto_offset_reset: str = "latest",
         dead_letter_suffix: str | None = DEFAULT_DLT_SUFFIX,
+        security: KafkaSecurity | None = None,
         consumer_factory: Callable[..., Any] | None = None,
         producer_factory: Callable[..., Any] | None = None,
     ) -> None:
@@ -117,11 +168,13 @@ class KafkaAdapter:
         self._dead_letter_suffix = dead_letter_suffix
         self._consumer_factory = consumer_factory
         self._producer_factory = producer_factory
+        self._security = security
         self._producer: Any = None
         self._containers: dict[tuple[str, str | None], KafkaListenerContainer[Message]] = {}
         self._container_options: dict[tuple[str, str | None], ListenerOptions | None] = {}
         self._dispatch: dict[tuple[str, str | None], list[MessageHandler]] = {}
         self._started = False
+        self._subscription_lock = asyncio.Lock()
 
     async def publish(
         self,
@@ -149,20 +202,76 @@ class KafkaAdapter:
         so a subscription that arrives after ``start()`` joins the running consumer of its (topic, group),
         or starts one.
         """
+        await self.subscribe_managed(topic, handler, group)
+
+    async def subscribe_managed(
+        self, topic: str, handler: MessageHandler, group: str | None = None
+    ) -> KafkaSubscription:
         key = (topic, group)
-        self._dispatch.setdefault(key, []).append(handler)
-        if not self._started:
-            return
-        container = self._containers.get(key)
-        if container is None:
-            await self._start_container(topic, group)
-            return
-        options = listener_options(handler)
-        if options is not None and options != self._container_options.get(key):
-            self._warn_options_differ(key)
-        container.check_listeners(self._dispatch[key])
+        subscription = KafkaSubscription(self, key, handler)
+        async with self._subscription_lock:
+            existing = self._containers.get(key)
+            if existing is not None and existing._stopping:
+                raise UnconfirmedDrainError("Kafka listener is still draining")
+            self._dispatch.setdefault(key, []).append(handler)
+            try:
+                if self._started:
+                    container = self._containers.get(key)
+                    if container is None:
+                        await self._start_container(topic, group)
+                    else:
+                        options = listener_options(handler)
+                        if options is not None and options != self._container_options.get(key):
+                            self._warn_options_differ(key)
+                        container.check_listeners(self._dispatch[key])
+            except BaseException:
+                self._dispatch[key].pop()
+                if not self._dispatch[key]:
+                    del self._dispatch[key]
+                raise
+        return subscription
+
+    async def _stop_subscription(self, subscription: KafkaSubscription) -> None:
+        async with self._subscription_lock:
+            if subscription._stopped:
+                return
+            key = subscription._key
+            container = self._containers.get(key)
+            if container is not None:
+                task = asyncio.create_task(container.stop())
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    await task
+                    # Complete membership changes before propagating cancellation.
+                    cancelled = True
+                else:
+                    cancelled = False
+                self._containers.pop(key, None)
+            else:
+                cancelled = False
+            handlers = self._dispatch[key]
+            handlers.remove(subscription._handler)
+            subscription._stopped = True
+            if handlers and self._started:
+                await self._start_container(*key)
+            elif not handlers:
+                del self._dispatch[key]
+                self._container_options.pop(key, None)
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def start(self) -> None:
+        async with self._subscription_lock:
+            if not self._started and self._containers:
+                raise UnconfirmedDrainError("Previous Kafka deliveries have not drained")
+            try:
+                await self._start_locked()
+            except BaseException:
+                await self._stop_locked()
+                raise
+
+    async def _start_locked(self) -> None:
         if self._started:
             return
         self._producer = self._new_producer()
@@ -175,13 +284,23 @@ class KafkaAdapter:
     async def stop(self) -> None:
         """Stop every consumer gracefully (in parallel), then the producer: an in-flight handler may still
         publish while it finishes."""
+        async with self._subscription_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         self._started = False
-        containers = list(self._containers.values())
-        self._containers.clear()
+        entries = list(self._containers.items())
+        containers = [container for _, container in entries]
         results = await asyncio.gather(*(container.stop() for container in containers), return_exceptions=True)
-        for container, result in zip(containers, results, strict=True):
+        failure = False
+        for (key, container), result in zip(entries, results, strict=True):
             if isinstance(result, BaseException):
                 logger.warning("kafka_listener_stop_failed container=%s: %s", container.name, result)
+                failure = True
+            else:
+                self._containers.pop(key, None)
+        if failure:
+            raise UnconfirmedDrainError("Kafka listener shutdown was not confirmed")
         if self._producer is not None:
             await self._producer.stop()
 
@@ -189,17 +308,22 @@ class KafkaAdapter:
 
     def _new_producer(self) -> Any:
         if self._producer_factory is not None:
-            return self._producer_factory(bootstrap_servers=self._bootstrap_servers)
+            return self._producer_factory(bootstrap_servers=self._bootstrap_servers, **self._security_options())
         from aiokafka import AIOKafkaProducer  # type: ignore[import-untyped]
 
-        return AIOKafkaProducer(bootstrap_servers=self._bootstrap_servers)
+        return AIOKafkaProducer(bootstrap_servers=self._bootstrap_servers, **self._security_options())
 
     def _new_consumer(self, **settings: Any) -> Any:
         if self._consumer_factory is not None:
-            return self._consumer_factory(bootstrap_servers=self._bootstrap_servers, **settings)
+            return self._consumer_factory(
+                bootstrap_servers=self._bootstrap_servers, **self._security_options(), **settings
+            )
         from aiokafka import AIOKafkaConsumer
 
-        return AIOKafkaConsumer(bootstrap_servers=self._bootstrap_servers, **settings)
+        return AIOKafkaConsumer(bootstrap_servers=self._bootstrap_servers, **self._security_options(), **settings)
+
+    def _security_options(self) -> dict[str, Any]:
+        return self._security.client_options() if self._security is not None else {}
 
     def _options(self, key: tuple[str, str | None]) -> ListenerOptions | None:
         declared = [options for options in map(listener_options, self._dispatch[key]) if options is not None]

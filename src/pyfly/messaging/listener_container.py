@@ -163,6 +163,14 @@ class PoisonMessageError(Exception):
         self.__cause__ = cause
 
 
+class RetainMessageError(Exception):
+    """Retain the delivery and retry until its outcome is known or the consumer stops."""
+
+
+class UnconfirmedDrainError(RuntimeError):
+    """A delivery remains active after the bounded shutdown and cancellation waits."""
+
+
 def failure_cause(error: BaseException) -> BaseException:
     """The exception a dead-letter record names: the conversion failure behind a :class:`PoisonMessageError`."""
     return error.cause if isinstance(error, PoisonMessageError) else error
@@ -195,6 +203,11 @@ class RetryPolicy:
     def retry_delay(self, error: BaseException, attempt: int) -> float | None:
         """The delay before attempt ``attempt + 1`` of a delivery whose attempt *attempt* raised *error*, or
         ``None`` when it goes to the dead letter now."""
+        if isinstance(error, RetainMessageError):
+            try:
+                return min(30.0, max(0.1, self.backoff.delay_after(min(attempt, 10))))
+            except OverflowError:
+                return 30.0
         if isinstance(error, PoisonMessageError) or attempt >= self.max_attempts:
             return None
         if self._listed_as_not_retryable(error):
@@ -815,7 +828,9 @@ def _cancel_requested() -> bool:
     return task is not None and task.cancelling() > 0
 
 
-async def _wait_or_cancel(tasks: set[asyncio.Task[Any]], timeout: float, *, container: str) -> None:
+async def _wait_or_cancel(
+    tasks: set[asyncio.Task[Any]], timeout: float, *, container: str, cancelled: set[asyncio.Task[Any]] | None = None
+) -> None:
     """Wait for *tasks* up to *timeout*, then cancel the ones still running and wait for them to end."""
     if not tasks:
         return
@@ -830,15 +845,27 @@ async def _wait_or_cancel(tasks: set[asyncio.Task[Any]], timeout: float, *, cont
                 timeout,
             )
             for task in pending:
-                task.cancel()
-            await asyncio.wait(pending, timeout=max(timeout, 1.0))
+                if cancelled is None or task not in cancelled:
+                    task.cancel()
+                    if cancelled is not None:
+                        cancelled.add(task)
+                        task.add_done_callback(cancelled.discard)
+            _done, pending = await asyncio.wait(pending, timeout=max(timeout, 1.0))
+            if pending:
+                raise UnconfirmedDrainError("Listener delivery did not stop within the shutdown budget")
     except asyncio.CancelledError:
         for task in tasks:
-            task.cancel()
+            if cancelled is None or task not in cancelled:
+                task.cancel()
+                if cancelled is not None:
+                    cancelled.add(task)
+                    task.add_done_callback(cancelled.discard)
         raise
     for task in tasks:
         if task.done() and not task.cancelled() and task.exception() is not None:
             logger.error("listener_task_failed container=%s", container, exc_info=task.exception())
+    if cancelled is not None:
+        cancelled.difference_update(task for task in tasks if task.done())
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -905,6 +932,7 @@ class KafkaListenerContainer(Generic[T]):
         self._invoker = ListenerInvoker(settings, name=self.name)
         self._consumer: Any = None
         self._task: asyncio.Task[None] | None = None
+        self._cancelled_on_stop: set[asyncio.Task[Any]] = set()
         self._stopping = False
         #: Cleared while a record is in flight: a stop cancels the loop only when it is set.
         self._idle = asyncio.Event()
@@ -981,7 +1009,9 @@ class KafkaListenerContainer(Generic[T]):
         if task is not None:
             if self._idle.is_set():
                 task.cancel()  # nothing is in flight: the fetched records are simply not processed
-            await _wait_or_cancel({task}, self._settings.shutdown_timeout, container=self.name)
+            await _wait_or_cancel(
+                {task}, self._settings.shutdown_timeout, container=self.name, cancelled=self._cancelled_on_stop
+            )
         self._task = None
         if consumer is not None:
             try:
@@ -1374,6 +1404,7 @@ class RabbitListenerContainer(Generic[T]):
         self._stopping = False
         self._stopped = asyncio.Event()
         self._in_flight: set[asyncio.Task[None]] = set()
+        self._cancelled_on_stop: set[asyncio.Task[Any]] = set()
 
     @property
     def queue(self) -> str:
@@ -1447,7 +1478,12 @@ class RabbitListenerContainer(Generic[T]):
         if queue is not None and tag is not None:
             with contextlib.suppress(Exception):
                 await queue.cancel(tag)
-        await _wait_or_cancel(set(self._in_flight), self._settings.shutdown_timeout, container=self.name)
+        await _wait_or_cancel(
+            set(self._in_flight),
+            self._settings.shutdown_timeout,
+            container=self.name,
+            cancelled=self._cancelled_on_stop,
+        )
         self._channel = self._queue = None
         self._exchanges.clear()
         if channel is not None:
@@ -1486,22 +1522,31 @@ class RabbitListenerContainer(Generic[T]):
             return
         failure: BaseException | None = None
         async with self._limit:
-            if self._stopping:
-                await self._release(message)
-                return
-            state = DeliveryState()
-            try:
-                await self._invoker.invoke(functools.partial(self._handler, payload), state, self._targets(payload))
-            except asyncio.CancelledError as cancelled:
-                if _cancel_requested():
-                    await _shielded(self._ack(message) if state.committed else self._release(message))
-                    raise
-                failure = cancelled  # the handler's own, not a stop: the delivery failed
-            except Exception as error:
-                failure = error
-            else:
-                await self._ack(message)
-                return
+            while True:
+                if self._stopping:
+                    await self._release(message)
+                    return
+                state = DeliveryState()
+                try:
+                    await self._invoker.invoke(functools.partial(self._handler, payload), state, self._targets(payload))
+                except asyncio.CancelledError as cancelled:
+                    if _cancel_requested():
+                        await _shielded(self._ack(message) if state.committed else self._release(message))
+                        raise
+                    failure = cancelled  # the handler's own, not a stop: the delivery failed
+                except RetainMessageError as error:
+                    delay = self._policy.retry_delay(error, attempt)
+                    assert delay is not None
+                    attempt += 1
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._stopped.wait(), timeout=delay)
+                    continue
+                except Exception as error:
+                    failure = error
+                else:
+                    await self._ack(message)
+                    return
+                break
         assert failure is not None
         delay = self._policy.retry_delay(failure, attempt)
         if delay is None:
@@ -1680,7 +1725,9 @@ __all__ = [
     "PoisonMessageError",
     "RabbitDeadLetter",
     "RabbitListenerContainer",
+    "RetainMessageError",
     "RetryPolicy",
+    "UnconfirmedDrainError",
     "dead_letter_headers",
     "delivery_attempt",
     "failure_cause",

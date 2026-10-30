@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.19 (2026-10-30)
+
+### Added
+
+- Compose an authenticated, bounded MCP 2026 Streamable HTTP transport with native web lifecycle and request context.
+- Stop and drain individual RabbitMQ subscriptions without deleting their durable queues.
+- Stop and drain individual Kafka listeners while retaining committed offsets and configure shared SASL/TLS client security.
+
 ## v26.10.18 (2026-10-30)
 
 ### Added
