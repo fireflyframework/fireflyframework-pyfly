@@ -51,6 +51,7 @@ from pyfly.agentic.models.spec import (
     Credential,
     CredentialResolver,
     ModelCapabilities,
+    ModelClientPolicy,
     ModelSpec,
     ThinkingStyle,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "CredentialResolver",
     "ModelBuildError",
     "ModelCapabilities",
+    "ModelClientPolicy",
     "ModelFactory",
     "ModelOptions",
     "ModelOptionsError",

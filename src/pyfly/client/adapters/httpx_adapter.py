@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from ssl import SSLContext
 from typing import TYPE_CHECKING, Any
@@ -47,6 +49,7 @@ class HttpxClientAdapter:
         proxy: str | httpx.Proxy | None = None,
         trust_env: bool | None = None,
         retries: int = 0,
+        follow_redirects: bool = False,
     ) -> None:
         import httpx
 
@@ -63,6 +66,7 @@ class HttpxClientAdapter:
                 or proxy is not None
                 or trust_env is not None
                 or retries
+                or follow_redirects
             ):
                 raise ValueError("Configure supplied client settings on the client itself")
             self._client = client
@@ -100,21 +104,52 @@ class HttpxClientAdapter:
             verify=resolved_verify,
             proxy=proxy,
             trust_env=resolved_trust_env,
+            follow_redirects=follow_redirects,
         )
         self._owns_client = True
 
     @staticmethod
-    def _trace_headers(kwargs: dict[str, Any]) -> None:
+    def _prepare_request(kwargs: dict[str, Any]) -> None:
         from pyfly.observability.propagation import inject_headers
 
         headers = dict(kwargs.get("headers") or {})
         inject_headers(headers)
         kwargs["headers"] = headers
+        if isinstance(kwargs.get("timeout"), Mapping):
+            import httpx
+
+            kwargs["timeout"] = httpx.Timeout(**kwargs["timeout"])
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         """Perform the existing unbounded HTTPX request, including its auth semantics."""
-        self._trace_headers(kwargs)
+        if kwargs.pop("suppress_cookies", False):
+            async with self.stream(method, url, suppress_cookies=True, **kwargs) as response:
+                await response.aread()
+                return response
+        self._prepare_request(kwargs)
         return await self._client.request(method, url, **kwargs)
+
+    @asynccontextmanager
+    async def stream(self, method: str, url: str, **kwargs: Any) -> AsyncIterator[httpx.Response]:
+        """Yield an incremental response and finish cancellation-protected cleanup on exit."""
+        import httpx
+
+        self._prepare_request(kwargs)
+        suppress_cookies = kwargs.pop("suppress_cookies", False)
+        redirects = kwargs.pop("follow_redirects", False)
+        auth = kwargs.pop("auth", httpx.USE_CLIENT_DEFAULT)
+        if suppress_cookies:
+            if redirects or auth not in (None, httpx.USE_CLIENT_DEFAULT) or any(self._client.event_hooks.values()):
+                raise ValueError("Cookie-suppressed streams require no redirects, auth flows, or event hooks")
+            auth = None
+        request = self._client.build_request(method, url, **kwargs)
+        if suppress_cookies:
+            request.headers.pop("Cookie", None)
+        response = await self._client.send(request, stream=True, follow_redirects=redirects, auth=auth)
+        try:
+            yield response
+        finally:
+            await self._close_response(response)
 
     async def request_bounded(self, method: str, url: str, *, max_response_bytes: int, **kwargs: Any) -> httpx.Response:
         """Read at most the configured identity-encoded payload before retaining it.
@@ -125,6 +160,7 @@ class HttpxClientAdapter:
         """
         import httpx
 
+        suppress_cookies = kwargs.pop("suppress_cookies", False)
         if isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int) or max_response_bytes < 0:
             raise ValueError("max_response_bytes must be a non-negative integer")
         if kwargs.pop("follow_redirects", False):
@@ -133,10 +169,12 @@ class HttpxClientAdapter:
             raise ValueError("Bounded requests require explicit auth headers, not auth flows")
         if any(self._client.event_hooks.values()):
             raise ValueError("Bounded requests do not support client event hooks")
-        self._trace_headers(kwargs)
+        self._prepare_request(kwargs)
         headers = httpx.Headers(kwargs.pop("headers"))
         headers["Accept-Encoding"] = "identity"
         request = self._client.build_request(method, url, headers=headers, **kwargs)
+        if suppress_cookies:
+            request.headers.pop("Cookie", None)
         response = await self._client.send(request, stream=True, follow_redirects=False, auth=None)
         try:
             encoding = response.headers.get("content-encoding", "identity").strip().lower()

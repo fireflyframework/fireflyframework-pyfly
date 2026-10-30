@@ -14,6 +14,7 @@ from pyfly.agentic.config import AgenticConfig
 from pyfly.agentic.factory import AgentFactory
 from pyfly.agentic.memory.manager import MemoryManager
 from pyfly.agentic.memory.store import MemoryStore
+from pyfly.agentic.models import CredentialResolver, ModelClientPolicy, ModelFactory
 from pyfly.agentic.observability.events import AgentEvents
 from pyfly.agentic.observability.quota import QuotaManager
 from pyfly.agentic.observability.sinks import OTelMetricsSink
@@ -178,6 +179,13 @@ class NativeAgenticAutoConfiguration:
 
         runtime._provider_selector = providers
         return runtime
+
+    @bean
+    @conditional_on_missing_bean(ModelFactory)
+    def agentic_model_factory(
+        self, credentials: CredentialResolver | None = None, client_policy: ModelClientPolicy | None = None
+    ) -> ModelFactory:
+        return ModelFactory(credentials=credentials, client_policy=client_policy)
 
     @bean
     @conditional_on_missing_bean(AgentFactory)

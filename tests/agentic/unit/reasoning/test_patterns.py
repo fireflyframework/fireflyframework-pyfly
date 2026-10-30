@@ -37,6 +37,7 @@ from pyfly.agentic.reasoning.models import (
 from pyfly.agentic.reasoning.plan_and_execute import PlanAndExecutePattern
 from pyfly.agentic.reasoning.react import ReActPattern
 from pyfly.agentic.reasoning.reflexion import ReflexionPattern
+from pyfly.agentic.reasoning.trace import PlanStep
 from pyfly.agentic.reasoning.tree_of_thoughts import TreeOfThoughtsPattern
 
 
@@ -284,3 +285,75 @@ class TestGoalDecompositionPatternStructured:
         pattern = GoalDecompositionPattern(max_steps=15)
         result = await pattern.execute(agent, "Build app")
         assert result.success is True
+
+    async def test_budget_exhausted_after_decomposition_does_not_plan_phases(self):
+        agent = MockAgent(
+            [
+                GoalDecompositionResult(
+                    goal="Build pipeline",
+                    phases=[GoalPhase(name="Design"), GoalPhase(name="Build"), GoalPhase(name="Review")],
+                ),
+            ]
+        )
+        result = await GoalDecompositionPattern(max_steps=1).execute(agent, "Build pipeline")
+        assert result.steps_taken == 1
+        assert result.output == []
+        assert result.success is False
+        assert len(agent.prompts) == 1
+        assert len(result.trace.steps) == 1
+
+    async def test_budget_exhaustion_reports_incomplete_tasks(self):
+        agent = MockAgent(
+            [
+                GoalDecompositionResult(
+                    goal="Build pipeline",
+                    phases=[GoalPhase(name="Design", tasks=["wireframes", "review wireframes"])],
+                ),
+                "wireframed",
+            ]
+        )
+        result = await GoalDecompositionPattern(max_steps=3).execute(agent, "Build pipeline")
+        assert result.steps_taken == 3
+        assert result.output == ["wireframed"]
+        assert result.success is False
+        assert len(agent.prompts) == 2
+
+    async def test_exhausted_task_budget_does_not_plan_a_later_phase(self):
+        agent = MockAgent(
+            [
+                GoalDecompositionResult(
+                    goal="Build pipeline",
+                    phases=[
+                        GoalPhase(name="Design", tasks=["wireframes", "review wireframes"]),
+                        GoalPhase(name="Build"),
+                    ],
+                ),
+                "wireframed",
+            ]
+        )
+        result = await GoalDecompositionPattern(max_steps=3).execute(agent, "Build pipeline")
+        assert result.steps_taken == 3
+        assert result.output == ["wireframed"]
+        assert result.success is False
+        assert len(agent.prompts) == 2
+        assert [step.sub_steps for step in result.trace.steps if isinstance(step, PlanStep)] == [
+            ["Design", "Build"],
+            ["wireframes", "review wireframes"],
+        ]
+
+    async def test_exact_budget_completes_all_phases_successfully(self):
+        agent = MockAgent(
+            [
+                GoalDecompositionResult(
+                    goal="Build pipeline",
+                    phases=[GoalPhase(name="Design", tasks=["wireframes"]), GoalPhase(name="Build", tasks=["code"])],
+                ),
+                "wireframed",
+                "coded",
+            ]
+        )
+        result = await GoalDecompositionPattern(max_steps=5).execute(agent, "Build pipeline")
+        assert result.steps_taken == 5
+        assert result.output == ["wireframed", "coded"]
+        assert result.success is True
+        assert len(agent.prompts) == 3

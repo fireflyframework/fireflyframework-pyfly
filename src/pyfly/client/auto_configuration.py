@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pyfly.client.ports.outbound import HttpClientPort
+from pyfly.client.ports.outbound import HttpClientPort, StreamingHttpClientPort
 from pyfly.client.post_processor import HttpClientBeanPostProcessor
 from pyfly.client.protocols.grpc_client import GrpcClientBuilder
 from pyfly.client.protocols.websocket_client import WebSocketClientBuilder
@@ -42,8 +42,20 @@ class ClientAutoConfiguration:
 
         from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
 
-        timeout_s = int(config.get("pyfly.client.timeout", 30))
-        return HttpxClientAdapter(timeout=timedelta(seconds=timeout_s))
+        timeout_s = float(config.get("pyfly.client.timeout", 30))
+        return HttpxClientAdapter(
+            timeout=timedelta(seconds=timeout_s),
+            trust_env=str(config.get("pyfly.client.trust-env", True)).lower() == "true",
+            follow_redirects=str(config.get("pyfly.client.follow-redirects", False)).lower() == "true",
+            retries=config.get("pyfly.client.transport-retries", 0),
+            headers=config.get("pyfly.client.headers"),
+        )
+
+    @bean
+    def streaming_http_client(self, client: HttpClientPort) -> StreamingHttpClientPort:
+        if not isinstance(client, StreamingHttpClientPort):
+            raise TypeError("Configured native HTTP adapter lacks streaming support")
+        return client
 
     @bean
     def http_client_post_processor(self, config: Config) -> HttpClientBeanPostProcessor:

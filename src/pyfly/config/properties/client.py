@@ -27,5 +27,9 @@ class ClientProperties:
     """Configuration for the HTTP client subsystem (pyfly.client.*)."""
 
     timeout: int = 30
+    trust_env: bool = True
+    follow_redirects: bool = False
+    transport_retries: int = 0
+    headers: dict[str, str] = field(default_factory=dict)
     retry: dict[str, Any] = field(default_factory=lambda: {"max-attempts": 3, "base-delay": 1.0})
     circuit_breaker: dict[str, Any] = field(default_factory=lambda: {"failure-threshold": 5, "recovery-timeout": 30})

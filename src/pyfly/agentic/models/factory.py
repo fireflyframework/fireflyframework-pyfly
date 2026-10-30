@@ -55,6 +55,7 @@ from pyfly.agentic.models.spec import (
     Credential,
     CredentialResolver,
     ModelCapabilities,
+    ModelClientPolicy,
     ModelSpec,
 )
 
@@ -555,8 +556,11 @@ class ModelFactory:
             a spec carrying a reference with no resolver is refused rather than sent anonymous.
     """
 
-    def __init__(self, credentials: CredentialResolver | None = None) -> None:
+    def __init__(
+        self, credentials: CredentialResolver | None = None, *, client_policy: ModelClientPolicy | None = None
+    ) -> None:
         self._credentials = credentials
+        self._client_policy = client_policy
 
     async def build(self, spec: ModelSpec) -> Model:
         """Construct the model the spec describes."""
@@ -581,6 +585,18 @@ class ModelFactory:
                 f"The spec asks for {class_name!r}, which this factory cannot build. Known classes: "
                 f"{', '.join(sorted(BUILDERS))}."
             )
+        if self._client_policy is not None:
+            if class_name not in {"OpenAIChatModel", "OpenAIResponsesModel"} or spec.provider in {
+                "azure",
+                "azure-chat",
+                "azure-responses",
+            }:
+                raise ModelBuildError("Model client policy currently supports OpenAI-compatible Chat/Responses only")
+            if spec.provider == "ollama" and not (spec.base_url or os.getenv("OLLAMA_BASE_URL")):
+                raise ModelBuildError("Ollama client policy requires base_url or OLLAMA_BASE_URL")
+            from pyfly.agentic.models.adapters.openai_client import build_openai_model
+
+            return build_openai_model(spec, secret, profile_for(spec), class_name, self._client_policy)
         return builder(spec, secret, profile_for(spec))
 
     def settings_for(self, spec: ModelSpec) -> dict[str, Any]:

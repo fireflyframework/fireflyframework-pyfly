@@ -73,11 +73,19 @@ Do not call blocking sync bridges from the event loop that owns the asynchronous
 
 ## 21.6. Observe behavior without collecting everything
 
-Use Chapter 15's application tracing and metrics providers. The native instrumentation scope is `pyfly.agentic`; do not install another global SDK or duplicate root logging handlers for each agent. Correlate request ID, application, workflow/run, agent, tool and policy revision. Avoid unbounded labels such as complete prompts or arbitrary user input.
+Use Chapter 15's application tracing and metrics providers. The framework instrumentation scope is `pyfly.agentic`, and native model spans use `pydantic-ai`; do not install another global SDK or duplicate root logging handlers for each agent. Correlate request ID, application, workflow/run, agent, tool and policy revision. Avoid unbounded labels such as complete prompts or arbitrary user input.
 
 `instrumentation_include_content` is opt-in. Token totals, durations and outcome classifications are often sufficient for operations; prompt/response capture needs a deliberate retention and access policy. Usage records, quota decisions, workflow events, pipeline audit logs and explainability reports answer different questions. Decide which record supports troubleshooting and which record is authoritative for business review.
 
 Evaluation and experiments add structured cases, metrics, runners, comparison and storage. Optional evaluator adapters have their own dependency and provider constraints. Benchmarking in the lab can compare latency and cost, but compare representative inputs under the same configuration. Record dataset revision, model identifier, runtime settings, validator versions, sample size and failure distribution. Never present an offline deterministic result as a live-provider benchmark.
+
+Reuse the runtime's application-owned tracing and metrics providers. For isolated contexts, set `pyfly.observability.tracing.register-global` and `pyfly.observability.metrics.register-global` to `false`; let their owner flush and close exporters after runtime operations stop. A successful SDK flush is not remote collector acceptance. Native model spans use `gen_ai.usage.*`, while enclosing invoke spans use `gen_ai.aggregated_usage.*`; keep those totals separate. Priced native requests also emit `operation.cost`. Preserve metric labels when forwarding observations.
+
+Failed streams must close their async scope even if startup, memory persistence or usage finalization fails. Default spans retain exception type and error status without messages or stack traces. Content capture remains disabled, but tool schemas/descriptions and custom metadata still need a host privacy policy. A mid-response native chat span may be UNSET while the enclosing invoke/run span reports ERROR; diagnose the enclosing outcome.
+
+Headless programs can select only Agentic and observability auto-configurations through `ApplicationContext(config, auto_configurations=[...])`, then retrieve the runtime/providers as beans and call `await context.stop()` at shutdown. For per-operation model lifetimes, use `async with runtime.scope() as operation`; its agents/model state end with the scope while the application retains providers, memory and cumulative budgets. Set `pyfly.observability.metrics.exporter=none` to keep an offline DI provider without inheriting ambient OTLP endpoints.
+
+Applications can inject the native `ModelFactory` bean with a `ModelClientPolicy` bean to borrow the DI streaming HTTP port and set SDK retries/timeouts. Own each built model in the operation scope. OpenAI-compatible Chat/Responses and Ollama support this policy; other providers reject unsupported policy combinations. Transport retries and Pydantic AI per-call retry settings remain separate. Per-context OTLP header mappings avoid global environment changes. Native web and pipeline spans use the same private DI provider.
 
 ## 21.7. Qualify the service journey
 
