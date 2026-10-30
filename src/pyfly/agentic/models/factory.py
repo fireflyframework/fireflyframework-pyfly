@@ -594,7 +594,7 @@ class ModelFactory:
                 raise ModelBuildError("Model client policy currently supports OpenAI-compatible Chat/Responses only")
             if spec.provider == "ollama" and not (spec.base_url or os.getenv("OLLAMA_BASE_URL")):
                 raise ModelBuildError("Ollama client policy requires base_url or OLLAMA_BASE_URL")
-            from pyfly.agentic.models._http_client import build_openai_model
+            from pyfly.agentic.models.adapters.openai_client import build_openai_model
 
             return build_openai_model(spec, secret, profile_for(spec), class_name, self._client_policy)
         return builder(spec, secret, profile_for(spec))
