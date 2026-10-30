@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Defer application-owned observability provider disposal until native operations
+  and lifecycle beans drain, preserving spans completed during shutdown.
 - Fail startup clearly when configured OTLP export lacks its optional HTTP exporter.
 - Rebind native Pydantic AI tracers and metric instruments when the application
   selects its providers during startup, preserving resource/exporter ownership.

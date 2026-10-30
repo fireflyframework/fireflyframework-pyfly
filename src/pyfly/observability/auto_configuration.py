@@ -40,6 +40,7 @@ from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_class, conditional_on_missing_bean
 from pyfly.context.lifecycle import pre_destroy
 from pyfly.core.config import Config
+from pyfly.kernel.lifecycle import disposal_deferred
 
 _logger = logging.getLogger(__name__)
 
@@ -75,8 +76,14 @@ class TracingAutoConfiguration:
     def __init__(self) -> None:
         self._owned_provider: Any = None
 
+    async def dispose_all(self) -> None:
+        """Release the provider after application lifecycle beans finish draining."""
+        await self.close()
+
     @pre_destroy
     async def close(self) -> None:
+        if disposal_deferred(self):
+            return
         if self._owned_provider is not None:
             provider, self._owned_provider = self._owned_provider, None
             await asyncio.to_thread(provider.shutdown)
@@ -218,8 +225,14 @@ class MeterProviderAutoConfiguration:
         self._owned_provider: Any = None
         self._pending_resource: Any = None
 
+    async def dispose_all(self) -> None:
+        """Release the provider after application lifecycle beans finish draining."""
+        await self.close()
+
     @pre_destroy
     async def close(self) -> None:
+        if disposal_deferred(self):
+            return
         resource = self._owned_provider if self._owned_provider is not None else self._pending_resource
         self._owned_provider = self._pending_resource = None
         if resource is not None:

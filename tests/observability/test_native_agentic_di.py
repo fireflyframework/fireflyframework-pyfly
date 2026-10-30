@@ -255,3 +255,50 @@ async def test_di_owned_runtime_scopes_release_per_operation_models_without_clos
         assert selected_runtime() is None
     finally:
         await context.stop()
+
+
+async def test_context_shutdown_keeps_exporter_open_until_native_runs_drain():
+    import asyncio
+
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    context = ApplicationContext(
+        Config(
+            {
+                "pyfly": {
+                    "agentic": {"enabled": True, "plugin-auto-discover": False, "cost-tracking-enabled": False},
+                    "observability": {
+                        "tracing": {"register-global": False, "exporter": "none"},
+                        "metrics": {"register-global": False, "exporter": "none"},
+                    },
+                }
+            }
+        ),
+        auto_configurations=[AgenticAutoConfiguration, TracingAutoConfiguration, MeterProviderAutoConfiguration],
+    )
+    await context.start()
+    runtime = context.get_bean(AgenticRuntime)
+    exporter = InMemorySpanExporter()
+    context.get_bean(trace.TracerProvider).add_span_processor(SimpleSpanProcessor(exporter))
+    entered = asyncio.Event()
+
+    async def blocked(messages: Any, info: Any) -> ModelResponse:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("Cancellation must stop the pending model call")
+
+    agent = runtime.agent_factory.create("drain", model=FunctionModel(blocked), auto_register=False)
+    task = asyncio.create_task(agent.run("private prompt"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await context.stop()
+        await asyncio.gather(task, return_exceptions=True)
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 3, "Context closed native exporters before pending run spans ended"
+        assert {s.attributes.get("gen_ai.operation.name") for s in spans} >= {"chat", "invoke_agent"}
+        assert exporter._stopped
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await context.stop()

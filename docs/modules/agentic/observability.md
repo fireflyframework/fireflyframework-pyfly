@@ -365,7 +365,9 @@ async def execute(model, config: Config):
 `ApplicationContext(config)` retains normal entry-point discovery. Supplying
 `auto_configurations=[]` creates a plain context; an explicit list loads only
 those framework configurations. The context starts/stops its runtime and providers
-and cleans up partial startup failures. Product code retrieves beans instead of
+and cleans up partial startup failures. Provider disposal uses PyFly's resource-registry
+shutdown phase, after native operations and other lifecycle beans drain, so spans
+completed during cancellation still reach their exporter. Product code retrieves beans instead of
 calling auto-configuration factories or constructing SDK providers manually.
 
 `runtime.scope()` creates a framework-owned, activated operation runtime with a
