@@ -9,7 +9,7 @@ switch providers purely via YAML, mirroring Spring's ECM starter:
       ecm:
         enabled: true
         storage:
-          provider: s3            # local (default) | s3/aws | azure
+          provider: s3            # local (default) | s3/aws | azure | gcs
           local:
             base-dir: /var/ecm    # default: a fresh temp directory
           s3:
@@ -80,6 +80,15 @@ class EcmAutoConfiguration:
                 connection_string=config.get("pyfly.ecm.storage.azure.connection-string"),
                 account_url=config.get("pyfly.ecm.storage.azure.account-url"),
                 key_prefix=str(config.get("pyfly.ecm.storage.azure.key-prefix", "") or ""),
+            )
+
+        if provider in ("gcs", "google-cloud-storage"):
+            from pyfly.ecm.adapters.gcs import GoogleCloudStorageAdapter
+
+            return GoogleCloudStorageAdapter(
+                bucket=str(config.get("pyfly.ecm.storage.gcs.bucket", "")),
+                project=config.get("pyfly.ecm.storage.gcs.project"),
+                key_prefix=str(config.get("pyfly.ecm.storage.gcs.key-prefix", "") or ""),
             )
 
         base_dir = config.get("pyfly.ecm.storage.local.base-dir") or tempfile.mkdtemp(prefix="pyfly-ecm-")

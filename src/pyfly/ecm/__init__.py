@@ -8,6 +8,7 @@ from pyfly.ecm.adapters.adobe_sign import AdobeSignESignatureAdapter
 from pyfly.ecm.adapters.aws_s3 import AwsS3StorageAdapter
 from pyfly.ecm.adapters.azure_blob import AzureBlobStorageAdapter
 from pyfly.ecm.adapters.docusign import DocuSignESignatureAdapter
+from pyfly.ecm.adapters.gcs import GoogleCloudStorageAdapter
 from pyfly.ecm.adapters.local_filesystem import LocalFilesystemStorageAdapter
 from pyfly.ecm.adapters.logalty import LogaltyESignatureAdapter
 from pyfly.ecm.adapters.noop_esignature import NoOpESignatureAdapter
@@ -32,6 +33,7 @@ __all__ = [
     "AdobeSignESignatureAdapter",
     "AwsS3StorageAdapter",
     "AzureBlobStorageAdapter",
+    "GoogleCloudStorageAdapter",
     "DocuSignESignatureAdapter",
     "Document",
     "DocumentService",
