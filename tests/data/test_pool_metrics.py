@@ -77,6 +77,8 @@ async def test_the_time_to_obtain_a_connection_is_measured(tmp_path: Path) -> No
         SqlAlchemyPoolMetrics(MetricsRegistry()).bind(name, datasource.engine)
         held = await datasource.engine.connect()
         assert _sample("pyfly_db_pool_acquire_seconds_count", name) == 1
+        first_duration = _sample("pyfly_db_pool_acquire_seconds_sum", name) or 0.0
+        first_fast_checkouts = _acquire_bucket(name, 0.1)
 
         async def _return_it_later() -> None:
             await asyncio.sleep(0.2)
@@ -87,8 +89,9 @@ async def test_the_time_to_obtain_a_connection_is_measured(tmp_path: Path) -> No
             await conn.execute(text("SELECT 1"))
         await returning
         assert _sample("pyfly_db_pool_acquire_seconds_count", name) == 2
-        assert (_sample("pyfly_db_pool_acquire_seconds_sum", name) or 0.0) >= 0.18
-        assert _acquire_bucket(name, 0.1) == 1  # the first checkout did not wait
+        assert (_sample("pyfly_db_pool_acquire_seconds_sum", name) or 0.0) - first_duration >= 0.18
+        # Cold driver startup can itself exceed 100 ms; only the blocked checkout must miss this bucket.
+        assert _acquire_bucket(name, 0.1) == first_fast_checkouts
 
         await datasource.engine.dispose()  # a replaced pool keeps reporting
         async with datasource.engine.connect() as conn:
