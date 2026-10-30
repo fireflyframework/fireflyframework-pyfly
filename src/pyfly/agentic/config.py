@@ -96,8 +96,8 @@ class AgenticConfig(BaseModel):
     (``chat``) and tool call (``execute_tool``), nested under the framework's
     ``agent.{name}`` span, plus native GenAI token/duration metrics. **On by
     default** (gated by :attr:`observability_enabled`): the framework leaves the
-    tracer/meter providers unset (``None``) so telemetry flows through the global
-    OpenTelemetry API and costs nothing until the host wires an SDK/exporter, and
+    tracer/meter providers on the application runtime (or the API defaults when
+    no providers are supplied) so the host retains SDK/exporter ownership, and
     prompt/response content is stripped unless :attr:`instrumentation_include_content`
     is set — so default-on is safe. Set to ``False`` to suppress the per-request /
     per-tool-call span volume on very high-throughput hosts (the coarse

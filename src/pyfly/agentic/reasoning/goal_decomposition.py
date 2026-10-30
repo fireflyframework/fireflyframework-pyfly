@@ -67,7 +67,10 @@ class GoalDecompositionPattern(AbstractReasoningPattern):
     3. **Execute** -- execute each task (optionally delegating).
 
     Parameters:
-        max_steps: Maximum total tasks across all phases.
+        max_steps: Total step budget, counting the initial decomposition,
+            one planning step per phase, and one execution step per task.
+            A phase consumes a planning step even when its tasks are supplied;
+            a delegated task counts as one execution step at this level.
         task_pattern: An optional reasoning pattern to delegate individual
             tasks to.  If ``None``, tasks are executed directly by the agent.
         model: Optional LLM model for structured output calls.
@@ -126,8 +129,13 @@ class GoalDecompositionPattern(AbstractReasoningPattern):
             await memory.async_set_fact("reasoning:decomposition", decomposition.model_dump())
 
         all_results: list[str] = []
+        completed = True
 
         for phase_idx, phase in enumerate(decomposition.phases):
+            if steps >= self._max_steps:
+                logger.info("GoalDecomposition: max_steps reached, stopping")
+                completed = False
+                break
             # Phase 2: Get tasks for this phase
             tasks = phase.tasks
             if not tasks:
@@ -150,6 +158,7 @@ class GoalDecompositionPattern(AbstractReasoningPattern):
             for task_idx, task in enumerate(tasks):
                 if steps >= self._max_steps:
                     logger.info("GoalDecomposition: max_steps reached, stopping")
+                    completed = False
                     break
 
                 logger.info("GoalDecomposition: executing task %d/%d: %s", task_idx + 1, len(tasks), task[:100])
@@ -161,6 +170,9 @@ class GoalDecompositionPattern(AbstractReasoningPattern):
                 trace.add_step(obs_step)
                 await self._persist_step(memory, obs_step, steps + 1)
                 steps += 1
+
+            if not completed:
+                break
 
         trace.complete()
 
@@ -176,7 +188,7 @@ class GoalDecompositionPattern(AbstractReasoningPattern):
             output=output,
             trace=trace,
             steps_taken=steps,
-            success=True,
+            success=completed,
         )
 
     async def _decompose_goal(self, agent: AgentLike, goal: str | Sequence[Any]) -> GoalDecompositionResult:

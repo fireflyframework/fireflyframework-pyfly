@@ -24,7 +24,7 @@ import sys
 import types
 import typing
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 from pyfly.container.container import Container
@@ -168,9 +168,14 @@ class ApplicationContext:
     - BeanPostProcessor hooks
     - Application event publishing
     - Profile-aware Environment
+
+    ``auto_configurations=None`` discovers installed framework integrations.
+    An explicit sequence selects only those configurations, including an empty
+    sequence for a plain headless context. No application package scanning occurs.
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, auto_configurations: Sequence[type] | None = None) -> None:
+        self._auto_configurations = tuple(auto_configurations) if auto_configurations is not None else None
         self._config = config
         self._container = Container()
         self._environment = Environment(config)
@@ -973,7 +978,10 @@ class ApplicationContext:
         """Register built-in @auto_configuration classes for condition evaluation."""
         from pyfly.config.auto import discover_auto_configurations
 
-        for cls in discover_auto_configurations():
+        configurations = (
+            discover_auto_configurations() if self._auto_configurations is None else self._auto_configurations
+        )
+        for cls in configurations:
             if cls not in self._container._registrations:
                 self.register_bean(cls)
 

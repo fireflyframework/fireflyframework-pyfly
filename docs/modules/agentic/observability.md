@@ -8,13 +8,11 @@ Copyright 2026 Firefly Software Foundation. Licensed under the Apache License 2.
 The Observability module provides OpenTelemetry-native tracing, custom metrics, and
 event recording for GenAI workloads.
 
-> **Framework emits, host exports.** The framework *emits* model/agent spans,
-> metrics, and events through the OpenTelemetry **API**. It deliberately does
-> **not** configure the OpenTelemetry SDK, install global tracer/meter
-> providers, wire up exporters, or propagate trace context across services —
-> that is the **host** application's responsibility. Configure your SDK and
-> exporters once in the host process and the framework's telemetry flows into
-> them automatically.
+> **Agentic emits through the application's providers.** Reuse PyFly's
+> observability providers and configured exporters. The Agentic module adds native
+> model/agent spans and metrics without installing another SDK, exporter, or
+> process-wide provider. Hosts may also supply their existing OpenTelemetry
+> providers explicitly.
 
 ---
 
@@ -63,7 +61,8 @@ Two helpers complement the span context managers:
   active* span — ideal for routing decisions, cache hits, or retries where opening
   a child span would be overkill (no-op when no span is active).
 - `AgentTracer.set_error(span, error)` (static) records an exception on a span and
-  sets its status to error. The `@traced` decorator calls it automatically.
+  sets its status to error. Messages and stack traces are withheld by default;
+  `include_content=True` opts in. The `@traced` decorator calls it automatically.
 
 The module-level `default_tracer` resolves the active runtime’s tracer; the
 `@traced` decorator uses that application-owned service.
@@ -96,9 +95,9 @@ message content. It is wired per-agent via the non-deprecated
 `capabilities=[Instrumentation(...)]` API (never the deprecated `Agent(instrument=)`),
 and is **on by default**.
 
-Because the framework leaves the tracer/meter providers unset (the host owns the
-SDK/exporter) and **strips prompt/response content by default**, default-on is safe
-and costs nothing until a host wires an exporter. Disable it (e.g. to cut span
+Native instrumentation uses the runtime's application-owned tracer/meter providers
+(or the OpenTelemetry API defaults when omitted). Prompt/response content is
+excluded by default. Without a configured SDK/exporter, no telemetry is exported. Disable it (e.g. to cut span
 volume on very high-throughput hosts) with:
 
 ```bash
@@ -112,7 +111,7 @@ export PYFLY_AGENTIC_NATIVE_INSTRUMENTATION_ENABLED=false
 | `instrumentation_version` | `PYFLY_AGENTIC_INSTRUMENTATION_VERSION` | `5` | GenAI semantic-convention version. Select `5` or `6`; legacy configured values `1`–`4` are accepted and mapped to `5`. |
 | `instrumentation_event_mode` | `PYFLY_AGENTIC_INSTRUMENTATION_EVENT_MODE` | `attributes` | Legacy compatibility setting with no effect. Pydantic AI 2.x puts model-message events in span attributes; `logs` no longer enables a separate log-event stream. |
 
-The pinned Pydantic AI 2.55 uses instrumentation version `5` by default. If upgrading a host
+The pinned Pydantic AI 2.59.0 uses instrumentation version `5` by default. If upgrading a host
 that consumed version `1`–`4` telemetry or separate log events, update its queries
 and exporters for the effective version `5` span format. Version `6` is an explicit
 opt-in. `instrumentation_include_content` continues to control whether message
@@ -146,8 +145,11 @@ not exported.
 Cross-service trace-context propagation (e.g. W3C Trace Context over HTTP or
 message queues) is owned by the **host** application: configure the standard
 OpenTelemetry propagators in your host and the spans the framework emits will
-be parented correctly. The framework itself only emits spans; it does not
-inject or extract `traceparent`/`tracestate` headers.
+be parented correctly. Use `pyfly.observability.propagation.inject_headers()` and `extract_context()`
+when a custom transport needs explicit propagation. `current_trace_ids()` returns
+`(trace_id, span_id)` in 32/16-character hexadecimal form, or `None` when no valid
+span is active. A correlation ID is a separate application join key; it does not
+create an OpenTelemetry parent by itself.
 
 **Pipeline Context:**
 
@@ -275,13 +277,150 @@ for its packaged assets and security boundary.
 
 ## Exporters and SDK Configuration
 
-The framework does **not** install global providers. Runtime services can use
-explicit application-owned tracer/meter providers; otherwise they use host API
-defaults. The **host**
-application owns SDK/exporter setup (OTLP collector, console, Jaeger, Azure
-Monitor, etc.). Configure the SDK once in your host process — for example with
-the standard `opentelemetry-sdk` / `opentelemetry-exporter-otlp` packages — and
-the framework's telemetry flows into it automatically.
+Managed PyFly applications reuse the tracing and metrics beans from
+`pyfly.observability`. Configure those providers once, then inject the existing
+`AgenticRuntime`; do not create an exporter per agent. The observability extra
+supplies the SDK, while applications explicitly install their chosen exporter,
+for example `opentelemetry-exporter-otlp-proto-http`.
+
+```yaml
+pyfly:
+  observability:
+    tracing:
+      register-global: false
+      service-name: agent-service
+      exporter: otlp
+      otlp:
+        endpoint: http://collector:4318
+    metrics:
+      register-global: false
+      otlp:
+        endpoint: http://collector:4318/v1/metrics
+  agentic:
+    enabled: true
+    instrumentation-include-content: false
+```
+
+The tracing exporter accepts `console`, `otlp`, or `none`. OTLP trace base URLs
+acquire `/v1/traces`; an endpoint already ending in `/v1/traces` is preserved.
+Use a separate metrics endpoint when the receiver is trace-only. Standard OTLP
+configuration includes `OTEL_EXPORTER_OTLP_ENDPOINT`, signal-specific endpoint
+variables, and `OTEL_EXPORTER_OTLP_TRACES_HEADERS` /
+`OTEL_EXPORTER_OTLP_METRICS_HEADERS` (or shared `OTEL_EXPORTER_OTLP_HEADERS`).
+Header values follow OpenTelemetry's percent-encoded `key=value` format; obtain
+credentials from the host's environment or secret manager, not agent prompts.
+
+`register-global` defaults to `true` in PyFly observability; set it to `false`
+for isolated application contexts or workers. This keeps the provider local to
+the application. `AgenticRuntime` borrows supplied providers and does not shut
+them down. The PyFly application context closes the providers it owns.
+
+Headless hosts use a native `ApplicationContext` with an explicit selection of
+framework auto-configurations. This runs bean creation and lifecycle management
+without scanning application packages or discovering unrelated integrations:
+
+```python
+import asyncio
+
+from opentelemetry.metrics import MeterProvider
+from opentelemetry.trace import TracerProvider
+from pyfly.agentic import AgenticRuntime
+from pyfly.agentic.auto_configuration import AgenticAutoConfiguration
+from pyfly.context.application_context import ApplicationContext
+from pyfly.core.config import Config
+from pyfly.observability.auto_configuration import (
+    MeterProviderAutoConfiguration,
+    TracingAutoConfiguration,
+)
+from pyfly.observability.propagation import current_trace_ids
+
+async def execute(model, config: Config):
+    # Config enables pyfly.agentic, disables plugin discovery where appropriate,
+    # and sets register-global=false for both observability signals.
+    context = ApplicationContext(config, auto_configurations=[
+        AgenticAutoConfiguration,
+        TracingAutoConfiguration,
+        MeterProviderAutoConfiguration,
+    ])
+    await context.start()
+    try:
+        runtime = context.get_bean(AgenticRuntime)
+        tracer_provider = context.get_bean(TracerProvider)
+        meter_provider = context.get_bean(MeterProvider)
+        assert runtime.tracer_provider is tracer_provider
+        assert runtime.meter_provider is meter_provider
+        with runtime.tracer.custom_span("request"):
+            identifiers = current_trace_ids()
+            async with runtime.scope() as operation:
+                agent = operation.agent_factory.create("writer", model=model, auto_register=False)
+                async with await agent.run_stream("Write a greeting") as stream:
+                    output = await stream.get_output()
+        await asyncio.to_thread(tracer_provider.force_flush)
+        await asyncio.to_thread(meter_provider.force_flush)
+        return output, identifiers
+    finally:
+        await context.stop()
+```
+
+`ApplicationContext(config)` retains normal entry-point discovery. Supplying
+`auto_configurations=[]` creates a plain context; an explicit list loads only
+those framework configurations. The context starts/stops its runtime and providers
+and cleans up partial startup failures. Product code retrieves beans instead of
+calling auto-configuration factories or constructing SDK providers manually.
+
+`runtime.scope()` creates a framework-owned, activated operation runtime with a
+fresh agent registry and model lifecycle state. It borrows the exact DI providers,
+shared memory, usage/budget ledger, quotas, HTTP transport, and registered tool,
+prompt, reasoning and workflow services. Scope exit closes its own resources and
+releases per-operation models without closing borrowed clients or resetting budgets.
+Plugins are discovered by the application rather than rediscovered per scope.
+
+Set `pyfly.observability.metrics.exporter=none` for an offline metrics provider,
+including when ambient OTLP endpoint variables are set. `otlp` requires an
+endpoint; leaving the selector unset retains endpoint-based auto-selection. An
+explicit OTLP configuration without the optional HTTP exporter fails context
+startup clearly instead of starting an application that silently drops telemetry.
+
+Provider binding during application startup reconstructs native instrumentation
+against the selected providers. Existing resource identity and exporter ownership
+are retained. `runtime.operation()` selects execution/configuration state;
+`runtime.tracer.custom_span()` creates a trace parent. Agent calls activate their
+runtime automatically, including asynchronous streaming consumption.
+
+Always consume native streams inside their async context. Buffered and incremental
+streams release spans and restore the parent on startup, close, memory, and
+usage-finalization failures. Exceptions retain type and ERROR status while messages
+and stack traces remain excluded by default. SDK `force_flush()` confirms completion
+of a flush attempt; it is not proof that a remote collector accepted the batch.
+
+### Native attributes and metric dimensions
+
+Pydantic AI emits `invoke_agent`, `chat`, and `execute_tool` operations. Model spans
+carry `gen_ai.provider.name` (`gen_ai.system` for compatibility),
+`gen_ai.request.model`, `gen_ai.response.model`, and `gen_ai.usage.*`. Invoke spans
+use `gen_ai.aggregated_usage.*`; do not add those parent totals to model totals.
+Provider reasoning details, when reported, appear under keys such as
+`gen_ai.usage.details.reasoning_tokens`. They may already be included in output
+totals. The first-class `output_reasoning_tokens` field alone is not emitted as a
+separate span attribute by the pinned upstream version.
+
+Native metrics include `gen_ai.client.token.usage`, time-to-first-chunk observations,
+and `operation.cost` for priced responses. Preserve their model/provider/token-type
+dimensions. PyFly accounting instruments additionally use `agent`, `model`,
+`operation`, `error_type`, and `pattern` labels. Removing labels from distinct
+points can merge independent series; do not count native model and PyFly accounting
+totals twice. Failed default agent runs increment `pyfly.agentic.errors.total`.
+
+Pydantic AI 2.59.0 can leave a mid-response failed `chat` span UNSET while its
+`invoke_agent` and enclosing framework span report ERROR. Use the enclosing run's
+outcome rather than interpreting UNSET as success.
+
+Content capture defaults to `false`, including binary data and model-request
+parameters. This is not a general secret scanner: upstream still emits tool
+schemas/descriptions, and hosts choose custom attribute values. Metadata-only
+collectors should allowlist fields and apply credential redaction before storage
+or forwarding. Enabling content deliberately allows prompts, tool arguments,
+outputs, and exception descriptions, so retention/access policy belongs to the host.
 
 ---
 

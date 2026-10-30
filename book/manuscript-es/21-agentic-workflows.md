@@ -73,11 +73,17 @@ No llames a puentes síncronos bloqueantes desde el event loop propietario de la
 
 ## 21.6. Observar sin recopilar todo
 
-Utiliza los proveedores de trazas y métricas del capítulo 15. El scope nativo es `pyfly.agentic`; evita instalar otro SDK global o handlers raíz duplicados por agente. Correlaciona petición, aplicación, workflow, agente, herramienta y revisión de política. No uses prompts completos ni entradas arbitrarias como etiquetas sin límite.
+Utiliza los proveedores de trazas y métricas del capítulo 15. El scope del framework es `pyfly.agentic` y las trazas nativas del modelo usan `pydantic-ai`; evita instalar otro SDK global o handlers raíz duplicados por agente. Correlaciona petición, aplicación, workflow, agente, herramienta y revisión de política. No uses prompts completos ni entradas arbitrarias como etiquetas sin límite.
 
 `instrumentation_include_content` requiere activación explícita. Tokens, duraciones y clasificación del resultado suelen bastar para operación; recopilar contenido necesita retención y acceso deliberados. Registros de uso, decisiones de cuota, eventos de workflow, auditoría y explicabilidad responden a preguntas distintas. Define cuál sirve para diagnóstico y cuál constituye el registro autorizado de negocio.
 
 Evaluaciones y experimentos aportan casos, métricas, runners, comparaciones y almacenamiento. Los adaptadores opcionales tienen restricciones propias. El laboratorio compara latencia y coste con entradas representativas y configuración equivalente. Registra revisión del dataset, modelo, configuración, versiones de validadores, tamaño de muestra y distribución de fallos. Un resultado determinista sin red no es un benchmark de proveedor real.
+
+Reutiliza los proveedores de trazas y métricas de la aplicación. Para contextos aislados, configura `pyfly.observability.tracing.register-global` y `pyfly.observability.metrics.register-global` como `false`; su propietario debe drenar y cerrar los exportadores cuando termine el runtime. Un flush del SDK no demuestra aceptación por el colector remoto. Las trazas del modelo usan `gen_ai.usage.*` y las envolventes de invocación usan `gen_ai.aggregated_usage.*`; no sumes ambos totales. Las peticiones con precio también emiten `operation.cost`. Conserva las etiquetas de métricas al reenviarlas.
+
+Los streams deben cerrar su contexto async aunque fallen el arranque, la memoria o el registro final de uso. Por defecto, las trazas conservan tipo y estado del error sin mensajes ni stack traces. El contenido sigue desactivado, pero esquemas, descripciones de herramientas y metadatos propios necesitan una política de privacidad. Una traza chat puede quedar UNSET tras un fallo parcial mientras la invocación y el run indican ERROR; revisa el resultado envolvente.
+
+Los programas sin servidor pueden seleccionar Agentic y observabilidad con `ApplicationContext(config, auto_configurations=[...])`, obtener runtime y proveedores como beans y cerrar con `await context.stop()`. Usa `async with runtime.scope() as operation` para limitar la vida de agentes y modelos por operación; la aplicación conserva proveedores, memoria y presupuestos acumulados. Configura `pyfly.observability.metrics.exporter=none` para mantener un proveedor DI sin exportación ni endpoints OTLP heredados.
 
 ## 21.7. Validar el recorrido del servicio
 

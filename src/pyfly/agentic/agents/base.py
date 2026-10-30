@@ -424,9 +424,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
             effective_output_type = existing
 
         native_capabilities = self._build_capabilities(cfg, approval_handler, self._runtime)
-        self._native_instrumentation_settings = [
-            c.settings for c in native_capabilities if isinstance(c, Instrumentation)
-        ]
+        self._native_instrumentation_capabilities = [c for c in native_capabilities if isinstance(c, Instrumentation)]
         resolved_capabilities = [*native_capabilities, *capabilities]
 
         self._agent: PydanticAgent[AgentDepsT, OutputT] = PydanticAgent(
@@ -1171,7 +1169,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
             if cfg.observability_enabled:
                 has_obs = any(isinstance(m, ObservabilityMiddleware) for m in user_mw)
                 if not has_obs:
-                    chain.append(ObservabilityMiddleware())
+                    chain.append(ObservabilityMiddleware(include_content=cfg.instrumentation_include_content))
 
         if runtime_bound and not any(isinstance(m, NativeEventsMiddleware) for m in user_mw):
             chain.insert(0, NativeEventsMiddleware())
@@ -1266,8 +1264,8 @@ class Agent(Generic[AgentDepsT, OutputT]):
         OpenTelemetry instrumentation (SP-10). Native instrumentation emits rich
         GenAI-convention spans for each model request / tool call and is gated by
         ``observability_enabled`` *and* ``native_instrumentation_enabled``. The
-        tracer/meter/logger providers are left unset (``None``) so spans flow
-        through the global OpenTelemetry API — the host owns the SDK/exporter. The
+        tracer/meter providers come from the application runtime, falling back
+        to API defaults when unset — the host owns the SDK/exporter. The
         deprecated ``PydanticAgent(instrument=...)`` path is never used (it would trip the
         deprecation gate); ``capabilities=[Instrumentation(...)]`` is warning-free.
         """
@@ -1323,35 +1321,45 @@ class _UsageTrackingStreamContext:
         self._stream: Any = None
 
     async def __aenter__(self) -> Any:
-        enter_coro = self._stream_ctx.__aenter__()
-        if self._timeout is not None:
-            self._stream = await asyncio.wait_for(enter_coro, timeout=self._timeout)
-        else:
-            self._stream = await enter_coro
+        try:
+            enter_coro = self._stream_ctx.__aenter__()
+            if self._timeout is not None:
+                self._stream = await asyncio.wait_for(enter_coro, timeout=self._timeout)
+            else:
+                self._stream = await enter_coro
+        except BaseException as exc:
+            if self._mw_ctx is not None:
+                await self._agent._middleware.run_error(self._mw_ctx, exc)
+            raise
         return self._stream
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
-        result = await self._stream_ctx.__aexit__(exc_type, exc_val, exc_tb)
-        elapsed_ms = (time.monotonic() - self._t0) * 1000
-        # On a failed stream, fire error hooks (end span, record the breaker
-        # failure) and skip usage/after-hooks — there is no usable result.
-        if exc_type is not None:
+        try:
+            result = await self._stream_ctx.__aexit__(exc_type, exc_val, exc_tb)
+            elapsed_ms = (time.monotonic() - self._t0) * 1000
+            # On a failed stream, fire error hooks (end span, record the breaker
+            # failure) and skip usage/after-hooks — there is no usable result.
+            if exc_type is not None:
+                if self._mw_ctx is not None:
+                    await self._agent._middleware.run_error(self._mw_ctx, exc_val)
+                return result
+            # After the stream closes, usage() is available on the stream handle.
+            if self._stream is not None:
+                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+                self._agent._record_usage(
+                    self._stream,
+                    elapsed_ms,
+                    correlation_id=self._correlation_id,
+                    model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
+                )
+            # Run after-hooks on the stream handle so middleware can inspect usage.
             if self._mw_ctx is not None:
-                await self._agent._middleware.run_error(self._mw_ctx, exc_val)
+                await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             return result
-        # After the stream closes, usage() is available on the stream handle.
-        if self._stream is not None:
-            await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
-            self._agent._record_usage(
-                self._stream,
-                elapsed_ms,
-                correlation_id=self._correlation_id,
-                model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
-            )
-        # Run after-hooks on the stream handle so middleware can inspect usage.
-        if self._mw_ctx is not None:
-            await self._agent._middleware.run_after(self._mw_ctx, self._stream)
-        return result
+        except BaseException as exc:
+            if self._mw_ctx is not None:
+                await self._agent._middleware.run_error(self._mw_ctx, exc)
+            raise
 
 
 class _IncrementalStreamContext:
@@ -1391,11 +1399,16 @@ class _IncrementalStreamContext:
         self._wrapper: _IncrementalStreamWrapper | None = None
 
     async def __aenter__(self) -> Any:
-        enter_coro = self._stream_ctx.__aenter__()
-        if self._timeout is not None:
-            self._stream = await asyncio.wait_for(enter_coro, timeout=self._timeout)
-        else:
-            self._stream = await enter_coro
+        try:
+            enter_coro = self._stream_ctx.__aenter__()
+            if self._timeout is not None:
+                self._stream = await asyncio.wait_for(enter_coro, timeout=self._timeout)
+            else:
+                self._stream = await enter_coro
+        except BaseException as exc:
+            if self._mw_ctx is not None:
+                await self._agent._middleware.run_error(self._mw_ctx, exc)
+            raise
 
         # Wrap the stream to add incremental token streaming
         self._wrapper = _IncrementalStreamWrapper(self._stream)
@@ -1403,29 +1416,34 @@ class _IncrementalStreamContext:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
         try:
-            if self._wrapper is not None:
-                await self._wrapper._close_text_streams()
-        finally:
-            result = await self._stream_ctx.__aexit__(exc_type, exc_val, exc_tb)
-        elapsed_ms = (time.monotonic() - self._t0) * 1000
-        # On a failed stream, fire error hooks and skip usage/after-hooks.
-        if exc_type is not None:
+            try:
+                if self._wrapper is not None:
+                    await self._wrapper._close_text_streams()
+            finally:
+                result = await self._stream_ctx.__aexit__(exc_type, exc_val, exc_tb)
+            elapsed_ms = (time.monotonic() - self._t0) * 1000
+            # On a failed stream, fire error hooks and skip usage/after-hooks.
+            if exc_type is not None:
+                if self._mw_ctx is not None:
+                    await self._agent._middleware.run_error(self._mw_ctx, exc_val)
+                return result
+            # After the stream closes, usage() is available on the stream handle.
+            if self._stream is not None:
+                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+                self._agent._record_usage(
+                    self._stream,
+                    elapsed_ms,
+                    correlation_id=self._correlation_id,
+                    model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
+                )
+            # Run after-hooks on the stream handle so middleware can inspect usage.
             if self._mw_ctx is not None:
-                await self._agent._middleware.run_error(self._mw_ctx, exc_val)
+                await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             return result
-        # After the stream closes, usage() is available on the stream handle.
-        if self._stream is not None:
-            await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
-            self._agent._record_usage(
-                self._stream,
-                elapsed_ms,
-                correlation_id=self._correlation_id,
-                model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
-            )
-        # Run after-hooks on the stream handle so middleware can inspect usage.
-        if self._mw_ctx is not None:
-            await self._agent._middleware.run_after(self._mw_ctx, self._stream)
-        return result
+        except BaseException as exc:
+            if self._mw_ctx is not None:
+                await self._agent._middleware.run_error(self._mw_ctx, exc)
+            raise
 
 
 class _IncrementalStreamWrapper:
