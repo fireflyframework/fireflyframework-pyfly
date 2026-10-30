@@ -37,6 +37,7 @@ from pyfly.messaging.listener_container import (
     ListenerInvoker,
     RabbitDeadLetter,
     RabbitListenerContainer,
+    UnconfirmedDrainError,
     listener_options,
 )
 from pyfly.messaging.ports.outbound import MessageHandler
@@ -48,6 +49,19 @@ logger = logging.getLogger(__name__)
 def queue_name_of(topic: str, group: str | None) -> str:
     """The queue a subscription consumes: its group, or ``pyfly.<topic>`` without one."""
     return group or f"pyfly.{topic}"
+
+
+class RabbitSubscription:
+    """A single registration, independently stoppable without deleting broker data."""
+
+    def __init__(self, adapter: RabbitMQAdapter, entry: tuple[str, MessageHandler, str | None]) -> None:
+        self._adapter = adapter
+        self._entry = entry
+        self._container: RabbitListenerContainer[Message] | None = None
+        self._stopped = False
+
+    async def stop(self) -> None:
+        await self._adapter._stop_subscription(self)
 
 
 class RabbitMQAdapter:
@@ -102,6 +116,8 @@ class RabbitMQAdapter:
             lambda: settings_.concurrency or invoker.suggested_concurrency(settings_.prefetch)
         )
         self._started = False
+        self._subscription_lock = asyncio.Lock()
+        self._subscriptions: list[RabbitSubscription] = []
 
     async def publish(
         self,
@@ -128,13 +144,63 @@ class RabbitMQAdapter:
         handler: MessageHandler,
         group: str | None = None,
     ) -> None:
-        self._handlers.append((topic, handler, group))
-        # The ApplicationContext starts adapter beans before @message_listener
-        # wiring subscribes, so a late subscription must bind its own queue now.
-        if self._started:
-            await self._start_consumer(topic, handler, group)
+        await self.subscribe_managed(topic, handler, group)
+
+    async def subscribe_managed(
+        self, topic: str, handler: MessageHandler, group: str | None = None
+    ) -> RabbitSubscription:
+        entry = (topic, handler, group)
+        subscription = RabbitSubscription(self, entry)
+        async with self._subscription_lock:
+            queue = queue_name_of(topic, group)
+            if any(container.queue == queue and container._stopping for container in self._containers):
+                raise UnconfirmedDrainError("RabbitMQ listener is still draining")
+            self._handlers.append(entry)
+            self._subscriptions.append(subscription)
+            try:
+                if self._started:
+                    subscription._container = await self._start_consumer(topic, handler, group)
+            except BaseException:
+                self._handlers = [registered for registered in self._handlers if registered is not entry]
+                self._subscriptions.remove(subscription)
+                raise
+        return subscription
+
+    async def _stop_subscription(self, subscription: RabbitSubscription) -> None:
+        async with self._subscription_lock:
+            if subscription._stopped:
+                return
+            container = subscription._container
+            if container is not None:
+                task = asyncio.create_task(container.stop())
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    await task
+                    cancelled = True
+                else:
+                    cancelled = False
+                self._containers.remove(container)
+            else:
+                cancelled = False
+            subscription._container = None
+            subscription._stopped = True
+            self._handlers = [entry for entry in self._handlers if entry is not subscription._entry]
+            self._subscriptions.remove(subscription)
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def start(self) -> None:
+        async with self._subscription_lock:
+            if not self._started and self._containers:
+                raise UnconfirmedDrainError("Previous RabbitMQ deliveries have not drained")
+            try:
+                await self._start_locked()
+            except BaseException:
+                await self._stop_locked()
+                raise
+
+    async def _start_locked(self) -> None:
         if self._started:
             return
         import aio_pika
@@ -146,10 +212,12 @@ class RabbitMQAdapter:
             self._exchange_name, aio_pika.ExchangeType.DIRECT, durable=True
         )
         self._started = True
-        for topic, handler, group in self._handlers:
-            await self._start_consumer(topic, handler, group)
+        for subscription in self._subscriptions:
+            subscription._container = await self._start_consumer(*subscription._entry)
 
-    async def _start_consumer(self, topic: str, handler: MessageHandler, group: str | None) -> None:
+    async def _start_consumer(
+        self, topic: str, handler: MessageHandler, group: str | None
+    ) -> RabbitListenerContainer[Message]:
         queue = queue_name_of(topic, group)
         options = listener_options(handler)
         routes = [RabbitDeadLetter(self._dead_letter_exchange, queue, f"{queue}.dlq")]
@@ -184,16 +252,29 @@ class RabbitMQAdapter:
         except BaseException:
             self._containers.remove(container)
             raise
+        return container
 
     async def stop(self) -> None:
         """Stop every consumer gracefully (in parallel), then close the connection."""
+        async with self._subscription_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         self._started = False
         containers = list(self._containers)
-        self._containers.clear()
         results = await asyncio.gather(*(container.stop() for container in containers), return_exceptions=True)
+        failure = False
         for container, result in zip(containers, results, strict=True):
             if isinstance(result, BaseException):
                 logger.warning("rabbitmq_listener_stop_failed container=%s: %s", container.name, result)
+                failure = True
+            else:
+                self._containers.remove(container)
+                for subscription in self._subscriptions:
+                    if subscription._container is container:
+                        subscription._container = None
+        if failure:
+            raise UnconfirmedDrainError("RabbitMQ listener shutdown was not confirmed")
         if self._connection is not None:
             await self._connection.close()
             self._connection = None

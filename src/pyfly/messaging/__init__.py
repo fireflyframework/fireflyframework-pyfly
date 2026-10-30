@@ -20,11 +20,18 @@ Import concrete adapter types from the adapter package::
 """
 
 from pyfly.messaging.decorators import message_listener
-from pyfly.messaging.ports.outbound import MessageBrokerPort, MessageHandler
+from pyfly.messaging.ports.outbound import (
+    ManagedMessageBrokerPort,
+    ManagedSubscription,
+    MessageBrokerPort,
+    MessageHandler,
+)
 from pyfly.messaging.types import Message
 
 __all__ = [
     "Message",
+    "ManagedMessageBrokerPort",
+    "ManagedSubscription",
     "MessageBrokerPort",
     "MessageHandler",
     "message_listener",

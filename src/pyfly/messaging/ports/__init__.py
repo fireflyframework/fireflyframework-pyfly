@@ -13,6 +13,11 @@
 # limitations under the License.
 """Messaging ports — abstract interfaces for message broker adapters."""
 
-from pyfly.messaging.ports.outbound import MessageBrokerPort, MessageHandler
+from pyfly.messaging.ports.outbound import (
+    ManagedMessageBrokerPort,
+    ManagedSubscription,
+    MessageBrokerPort,
+    MessageHandler,
+)
 
-__all__ = ["MessageBrokerPort", "MessageHandler"]
+__all__ = ["ManagedMessageBrokerPort", "ManagedSubscription", "MessageBrokerPort", "MessageHandler"]

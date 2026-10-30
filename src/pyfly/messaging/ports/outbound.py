@@ -24,6 +24,20 @@ MessageHandler = Callable[[Message], Coroutine[Any, Any, None]]
 
 
 @runtime_checkable
+class ManagedSubscription(Protocol):
+    async def stop(self) -> None:
+        """Stop and drain this subscription without deleting its durable queue."""
+        ...
+
+
+@runtime_checkable
+class ManagedMessageBrokerPort(Protocol):
+    async def subscribe_managed(
+        self, topic: str, handler: MessageHandler, group: str | None = None
+    ) -> ManagedSubscription: ...
+
+
+@runtime_checkable
 class MessageBrokerPort(Protocol):
     async def publish(
         self,
