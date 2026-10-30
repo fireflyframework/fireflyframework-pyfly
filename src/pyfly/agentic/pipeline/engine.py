@@ -23,7 +23,7 @@ import logging
 import random
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast, runtime_checkable
@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - optional dep
 
 from pydantic import BaseModel
 
+from pyfly.agentic._runtime_context import selected_runtime
 from pyfly.agentic.config import get_config
 from pyfly.agentic.exceptions import PipelineError
 from pyfly.agentic.observability.usage import default_usage_tracker
@@ -48,6 +49,7 @@ from pyfly.agentic.pipeline.result import (
     NodeResult,
     PipelineResult,
 )
+from pyfly.data.transaction.template import shielded
 
 logger = logging.getLogger(__name__)
 
@@ -217,12 +219,48 @@ def start_otel_span(name: str, **attributes: Any) -> Any:
             return None
         if otel_trace is None:
             return None
-        return otel_trace.get_tracer("pyfly.agentic").start_span(
+        runtime = selected_runtime()
+        provider = runtime.tracer_provider if runtime is not None else None
+        tracer = (
+            provider.get_tracer("pyfly.agentic") if provider is not None else otel_trace.get_tracer("pyfly.agentic")
+        )
+        return tracer.start_span(
             name,
             attributes={f"pyfly.agentic.{k}": str(v) for k, v in attributes.items()},
         )
     except Exception:  # noqa: BLE001
         return None
+
+
+def _span_error(span: Any, error_type: str) -> None:
+    if span is not None and otel_trace is not None:
+        with contextlib.suppress(Exception):
+            span.set_attribute("error.type", error_type)
+            span.set_status(otel_trace.StatusCode.ERROR)
+
+
+@contextlib.contextmanager
+def _current_span(span: Any) -> Iterator[None]:
+    if span is None or otel_trace is None:
+        yield
+        return
+    with otel_trace.use_span(span, end_on_exit=False, record_exception=False, set_status_on_exception=False):
+        try:
+            yield
+        except BaseException as exc:
+            _span_error(span, type(exc).__name__)
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                span.end()
+
+
+async def _drain_nodes(tasks: list[asyncio.Task[Any]]) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await shielded(asyncio.gather(*tasks, return_exceptions=True))
 
 
 class PipelineEngine:
@@ -438,316 +476,321 @@ class PipelineEngine:
             pipeline=self._dag.name,
             run_id=run_id,
         )
-        await self._dispatch("on_pipeline_start", pipeline_name=self._dag.name, run_id=run_id)
+        with _current_span(_pipeline_span):
+            await self._dispatch("on_pipeline_start", pipeline_name=self._dag.name, run_id=run_id)
 
-        # Cycle-aware mode: a separate sequential frontier-following scheduler
-        # that respects ``recursion_limit``. The topological scheduler below
-        # cannot run cyclic graphs because execution_levels()/topological_sort()
-        # are undefined on them. Runtime routers also force this mode because
-        # they make routing a function of state, not topology.
-        if self._dag.is_cyclic() or self._routers:
-            return await self._run_cyclic(
-                context=context,
-                run_id=run_id,
-                all_results=all_results,
-                pre_completed=pre_completed,
-                sequence_start=sequence_start,
-                pipeline_span=_pipeline_span,
-                resume_trace_seed=resume_trace_seed,
-            )
+            # Cycle-aware mode: a separate sequential frontier-following scheduler
+            # that respects ``recursion_limit``. The topological scheduler below
+            # cannot run cyclic graphs because execution_levels()/topological_sort()
+            # are undefined on them. Runtime routers also force this mode because
+            # they make routing a function of state, not topology.
+            if self._dag.is_cyclic() or self._routers:
+                return await self._run_cyclic(
+                    context=context,
+                    run_id=run_id,
+                    all_results=all_results,
+                    pre_completed=pre_completed,
+                    sequence_start=sequence_start,
+                    pipeline_span=_pipeline_span,
+                    resume_trace_seed=resume_trace_seed,
+                )
 
-        # Topological levels ensure that all upstream dependencies of a node
-        # complete before the node itself executes.  Nodes within the same
-        # level are independent and run concurrently via asyncio.gather.
-        levels = self._dag.execution_levels()
-        trace_entries: list[ExecutionTraceEntry] = list(resume_trace_seed)
-        pipeline_start = time.perf_counter()
+            # Topological levels ensure that all upstream dependencies of a node
+            # complete before the node itself executes.  Nodes within the same
+            # level are independent and run concurrently via asyncio.gather.
+            levels = self._dag.execution_levels()
+            trace_entries: list[ExecutionTraceEntry] = list(resume_trace_seed)
+            pipeline_start = time.perf_counter()
 
-        failed_nodes: set[str] = set()
+            failed_nodes: set[str] = set()
 
-        # Eager scheduling: as soon as all of a node's dependencies are
-        # resolved we can schedule it, rather than waiting for the entire
-        # level to finish.  This is a significant improvement when nodes
-        # within a level have uneven latencies.
-        pending: set[str] = set()
-        for level in levels:
-            pending.update(level)
-        pending -= pre_completed  # resume: don't re-run nodes already completed
+            # Eager scheduling: as soon as all of a node's dependencies are
+            # resolved we can schedule it, rather than waiting for the entire
+            # level to finish.  This is a significant improvement when nodes
+            # within a level have uneven latencies.
+            pending: set[str] = set()
+            for level in levels:
+                pending.update(level)
+            pending -= pre_completed  # resume: don't re-run nodes already completed
 
-        completed: set[str] = set(pre_completed)
-        running: dict[str, asyncio.Task[NodeResult]] = {}
-        inputs_by_node: dict[str, dict[str, Any]] = {}
-        sequence = sequence_start
-        abort = False
-        pending_pause: tuple[str, str] | None = None  # (node_id, reason) if Pause
+            completed: set[str] = set(pre_completed)
+            running: dict[str, asyncio.Task[NodeResult]] = {}
+            inputs_by_node: dict[str, dict[str, Any]] = {}
+            sequence = sequence_start
+            abort = False
+            pending_pause: tuple[str, str] | None = None  # (node_id, reason) if Pause
 
-        def _edge_alive(edge: Any) -> bool:
-            """An edge is alive if it has no condition, or its condition returns True.
+            def _edge_alive(edge: Any) -> bool:
+                """An edge is alive if it has no condition, or its condition returns True.
 
-            Raises in the condition itself are treated as False — fail
-            closed so a broken predicate kills the branch instead of
-            silently waking up the wrong target.
-            """
-            if edge.condition is None:
-                return True
-            try:
-                return bool(edge.condition(context))
-            except Exception:
-                return False
-
-        def _ready(nid: str) -> bool:
-            """A node is ready when:
-            (1) every incoming edge's source has completed, AND
-            (2) at least one of those edges is alive (or it has no edges).
-
-            Entry nodes (no incoming) are always ready once scheduled.
-            """
-            edges = self._dag.incoming_edges(nid)
-            if not edges:
-                return True
-            if not all(e.source in completed for e in edges):
-                return False
-            return any(_edge_alive(e) for e in edges)
-
-        def _is_dead(nid: str) -> bool:
-            """A node is dead when every incoming edge has resolved but
-            none of them is alive. Cascades via the SKIP_DOWNSTREAM
-            mechanism so transitive successors are skipped without
-            being scheduled.
-            """
-            edges = self._dag.incoming_edges(nid)
-            if not edges:
-                return False
-            if not all(e.source in completed for e in edges):
-                return False
-            return not any(_edge_alive(e) for e in edges)
-
-        async def _record_skip(nid: str) -> None:
-            """Mark a node as skipped without scheduling it. Mirrors the
-            handling of in-flight skips returned by ``_execute_node``.
-            """
-            nonlocal sequence
-            nr = NodeResult(node_id=nid, skipped=True, error="No alive incoming edge")
-            all_results[nid] = nr
-            context.set_node_result(nid, nr)
-            completed.add(nid)
-            failed_nodes.add(nid)
-            failed_nodes.update(self._dag.transitive_successors(nid))
-            await self._emit_node_result(nr, run_id)
-            sequence += 1
-            self._record_audit(
-                run_id=run_id,
-                node_id=nid,
-                sequence=sequence,
-                nr=nr,
-                inputs_snapshot={},
-                trace_entries=trace_entries,
-            )
-
-        while pending or running:
-            # Schedule all ready nodes that aren't already running.
-            if not abort:
-                for nid in list(pending):
-                    if _ready(nid) and nid not in running:
-                        # Gather inputs outside _execute_node so we can stash
-                        # them for the audit snapshot.
-                        gathered = self._gather_inputs(nid, context)
-                        inputs_by_node[nid] = gathered
-                        # Emit start event here (visit=1 in the acyclic scheduler;
-                        # the cyclic scheduler and Send fan-out emit their own).
-                        await self._dispatch(
-                            "on_node_start",
-                            pipeline_name=self._dag.name,
-                            run_id=run_id,
-                            node_id=nid,
-                            visit=1,
-                        )
-                        task = asyncio.create_task(
-                            self._execute_node(
-                                nid,
-                                context,
-                                trace_entries,
-                                failed_nodes,
-                                inputs=gathered,
-                                run_id=run_id,
-                            ),
-                        )
-                        running[nid] = task
-                        pending.discard(nid)
-
-            if not running:
-                break
-
-            # Wait for at least one task to complete.
-            done, _ = await asyncio.wait(
-                running.values(),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            for task in done:
-                # Find the node_id for the completed task
-                node_id = next(nid for nid, t in running.items() if t is task)
-                del running[node_id]
-                completed.add(node_id)
-
+                Raises in the condition itself are treated as False — fail
+                closed so a broken predicate kills the branch instead of
+                silently waking up the wrong target.
+                """
+                if edge.condition is None:
+                    return True
                 try:
-                    nr = task.result()
-                except Exception as exc:
-                    nr = NodeResult(
-                        node_id=node_id,
-                        success=False,
-                        error=str(exc),
-                    )
+                    return bool(edge.condition(context))
+                except Exception:
+                    return False
 
-                all_results[node_id] = nr
-                context.set_node_result(node_id, nr)
+            def _ready(nid: str) -> bool:
+                """A node is ready when:
+                (1) every incoming edge's source has completed, AND
+                (2) at least one of those edges is alive (or it has no edges).
 
-                # Emit event callbacks
+                Entry nodes (no incoming) are always ready once scheduled.
+                """
+                edges = self._dag.incoming_edges(nid)
+                if not edges:
+                    return True
+                if not all(e.source in completed for e in edges):
+                    return False
+                return any(_edge_alive(e) for e in edges)
+
+            def _is_dead(nid: str) -> bool:
+                """A node is dead when every incoming edge has resolved but
+                none of them is alive. Cascades via the SKIP_DOWNSTREAM
+                mechanism so transitive successors are skipped without
+                being scheduled.
+                """
+                edges = self._dag.incoming_edges(nid)
+                if not edges:
+                    return False
+                if not all(e.source in completed for e in edges):
+                    return False
+                return not any(_edge_alive(e) for e in edges)
+
+            async def _record_skip(nid: str) -> None:
+                """Mark a node as skipped without scheduling it. Mirrors the
+                handling of in-flight skips returned by ``_execute_node``.
+                """
+                nonlocal sequence
+                nr = NodeResult(node_id=nid, skipped=True, error="No alive incoming edge")
+                all_results[nid] = nr
+                context.set_node_result(nid, nr)
+                completed.add(nid)
+                failed_nodes.add(nid)
+                failed_nodes.update(self._dag.transitive_successors(nid))
                 await self._emit_node_result(nr, run_id)
-
-                # Persist lifecycle: audit every executed visit; checkpoint only
-                # successful completions (failed nodes must re-run on resume).
                 sequence += 1
-                paused_now = nr.success and isinstance(nr.output, Pause)
                 self._record_audit(
                     run_id=run_id,
-                    node_id=node_id,
+                    node_id=nid,
                     sequence=sequence,
                     nr=nr,
-                    inputs_snapshot=inputs_by_node.get(node_id, {}),
+                    inputs_snapshot={},
                     trace_entries=trace_entries,
-                    status_override="paused" if paused_now else None,
-                    pause_reason=nr.output.reason if paused_now else None,
                 )
-                # HITL: a node returned Pause(reason=...). Halt cleanly, save
-                # a paused checkpoint, and surface the pause in the result.
-                if paused_now:
-                    pause_reason = nr.output.reason
-                    await self._dispatch(
-                        "on_node_pause",
-                        pipeline_name=self._dag.name,
-                        run_id=run_id,
-                        node_id=node_id,
-                        reason=pause_reason,
-                    )
-                    self._save_checkpoint(
-                        run_id=run_id,
-                        node_id=node_id,
-                        sequence=sequence,
-                        context=context,
-                        all_results=all_results,
-                        paused=True,
-                        pause_reason=pause_reason,
-                    )
-                    pending_pause = (node_id, pause_reason)
-                    abort = True
-                    continue
 
-                # Runtime fan-out: a node returned Send / list[Send].
-                if nr.success and _is_send_payload(nr.output):
-                    sends: list[Send] = cast(
-                        "list[Send]",
-                        list(nr.output) if isinstance(nr.output, list) else [nr.output],
-                    )
-                    ok = await self._run_sends(
-                        sends=sends,
-                        context=context,
-                        run_id=run_id,
-                        all_results=all_results,
-                        trace_entries=trace_entries,
-                        completed=completed,
-                        pending=pending,
-                    )
-                    if not ok:
-                        abort = True
-                    # Successors of the worker targets are picked up by the
-                    # normal readiness sweep on the next loop iteration.
-                    continue
+            try:
+                while pending or running:
+                    # Schedule all ready nodes that aren't already running.
+                    if not abort:
+                        for nid in list(pending):
+                            if _ready(nid) and nid not in running:
+                                # Gather inputs outside _execute_node so we can stash
+                                # them for the audit snapshot.
+                                gathered = self._gather_inputs(nid, context)
+                                inputs_by_node[nid] = gathered
+                                # Emit start event here (visit=1 in the acyclic scheduler;
+                                # the cyclic scheduler and Send fan-out emit their own).
+                                await self._dispatch(
+                                    "on_node_start",
+                                    pipeline_name=self._dag.name,
+                                    run_id=run_id,
+                                    node_id=nid,
+                                    visit=1,
+                                )
+                                task = asyncio.create_task(
+                                    self._execute_node(
+                                        nid,
+                                        context,
+                                        trace_entries,
+                                        failed_nodes,
+                                        inputs=gathered,
+                                        run_id=run_id,
+                                    ),
+                                )
+                                running[nid] = task
+                                pending.discard(nid)
 
-                if nr.success and not nr.skipped:
-                    # State overlay: a dict return from the node is a state
-                    # update; non-dict returns flow through edges as ports.
-                    if self._state_schema is not None and context.state is not None and isinstance(nr.output, dict):
-                        context.state = apply_update(context.state, nr.output, self._reducers)
-                    self._save_checkpoint(
-                        run_id=run_id,
-                        node_id=node_id,
-                        sequence=sequence,
-                        context=context,
-                        all_results=all_results,
+                    if not running:
+                        break
+
+                    # Wait for at least one task to complete.
+                    done, _ = await asyncio.wait(
+                        running.values(),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
 
-                # Handle failure strategies
-                if not nr.success and not nr.skipped:
-                    node = self._dag.nodes.get(node_id)
-                    strategy = node.failure_strategy if node else FailureStrategy.SKIP_DOWNSTREAM
-                    if strategy == FailureStrategy.FAIL_PIPELINE:
-                        abort = True
-                    elif strategy == FailureStrategy.SKIP_DOWNSTREAM:
-                        failed_nodes.add(node_id)
-                        failed_nodes.update(self._dag.transitive_successors(node_id))
+                    for task in done:
+                        # Find the node_id for the completed task
+                        node_id = next(nid for nid, t in running.items() if t is task)
+                        del running[node_id]
+                        completed.add(node_id)
 
-            # Sweep pending for nodes whose incoming edges have resolved
-            # but none is alive. Mark them skipped and cascade — this is
-            # what makes DAGEdge.condition a usable branching primitive.
-            for nid in list(pending):
-                if _is_dead(nid):
-                    await _record_skip(nid)
-                    pending.discard(nid)
+                        try:
+                            nr = task.result()
+                        except Exception as exc:
+                            nr = NodeResult(
+                                node_id=node_id,
+                                success=False,
+                                error=str(exc),
+                            )
 
-            if abort:
-                # Cancel remaining tasks
-                for t in running.values():
-                    t.cancel()
-                break
+                        all_results[node_id] = nr
+                        context.set_node_result(node_id, nr)
 
-        pipeline_elapsed = (time.perf_counter() - pipeline_start) * 1000
+                        # Emit event callbacks
+                        await self._emit_node_result(nr, run_id)
 
-        # Terminal nodes are those with no downstream edges.  The pipeline's
-        # final output is drawn from these nodes' results.
-        terminal_ids = self._dag.terminal_nodes()
-        final_outputs = {
-            nid: all_results[nid].output for nid in terminal_ids if nid in all_results and all_results[nid].success
-        }
-        final_output = list(final_outputs.values())[0] if len(final_outputs) == 1 else final_outputs or None
+                        # Persist lifecycle: audit every executed visit; checkpoint only
+                        # successful completions (failed nodes must re-run on resume).
+                        sequence += 1
+                        paused_now = nr.success and isinstance(nr.output, Pause)
+                        self._record_audit(
+                            run_id=run_id,
+                            node_id=node_id,
+                            sequence=sequence,
+                            nr=nr,
+                            inputs_snapshot=inputs_by_node.get(node_id, {}),
+                            trace_entries=trace_entries,
+                            status_override="paused" if paused_now else None,
+                            pause_reason=nr.output.reason if paused_now else None,
+                        )
+                        # HITL: a node returned Pause(reason=...). Halt cleanly, save
+                        # a paused checkpoint, and surface the pause in the result.
+                        if paused_now:
+                            pause_reason = nr.output.reason
+                            await self._dispatch(
+                                "on_node_pause",
+                                pipeline_name=self._dag.name,
+                                run_id=run_id,
+                                node_id=node_id,
+                                reason=pause_reason,
+                            )
+                            self._save_checkpoint(
+                                run_id=run_id,
+                                node_id=node_id,
+                                sequence=sequence,
+                                context=context,
+                                all_results=all_results,
+                                paused=True,
+                                pause_reason=pause_reason,
+                            )
+                            pending_pause = (node_id, pause_reason)
+                            abort = True
+                            continue
 
-        success = all(r.success or r.skipped for r in all_results.values())
+                        # Runtime fan-out: a node returned Send / list[Send].
+                        if nr.success and _is_send_payload(nr.output):
+                            sends: list[Send] = cast(
+                                "list[Send]",
+                                list(nr.output) if isinstance(nr.output, list) else [nr.output],
+                            )
+                            ok = await self._run_sends(
+                                sends=sends,
+                                context=context,
+                                run_id=run_id,
+                                all_results=all_results,
+                                trace_entries=trace_entries,
+                                completed=completed,
+                                pending=pending,
+                            )
+                            if not ok:
+                                abort = True
+                            # Successors of the worker targets are picked up by the
+                            # normal readiness sweep on the next loop iteration.
+                            continue
 
-        # Emit pipeline complete event
-        await self._dispatch(
-            "on_pipeline_complete",
-            pipeline_name=self._dag.name,
-            run_id=run_id,
-            success=success,
-            duration_ms=pipeline_elapsed,
-        )
+                        if nr.success and not nr.skipped:
+                            # State overlay: a dict return from the node is a state
+                            # update; non-dict returns flow through edges as ports.
+                            if (
+                                self._state_schema is not None
+                                and context.state is not None
+                                and isinstance(nr.output, dict)
+                            ):
+                                context.state = apply_update(context.state, nr.output, self._reducers)
+                            self._save_checkpoint(
+                                run_id=run_id,
+                                node_id=node_id,
+                                sequence=sequence,
+                                context=context,
+                                all_results=all_results,
+                            )
 
-        # Aggregate usage across all nodes for this pipeline run
-        usage_summary = self._aggregate_usage(context.correlation_id)
+                        # Handle failure strategies
+                        if not nr.success and not nr.skipped:
+                            node = self._dag.nodes.get(node_id)
+                            strategy = node.failure_strategy if node else FailureStrategy.SKIP_DOWNSTREAM
+                            if strategy == FailureStrategy.FAIL_PIPELINE:
+                                abort = True
+                            elif strategy == FailureStrategy.SKIP_DOWNSTREAM:
+                                failed_nodes.add(node_id)
+                                failed_nodes.update(self._dag.transitive_successors(node_id))
 
-        if _pipeline_span is not None:
-            _pipeline_span.end()
+                    # Sweep pending for nodes whose incoming edges have resolved
+                    # but none is alive. Mark them skipped and cascade — this is
+                    # what makes DAGEdge.condition a usable branching primitive.
+                    for nid in list(pending):
+                        if _is_dead(nid):
+                            await _record_skip(nid)
+                            pending.discard(nid)
 
-        paused_node = pending_pause[0] if pending_pause else None
-        pause_reason_final = pending_pause[1] if pending_pause else None
-        if pending_pause is not None:
-            # A paused run is not "successful" — it didn't finish.
-            success = False
+                    if abort:
+                        break
+            finally:
+                await _drain_nodes(list(running.values()))
 
-        return PipelineResult(
-            pipeline_name=self._dag.name,
-            outputs=all_results,
-            final_output=final_output,
-            execution_trace=trace_entries,
-            total_duration_ms=pipeline_elapsed,
-            success=success,
-            usage=usage_summary,
-            run_id=run_id,
-            final_state=context.state,
-            paused=pending_pause is not None,
-            paused_node=paused_node,
-            pause_reason=pause_reason_final,
-        )
+            pipeline_elapsed = (time.perf_counter() - pipeline_start) * 1000
+
+            # Terminal nodes are those with no downstream edges.  The pipeline's
+            # final output is drawn from these nodes' results.
+            terminal_ids = self._dag.terminal_nodes()
+            final_outputs = {
+                nid: all_results[nid].output for nid in terminal_ids if nid in all_results and all_results[nid].success
+            }
+            final_output = list(final_outputs.values())[0] if len(final_outputs) == 1 else final_outputs or None
+
+            success = all(r.success or r.skipped for r in all_results.values())
+
+            # Emit pipeline complete event
+            await self._dispatch(
+                "on_pipeline_complete",
+                pipeline_name=self._dag.name,
+                run_id=run_id,
+                success=success,
+                duration_ms=pipeline_elapsed,
+            )
+
+            # Aggregate usage across all nodes for this pipeline run
+            usage_summary = self._aggregate_usage(context.correlation_id)
+
+            paused_node = pending_pause[0] if pending_pause else None
+            pause_reason_final = pending_pause[1] if pending_pause else None
+            if pending_pause is not None:
+                # A paused run is not "successful" — it didn't finish.
+                success = False
+
+            if not success and pending_pause is None:
+                _span_error(_pipeline_span, "PipelineError")
+
+            return PipelineResult(
+                pipeline_name=self._dag.name,
+                outputs=all_results,
+                final_output=final_output,
+                execution_trace=trace_entries,
+                total_duration_ms=pipeline_elapsed,
+                success=success,
+                usage=usage_summary,
+                run_id=run_id,
+                final_state=context.state,
+                paused=pending_pause is not None,
+                paused_node=paused_node,
+                pause_reason=pause_reason_final,
+            )
 
     async def _run_sends(
         self,
@@ -818,14 +861,17 @@ class PipelineEngine:
         if visit_counts is not None:
             visit_counts.update(running_counts)
 
+        tasks = [asyncio.create_task(_run_one(s, v)) for s, v in zip(sends, send_visits, strict=True)]
         try:
-            results = await asyncio.gather(*(_run_one(s, v) for s, v in zip(sends, send_visits, strict=True)))
+            results = await asyncio.gather(*tasks)
         except Exception as exc:
             logger.exception("Fan-out worker crashed")
             for send in sends:
                 if send.target not in all_results:
                     all_results[send.target] = NodeResult(node_id=send.target, success=False, error=str(exc))
             return False
+        finally:
+            await _drain_nodes(tasks)
 
         all_ok = True
         for send, nr in results:
@@ -875,6 +921,7 @@ class PipelineEngine:
             next_step = self._cyclic_next(next_step, context)
 
         pending_pause: tuple[str, str] | None = None
+        interrupted = False
         try:
             while next_step is not None:
                 # --- Fan-out (list[Send]) ---------------------------------
@@ -1021,9 +1068,14 @@ class PipelineEngine:
                 except PipelineError as exc:
                     all_results[current] = NodeResult(node_id=current, success=False, error=str(exc), output=nr.output)
                     break
+        except BaseException:
+            interrupted = True
+            raise
         finally:
             elapsed = (time.perf_counter() - pipeline_start) * 1000
-            success = False if pending_pause is not None else all(r.success or r.skipped for r in all_results.values())
+            success = (
+                not interrupted and pending_pause is None and all(r.success or r.skipped for r in all_results.values())
+            )
             await self._dispatch(
                 "on_pipeline_complete",
                 pipeline_name=self._dag.name,
@@ -1031,12 +1083,11 @@ class PipelineEngine:
                 success=success,
                 duration_ms=elapsed,
             )
-            if pipeline_span is not None:
-                with contextlib.suppress(Exception):
-                    pipeline_span.end()
 
         paused_node = pending_pause[0] if pending_pause else None
         pause_reason_final = pending_pause[1] if pending_pause else None
+        if not success and pending_pause is None:
+            _span_error(pipeline_span, "PipelineError")
         return PipelineResult(
             pipeline_name=self._dag.name,
             outputs=all_results,
@@ -1183,82 +1234,82 @@ class PipelineEngine:
             visit=1,
         )
 
-        # Note: on_node_start is now emitted by the caller (run / _run_cyclic /
-        # _run_sends) so the cyclic and fan-out paths can supply the right
-        # ``visit`` number. Emitting here would duplicate the event.
+        with _current_span(_node_span):
+            # Note: on_node_start is now emitted by the caller (run / _run_cyclic /
+            # _run_sends) so the cyclic and fan-out paths can supply the right
+            # ``visit`` number. Emitting here would duplicate the event.
 
-        max_retries = node.retry_max
-        backoff_factor = node.backoff_factor
-        retries = 0
-        last_error: str | None = None
-        started_at = datetime.now(UTC)
-
-        while retries <= max_retries:
+            max_retries = node.retry_max
+            backoff_factor = node.backoff_factor
+            retries = 0
+            last_error: str | None = None
+            last_error_type = "PipelineError"
             started_at = datetime.now(UTC)
-            start_time = time.perf_counter()
-            try:
-                if node.timeout_seconds > 0:
-                    output = await asyncio.wait_for(
-                        node.step.execute(context, inputs),
-                        timeout=node.timeout_seconds,
-                    )
-                else:
-                    output = await node.step.execute(context, inputs)
 
-                elapsed = (time.perf_counter() - start_time) * 1000
-                completed_at = datetime.now(UTC)
-                trace_entries.append(
-                    ExecutionTraceEntry(
+            while retries <= max_retries:
+                started_at = datetime.now(UTC)
+                start_time = time.perf_counter()
+                try:
+                    if node.timeout_seconds > 0:
+                        output = await asyncio.wait_for(
+                            node.step.execute(context, inputs),
+                            timeout=node.timeout_seconds,
+                        )
+                    else:
+                        output = await node.step.execute(context, inputs)
+
+                    elapsed = (time.perf_counter() - start_time) * 1000
+                    completed_at = datetime.now(UTC)
+                    trace_entries.append(
+                        ExecutionTraceEntry(
+                            node_id=node_id,
+                            started_at=started_at,
+                            completed_at=completed_at,
+                            status="success",
+                        )
+                    )
+                    return NodeResult(
                         node_id=node_id,
-                        started_at=started_at,
-                        completed_at=completed_at,
-                        status="success",
+                        output=output,
+                        success=True,
+                        latency_ms=elapsed,
+                        retries=retries,
                     )
-                )
-                if _node_span is not None:
-                    _node_span.end()
-                return NodeResult(
-                    node_id=node_id,
-                    output=output,
-                    success=True,
-                    latency_ms=elapsed,
-                    retries=retries,
-                )
-            except Exception as exc:
-                last_error = str(exc)
-                retries += 1
-                if retries <= max_retries:
-                    # Exponential backoff with jitter
-                    delay = backoff_factor * (2 ** (retries - 1))
-                    jitter = random.uniform(0, delay * 0.25)  # noqa: S311
-                    backoff = delay + jitter
-                    logger.warning(
-                        "Node '%s' failed (attempt %d/%d): %s. Retrying in %.1fs",
-                        node_id,
-                        retries,
-                        max_retries + 1,
-                        exc,
-                        backoff,
-                    )
-                    await asyncio.sleep(backoff)
+                except Exception as exc:
+                    last_error = str(exc)
+                    last_error_type = type(exc).__name__
+                    retries += 1
+                    if retries <= max_retries:
+                        # Exponential backoff with jitter
+                        delay = backoff_factor * (2 ** (retries - 1))
+                        jitter = random.uniform(0, delay * 0.25)  # noqa: S311
+                        backoff = delay + jitter
+                        logger.warning(
+                            "Node '%s' failed (attempt %d/%d): %s. Retrying in %.1fs",
+                            node_id,
+                            retries,
+                            max_retries + 1,
+                            exc,
+                            backoff,
+                        )
+                        await asyncio.sleep(backoff)
 
-        completed_at = datetime.now(UTC)
-        trace_entries.append(
-            ExecutionTraceEntry(
-                node_id=node_id,
-                started_at=started_at,
-                completed_at=completed_at,
-                status="failed",
+            completed_at = datetime.now(UTC)
+            trace_entries.append(
+                ExecutionTraceEntry(
+                    node_id=node_id,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    status="failed",
+                )
             )
-        )
-        if _node_span is not None:
-            _node_span.end()
-        return NodeResult(
-            node_id=node_id,
-            success=False,
-            error=last_error,
-            retries=retries - 1,
-        )
+            _span_error(_node_span, last_error_type)
+            return NodeResult(
+                node_id=node_id,
+                success=False,
+                error=last_error,
+                retries=retries - 1,
+            )
 
     @staticmethod
     def _start_otel_span(name: str, **attributes: Any) -> Any:

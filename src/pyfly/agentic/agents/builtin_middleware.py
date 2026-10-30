@@ -387,6 +387,9 @@ class ObservabilityMiddleware:
     — a single source of truth, so nothing is double-counted.
     """
 
+    def __init__(self, *, include_content: bool = False) -> None:
+        self._include_content = include_content
+
     async def before_run(self, context: MiddlewareContext) -> None:
         """Open an OTel span, make it the current context, and emit agent-started."""
         from pyfly.agentic.observability.tracer import default_tracer
@@ -455,9 +458,15 @@ class ObservabilityMiddleware:
         span = context.metadata.pop("_otel_span", None)
         if span is not None:
             with contextlib.suppress(Exception):
-                span.record_exception(exc)
-                span.set_status(_trace.Status(_trace.StatusCode.ERROR, str(exc)))
+                from pyfly.agentic.observability.tracer import AgentTracer
+
+                AgentTracer.set_error(span, exc, include_content=self._include_content)
             span.end()
+            from pyfly.agentic.observability.metrics import default_metrics
+
+            default_metrics.record_error(
+                operation=context.method or "run", agent=context.agent_name, error_type=type(exc).__name__
+            )
 
 
 # -- ExplainabilityMiddleware ------------------------------------------------

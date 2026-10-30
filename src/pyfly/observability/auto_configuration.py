@@ -40,6 +40,7 @@ from pyfly.container.bean import bean
 from pyfly.context.conditions import auto_configuration, conditional_on_class, conditional_on_missing_bean
 from pyfly.context.lifecycle import pre_destroy
 from pyfly.core.config import Config
+from pyfly.kernel.lifecycle import disposal_deferred
 
 _logger = logging.getLogger(__name__)
 
@@ -75,8 +76,14 @@ class TracingAutoConfiguration:
     def __init__(self) -> None:
         self._owned_provider: Any = None
 
+    async def dispose_all(self) -> None:
+        """Release the provider after application lifecycle beans finish draining."""
+        await self.close()
+
     @pre_destroy
     async def close(self) -> None:
+        if disposal_deferred(self):
+            return
         if self._owned_provider is not None:
             provider, self._owned_provider = self._owned_provider, None
             await asyncio.to_thread(provider.shutdown)
@@ -180,17 +187,21 @@ class TracingAutoConfiguration:
                 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import-not-found, unused-ignore]
                     OTLPSpanExporter,
                 )
-            except ImportError:
-                _logger.warning(
-                    "Tracing exporter 'otlp' requested but opentelemetry-exporter-otlp is not "
-                    "installed — spans will be dropped. Install it or set "
-                    "pyfly.observability.tracing.exporter=console."
-                )
-                return
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Tracing exporter 'otlp' requires opentelemetry-exporter-otlp-proto-http; "
+                    "install it or explicitly select exporter=none|console"
+                ) from exc
+            exporter_options: dict[str, Any] = {}
+            headers = config.get("pyfly.observability.tracing.otlp.headers")
+            if headers is not None:
+                exporter_options["headers"] = headers
             exporter = (
-                OTLPSpanExporter(endpoint=TracingAutoConfiguration._otlp_traces_endpoint(otlp_endpoint))
+                OTLPSpanExporter(
+                    endpoint=TracingAutoConfiguration._otlp_traces_endpoint(otlp_endpoint), **exporter_options
+                )
                 if otlp_endpoint
-                else OTLPSpanExporter()
+                else OTLPSpanExporter(**exporter_options)
             )
             provider.add_span_processor(BatchSpanProcessor(exporter))
             return
@@ -220,8 +231,14 @@ class MeterProviderAutoConfiguration:
         self._owned_provider: Any = None
         self._pending_resource: Any = None
 
+    async def dispose_all(self) -> None:
+        """Release the provider after application lifecycle beans finish draining."""
+        await self.close()
+
     @pre_destroy
     async def close(self) -> None:
+        if disposal_deferred(self):
+            return
         resource = self._owned_provider if self._owned_provider is not None else self._pending_resource
         self._owned_provider = self._pending_resource = None
         if resource is not None:
@@ -261,6 +278,10 @@ class MeterProviderAutoConfiguration:
             if not isinstance(current, _ProxyMeterProvider):
                 return current
 
+        kind = str(config.get("pyfly.observability.metrics.exporter", "")).strip().lower()
+        if kind not in {"", "none", "otlp"}:
+            raise ValueError("pyfly.observability.metrics.exporter must be none or otlp")
+
         explicit = config.get("pyfly.observability.metrics.otlp.endpoint") or os.environ.get(
             "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
         )
@@ -271,6 +292,11 @@ class MeterProviderAutoConfiguration:
             str(explicit) if explicit else (self._otlp_metrics_endpoint(str(derived_from)) if derived_from else "")
         )
 
+        if kind == "none":
+            endpoint = ""
+        elif kind == "otlp" and not endpoint:
+            raise ValueError("OTLP metrics exporter requires an explicit or standard OTLP endpoint")
+
         readers: list[Any] = []
         if endpoint:
             try:
@@ -278,14 +304,18 @@ class MeterProviderAutoConfiguration:
                     OTLPMetricExporter,
                 )
                 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-            except ImportError:
-                _logger.warning(
-                    "An OTLP metrics endpoint is configured but opentelemetry-exporter-otlp is not "
-                    "installed — metrics will be dropped. Install it or unset the endpoint."
-                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "OTLP metrics requires opentelemetry-exporter-otlp-proto-http; "
+                    "install it or explicitly select metrics.exporter=none"
+                ) from exc
             else:
                 # Transfer ownership only after each enclosing constructor succeeds.
-                exporter = OTLPMetricExporter(endpoint=endpoint)
+                exporter_options: dict[str, Any] = {}
+                headers = config.get("pyfly.observability.metrics.otlp.headers")
+                if headers is not None:
+                    exporter_options["headers"] = headers
+                exporter = OTLPMetricExporter(endpoint=endpoint, **exporter_options)
                 self._pending_resource = exporter
                 reader = PeriodicExportingMetricReader(exporter)
                 self._pending_resource = reader

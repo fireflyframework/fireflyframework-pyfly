@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from typing import Any, cast
 
 from opentelemetry import trace
-from opentelemetry.trace import Span, StatusCode, Tracer
+from opentelemetry.trace import Span, Status, StatusCode, Tracer
 
 from pyfly.agentic._runtime_context import RuntimeDefault
 
@@ -36,16 +36,32 @@ class AgentTracer:
     """High-level tracer that creates spans with Firefly-specific attributes.
 
     Parameters:
-        service_name: The OpenTelemetry service name.
+        service_name: OpenTelemetry instrumentation scope name.
+        tracer_provider: Application-owned provider; the API default when omitted.
+        include_content: Whether exception messages and stack traces may be recorded.
     """
 
-    def __init__(self, service_name: str = _TRACER_NAME, *, tracer_provider: Any = None) -> None:
+    def __init__(
+        self, service_name: str = _TRACER_NAME, *, tracer_provider: Any = None, include_content: bool = False
+    ) -> None:
         self._tracer: Tracer = trace.get_tracer(service_name, tracer_provider=tracer_provider)
+        self._include_content = include_content
+
+    @contextmanager
+    def _span(self, name: str, attributes: dict[str, Any]) -> Generator[Span]:
+        with self._tracer.start_as_current_span(
+            name, attributes=attributes, record_exception=False, set_status_on_exception=False
+        ) as span:
+            try:
+                yield span
+            except BaseException as exc:
+                self.set_error(span, exc, include_content=self._include_content)
+                raise
 
     @contextmanager
     def agent_span(self, agent_name: str, *, model: str = "", **attributes: Any) -> Generator[Span]:
         """Create a span for an agent run."""
-        with self._tracer.start_as_current_span(
+        with self._span(
             f"agent.{agent_name}",
             attributes={
                 "pyfly.agentic.agent.name": agent_name,
@@ -58,7 +74,7 @@ class AgentTracer:
     @contextmanager
     def tool_span(self, tool_name: str, **attributes: Any) -> Generator[Span]:
         """Create a span for a tool execution."""
-        with self._tracer.start_as_current_span(
+        with self._span(
             f"tool.{tool_name}",
             attributes={
                 "pyfly.agentic.tool.name": tool_name,
@@ -70,7 +86,7 @@ class AgentTracer:
     @contextmanager
     def reasoning_span(self, pattern_name: str, step: int = 0, **attributes: Any) -> Generator[Span]:
         """Create a span for a reasoning step."""
-        with self._tracer.start_as_current_span(
+        with self._span(
             f"reasoning.{pattern_name}.step_{step}",
             attributes={
                 "pyfly.agentic.reasoning.pattern": pattern_name,
@@ -83,7 +99,7 @@ class AgentTracer:
     @contextmanager
     def custom_span(self, name: str, **attributes: Any) -> Generator[Span]:
         """Create a span with arbitrary attributes."""
-        with self._tracer.start_as_current_span(
+        with self._span(
             name,
             attributes={f"pyfly.agentic.{k}": str(v) for k, v in attributes.items()},
         ) as span:
@@ -105,10 +121,17 @@ class AgentTracer:
         )
 
     @staticmethod
-    def set_error(span: Span, error: Exception) -> None:
-        """Record an exception on the span and set error status."""
-        span.set_status(StatusCode.ERROR, str(error))
-        span.record_exception(error)
+    def set_error(span: Span, error: BaseException, *, include_content: bool = False) -> None:
+        """Mark an error, withholding messages and stack traces unless content capture is enabled."""
+        span.set_status(Status(StatusCode.ERROR, str(error) if include_content else None))
+        if include_content:
+            span.record_exception(error)
+        else:
+            error_type = type(error)
+            name = error_type.__qualname__
+            if error_type.__module__ != "builtins":
+                name = f"{error_type.__module__}.{name}"
+            span.add_event("exception", attributes={"exception.type": name})
 
 
 # Module-level default tracer

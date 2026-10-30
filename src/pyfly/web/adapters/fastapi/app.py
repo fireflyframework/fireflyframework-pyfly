@@ -174,7 +174,7 @@ def create_app(
     filters: list[WebFilter] = [
         RequestContextFilter(),
         CorrelationFilter(),
-        TracingFilter(),
+        TracingFilter.from_context(context),
         TransactionIdFilter(),
     ]
     if request_logging_enabled:

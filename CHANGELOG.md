@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.17 (2026-10-30)
+
+### Added
+
+- Build OpenAI-compatible and Ollama models through a DI-owned `ModelFactory`
+  with explicit SDK retry/timeouts and a borrowed native streaming HTTP port.
+- Expose native incremental HTTP responses, cookie suppression, shared-client
+  transport configuration, and per-context OTLP header mappings.
+- Select native auto-configurations explicitly in headless `ApplicationContext`
+  instances and create bounded operation runtimes with `AgenticRuntime.scope()`,
+  borrowing DI providers and shared services without retaining per-operation models.
+- Select `pyfly.observability.metrics.exporter=none` to suppress ambient OTLP
+  export while keeping the DI-owned metrics provider available.
+
+### Fixed
+
+- Route native web and pipeline spans through private DI providers, preserve W3C
+  parentage, and finalize pipeline spans/tasks on cancellation.
+- Defer application-owned observability provider disposal until native operations
+  and lifecycle beans drain, preserving spans completed during shutdown.
+- Fail startup clearly when configured OTLP export lacks its optional HTTP exporter.
+- Rebind native Pydantic AI tracers and metric instruments when the application
+  selects its providers during startup, preserving resource/exporter ownership.
+- Close buffered and incremental stream spans and restore the parent context on
+  startup, native close, memory, and usage-finalization failures.
+- Withhold exception messages and stack traces in Agentic spans by default; retain
+  error types/status and count failed runs without duplicating token metrics.
+- Enforce the goal-decomposition step budget across decomposition, phase planning,
+  and task execution. Stop before planning later phases after exhaustion and report
+  incomplete goals as unsuccessful while retaining completed task results.
+
 ## v26.10.16 (2026-10-29)
 
 ### Fixed

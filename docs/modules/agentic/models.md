@@ -160,6 +160,47 @@ credential of the wrong shape, invalid Azure configuration — raises `ModelBuil
 what is wrong. It is a configuration error, so the message says what would fix it and nothing
 retries.
 
+## Native DI transport and SDK policy
+
+With Agentic enabled, `NativeAgenticAutoConfiguration` supplies a `ModelFactory`
+bean. It consumes an optional application `CredentialResolver` and
+`ModelClientPolicy` bean. Register policy in your application configuration and
+include `ClientAutoConfiguration` when selecting auto-configurations explicitly:
+
+```python
+from pyfly.agentic.models import ModelClientPolicy, ModelFactory
+from pyfly.client import StreamingHttpClientPort
+from pyfly.container import bean, configuration
+
+@configuration
+class ModelConfiguration:
+    @bean
+    def model_client_policy(self, http: StreamingHttpClientPort) -> ModelClientPolicy:
+        return ModelClientPolicy(
+            max_retries=0, http_client=http, timeout=120, connect_timeout=10,
+        )
+```
+
+Retrieve `context.get_bean(ModelFactory)`, build a `ModelSpec`, and own the returned
+model inside `async with runtime.scope() as operation` using
+`operation.own(await factory.build(spec))`. The scope closes the factory-owned
+SDK wrapper; the context owns the shared HTTP port. Incremental responses remain
+streamed through that port, with W3C context propagation and response cleanup on
+cancellation. The bridge suppresses pooled cookies and redirects.
+
+The policy supports OpenAI Chat, OpenAI Responses, and Ollama. Other provider/policy
+combinations fail explicitly with `ModelBuildError`; omitting the policy preserves
+existing provider construction. Ollama retains its native profile and reads only
+its own endpoint/credential variables. `connect_timeout` requires a native port.
+An inline transient credential can be supplied with `Credential.api_key(secret)`;
+credential references require the injected resolver. Neither changes environment
+variables.
+
+`max_retries` controls SDK retries independently of HTTP transport retries and
+Agent output/tool retries. Pydantic AI per-call `model_settings={"max_retries": 0}`
+can override this default; applications requiring one provider attempt must own
+that setting and set native transport retries to zero as well.
+
 ## OpenAI: choose the API explicitly
 
 PyFly Agentic preserves the existing meaning of `openai` and `azure`: Chat Completions.

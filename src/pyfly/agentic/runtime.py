@@ -9,9 +9,9 @@ import inspect
 import logging
 import threading
 import weakref
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator
 from concurrent.futures import Future
-from contextlib import contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar, Token
 from typing import Any, TypeVar
 
@@ -98,7 +98,9 @@ class AgenticRuntime:
             )
         )
         self.tracer_provider, self.meter_provider = tracer_provider, meter_provider
-        self.tracer = AgentTracer(tracer_provider=tracer_provider)
+        self.tracer = AgentTracer(
+            tracer_provider=tracer_provider, include_content=self.config.instrumentation_include_content
+        )
         self.metrics = AgentMetrics(meter_provider=meter_provider)
         self.events = events if events is not None else AgentEvents(publisher=event_publisher)
         if events is None:
@@ -162,12 +164,26 @@ class AgenticRuntime:
 
     def bind_providers(self, tracer_provider: Any, meter_provider: Any) -> None:
         self.tracer_provider, self.meter_provider = tracer_provider, meter_provider
-        self.tracer = AgentTracer(tracer_provider=tracer_provider)
+        self.tracer = AgentTracer(
+            tracer_provider=tracer_provider, include_content=self.config.instrumentation_include_content
+        )
         self.metrics = AgentMetrics(meter_provider=meter_provider)
+        from pydantic_ai.models.instrumented import InstrumentationSettings
+
         for agent in self._agents:
-            for settings in agent._native_instrumentation_settings:
-                settings.tracer_provider = tracer_provider
-                settings.meter_provider = meter_provider
+            for capability in agent._native_instrumentation_capabilities:
+                settings = capability.settings
+                # PydanticAI resolves its tracer and metric instruments at construction;
+                # adding provider attributes to an existing settings object cannot rebind them.
+                capability.settings = InstrumentationSettings(
+                    tracer_provider=tracer_provider,
+                    meter_provider=meter_provider,
+                    include_content=settings.include_content,
+                    include_binary_content=settings.include_binary_content,
+                    include_model_request_parameters=settings.include_model_request_parameters,
+                    version=settings.version,
+                    use_aggregated_usage_attribute_names=settings.use_aggregated_usage_attribute_names,
+                )
 
     def configure(self, config: AgenticConfig) -> None:
         self.config = config
@@ -209,6 +225,42 @@ class AgenticRuntime:
                 if task is not None and not already:
                     with self._state_lock:
                         self._tasks.discard(task)
+
+    @asynccontextmanager
+    async def scope(self) -> AsyncIterator[AgenticRuntime]:
+        """Own a bounded operation runtime while borrowing this application's services.
+
+        Providers, memory, usage/budget accounting, quotas and registered tool/prompt/
+        reasoning/workflow services remain application-owned. Agents and provider-model
+        lifecycle state belong to the child and are released with the scope. Plugins
+        are discovered by the application, not rediscovered for each operation.
+        """
+        with self.operation():
+            child = self.own(
+                AgenticRuntime(
+                    self.config.model_copy(update={"plugin_auto_discover": False}),
+                    tool_registry=self.tool_registry,
+                    reasoning_registry=self.reasoning_registry,
+                    prompt_registry=self.prompt_registry,
+                    workflow_registry=self.workflow_registry,
+                    usage_tracker=self.usage_tracker,
+                    quota_manager=self.quota_manager,
+                    memory=self.memory,
+                    encryption_provider=self.encryption_provider,
+                    http_client=self.http_client,
+                    events=self.events,
+                    container=self.container,
+                    tracer_provider=self.tracer_provider,
+                    meter_provider=self.meter_provider,
+                )
+            )
+            try:
+                async with child:
+                    yield child
+            finally:
+                await child.aclose()
+                if child._closed:
+                    self._resources.pop(id(child), None)
 
     def own(self, resource: T) -> T:
         if isinstance(resource, Model):
