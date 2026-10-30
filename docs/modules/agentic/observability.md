@@ -312,8 +312,10 @@ credentials from the host's environment or secret manager, not agent prompts.
 
 For isolated contexts, set `pyfly.observability.tracing.otlp.headers` and
 `pyfly.observability.metrics.otlp.headers` to header mappings loaded from the
-host's secret store. An explicit mapping overrides ambient OTLP headers for that
-signal without mutating process environment; omitted mappings preserve standard
+host's secret store. The native SDK merges these mappings with ambient OTLP
+headers: explicit keys override same-name environment keys case-insensitively,
+while unrelated environment keys remain. This does not mutate process environment
+or provide exclusive header isolation. Omitted mappings preserve standard
 OpenTelemetry environment behavior. Do not capture these credentials as span
 attributes or model content.
 
