@@ -1220,6 +1220,7 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
 - **`v26.10.27`** (2026-10-31) — portable MCP sessions, process scheduling control, transactional consumer fences and verified TLS/privacy defaults.
+- **`v26.10.26`** (2026-10-31) — hide model credential secrets from representations; expose immutable, provider-specific native text-rate quotes and reject invalid scalar cost results.
 - **`v26.10.25`** (2026-10-31) — retain configured policies when their dependencies arrive later and fail startup for broken optional dependency graphs.
 - **`v26.10.24`** (2026-10-31) — add primary-authoritative read-only transactions with preserved isolation, native participants and replica-join rejection.
 - **`v26.10.23`** (2026-10-31) — compose immutable native authorization policies, approval constraints and bounded execution limits. See the [policy API](docs/modules/policy.md).

@@ -32,6 +32,7 @@ from pyfly.agentic.observability.cost_resolvers import (
 from pyfly.agentic.observability.decorators import metered, traced
 from pyfly.agentic.observability.events import AgentEvent, AgentEvents, default_events
 from pyfly.agentic.observability.metrics import AgentMetrics, default_metrics
+from pyfly.agentic.observability.pricing import ModelPriceQuote, quote_model_price
 from pyfly.agentic.observability.sinks import (
     CostSink,
     EventBusSink,
@@ -65,6 +66,7 @@ __all__ = [
     "AgentTracer",
     "JSONLFileSink",
     "LoggingSink",
+    "ModelPriceQuote",
     "OTelMetricsSink",
     "ScopeContext",
     "UnknownModelCostError",
@@ -78,6 +80,7 @@ __all__ = [
     "genai_prices_cost",
     "metered",
     "provider_reported_cost",
+    "quote_model_price",
     "resolve_cost",
     "traced",
 ]

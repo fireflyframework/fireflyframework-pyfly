@@ -95,10 +95,13 @@ class Credential:
     reference the factory redeems through a :class:`CredentialResolver` (:meth:`reference`) —
     the shape for a process that must never hold a key — and no credential at all
     (:meth:`none`) for a local model or a key the SDK reads from its own environment.
+
+    Representations omit the secret. Explicit field access and dataclass serialization
+    retain it for intentional credential handling.
     """
 
     kind: Literal["api_key", "reference", "none"]
-    secret: str | None = None
+    secret: str | None = field(default=None, repr=False)
     reference_id: str | None = None
     version: int = 1
 

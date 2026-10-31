@@ -36,6 +36,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Customizers returning `None` remain compatible. Hand-opened transactions using a returned
   synchronization must supply a registration callback; dropping it fails closed.
 
+## v26.10.26 (2026-10-31)
+
+### Added
+
+- Expose frozen `ModelPriceQuote` values and `quote_model_price()` for known base
+  USD input/output text-token rates, using an explicit pricing provider and public
+  timestamp/context selection. Record effective Decimal rates, source version and
+  selected-row digest without retaining context values or probing usage totals.
+- Return no quote for missing, invalid or usage-tiered rates, local/transport-only
+  identities or cross-provider fallback rows so applications can choose an explicit
+  fallback before reserving durable budgets.
+
+### Fixed
+
+- Omit the model credential secret from `Credential` representations and nested
+  `ModelSpec` representations without changing intentional field access, dataclass
+  serialization, equality or native factory/resolver credential use.
+- Skip invalid scalar cost resolver results (booleans, non-numeric, negative or
+  non-finite values) while preserving zero, ordered fallback and strict unknown-cost
+  behavior. Existing usage aggregates are unchanged.
+
 ## v26.10.25 (2026-10-31)
 
 ### Fixed
