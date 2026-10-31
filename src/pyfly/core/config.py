@@ -50,6 +50,7 @@ _SENSITIVE_KEY_PARTS = (
     "client-secret",
     "client_secret",
 )
+_SENSITIVE_HTTP_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie"})
 _MASK = "******"
 
 
@@ -57,6 +58,12 @@ def _is_sensitive_key(key: str) -> bool:
     """Return True if *key*'s final segment looks like a secret."""
     leaf = key.rsplit(".", 1)[-1].lower()
     full = key.lower()
+    if leaf.replace("_", "-") in _SENSITIVE_HTTP_HEADERS:
+        return True
+    if full.startswith("pyfly_") and any(
+        full.endswith("_headers_" + header.replace("-", "_")) for header in _SENSITIVE_HTTP_HEADERS
+    ):
+        return True
     if leaf == "key" or leaf.endswith("-key") or leaf.endswith("_key"):
         return True
     return any(part in full for part in _SENSITIVE_KEY_PARTS)

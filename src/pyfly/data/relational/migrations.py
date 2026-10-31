@@ -548,7 +548,7 @@ async def migration_connection(alembic_config: AlembicConfig) -> AsyncIterator[A
         registry = DataSourceRegistry(config)
         engine = registry.primary.engine
     else:
-        engine = create_async_engine(url, poolclass=NullPool)
+        engine = create_async_engine(url, poolclass=NullPool, hide_parameters=properties.hide_parameters)
     try:
         async with (
             engine.connect() as connection,

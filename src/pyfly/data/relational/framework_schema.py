@@ -48,6 +48,8 @@ Table                             Used by
 ``pyfly_oauth2_grants``           ``PostgresTokenStore``: refresh tokens, authorization codes, pushed requests
 ``pyfly_oauth2_token_families``   ``PostgresTokenStore``: the refresh-token rotation families
 ``pyfly_sessions``                ``SqlSessionStore`` (``pyfly.session.store=postgres``)
+``pyfly_mcp_sessions``            ``SqlMcpSessionStore``: authenticated legacy initialization metadata
+``pyfly_mcp_session_admission``   ``SqlMcpSessionStore``: the cross-replica session admission lock
 ``pyfly_agentic_memory``          ``RelationalMemoryStore`` (namespace-scoped Agentic memory)
 ``pyfly_session_registrations``   ``PostgresSessionRegistry``: the sessions of each principal
 ``pyfly_session_principals``      ``PostgresSessionRegistry``: a row per principal, locked by a login
@@ -129,6 +131,8 @@ __all__ = [
     "OUTBOX_EVENTS",
     "PROJECTION_CHECKPOINTS",
     "SESSIONS",
+    "MCP_SESSIONS",
+    "MCP_SESSION_ADMISSION",
     "SESSION_PRINCIPALS",
     "SESSION_REGISTRATIONS",
     "SNAPSHOTS",
@@ -182,6 +186,10 @@ __all__ = [
     "session_registrations_table",
     "sessions",
     "sessions_table",
+    "mcp_sessions",
+    "mcp_sessions_table",
+    "mcp_session_admission",
+    "mcp_session_admission_table",
     "snapshots",
     "snapshots_table",
     "users",
@@ -225,6 +233,8 @@ OUTBOX_DEAD_LETTERS = "pyfly_outbox_dead_letters"
 OAUTH2_GRANTS = "pyfly_oauth2_grants"
 OAUTH2_TOKEN_FAMILIES = "pyfly_oauth2_token_families"
 SESSIONS = "pyfly_sessions"
+MCP_SESSIONS = "pyfly_mcp_sessions"
+MCP_SESSION_ADMISSION = "pyfly_mcp_session_admission"
 SESSION_REGISTRATIONS = "pyfly_session_registrations"
 SESSION_PRINCIPALS = "pyfly_session_principals"
 FEATURE_FLAGS = "firefly_feature_flags"
@@ -755,6 +765,42 @@ def session_registrations_table(name: str = SESSION_REGISTRATIONS) -> Table:
     return _declare("session_registrations", name, build)
 
 
+def mcp_sessions_table(name: str = MCP_SESSIONS) -> Table:
+    """Portable authenticated initialization metadata; no credentials or SDK transport objects."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("session_id", key_string(64), primary_key=True),
+            Column("resource_hash", key_string(64), nullable=False, index=True),
+            Column("owner_hash", key_string(64), nullable=False),
+            Column("protocol_version", key_string(32), nullable=False),
+            Column("client_params", long_text(), nullable=False),
+            Column("initialized", Boolean(), nullable=False, default=False),
+            Column("schema_version", Integer(), nullable=False, default=1),
+            Column("revision", BigInteger(), nullable=False, default=0),
+            Column("credential_expires_at", UtcTimestamp(), nullable=False),
+            Column("expires_at", UtcTimestamp(), nullable=False, index=True),
+        )
+
+    return _declare("mcp_sessions", name, build)
+
+
+def mcp_session_admission_table(name: str = MCP_SESSION_ADMISSION) -> Table:
+    """One row per canonical resource, locked while its session capacity is checked."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("resource_hash", key_string(64), primary_key=True),
+            Column("version", BigInteger(), nullable=False, default=0),
+        )
+
+    return _declare("mcp_session_admission", name, build)
+
+
 def session_principals_table(name: str = SESSION_PRINCIPALS) -> Table:
     """One row per principal that logged in under a session cap: a login locks it (``UPDATE ... SET version =
     version + 1``) while it counts and registers the principal's sessions, so concurrent logins of one
@@ -855,6 +901,12 @@ oauth2_token_families = oauth2_token_families_table()
 
 sessions = sessions_table()
 """``pyfly_sessions`` (:func:`sessions_table`)."""
+
+mcp_sessions = mcp_sessions_table()
+"""``pyfly_mcp_sessions`` (:func:`mcp_sessions_table`)."""
+
+mcp_session_admission = mcp_session_admission_table()
+"""``pyfly_mcp_session_admission`` (:func:`mcp_session_admission_table`)."""
 
 session_registrations = session_registrations_table()
 """``pyfly_session_registrations`` (:func:`session_registrations_table`)."""
