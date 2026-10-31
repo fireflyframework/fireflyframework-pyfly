@@ -211,6 +211,24 @@ async def test_cancelled_effect_records_unknown_and_preserves_cancellation(relat
     assert [entry.event.outcome for entry in await journal.read(SCOPE)] == ["intent", "unknown"]
 
 
+async def test_same_server_command_cannot_readmit_even_after_observed_or_uncertain_effect(
+    relational_backend: RelationalBackend,
+):
+    from pyfly.audit import AuditAdmissionRefused
+
+    _, journal, recorder = await setup(relational_backend)
+    operation = api().AuditOperation(module="agentic", action="tool.call")
+    calls = []
+    async with recorder.effect(operation, admission_key="server-command"):
+        calls.append(True)
+    with pytest.raises(AuditAdmissionRefused) as refused:
+        async with recorder.effect(operation, admission_key="server-command"):
+            calls.append(True)
+    assert refused.value.retryable is False
+    assert calls == [True]
+    assert [entry.event.outcome for entry in await journal.read(SCOPE)] == ["intent", "observed"]
+
+
 async def test_cancellation_while_retaining_observation_finishes_unknown_without_replay(
     relational_backend: RelationalBackend, monkeypatch
 ):
