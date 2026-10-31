@@ -89,4 +89,5 @@ async def test_sms_service_converts_error_to_failed_result() -> None:
     service = DefaultSmsService(provider=_BoomProvider())  # type: ignore[arg-type]
     result = await service.send(SmsMessage(to="+15551234567", body="hi"))
     assert result.status == EmailStatus.FAILED  # audit #36
-    assert "provider down" in (result.error or "")
+    assert result.error == "NOTIFICATION_PROVIDER_ERROR"
+    assert "provider down" not in (result.error or "")
