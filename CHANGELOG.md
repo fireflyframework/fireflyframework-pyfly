@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.25 (2026-10-31)
+
+### Fixed
+
+- Preserve missing and ambiguous transitive dependency errors inside configured beans
+  instead of silently replacing a policy with `None` or a parameter default.
+- Defer auto-configured consumers of declared user beans until later auto-configuration
+  dependencies are available, preserving native model transport and security policies.
+- Keep genuinely absent optional dependencies, root defaults and explicitly declining
+  factories unchanged; retain precise dependency diagnostics when startup fails.
+- Restore the certifi lock entry's published version and artifact URLs after the
+  previous framework version bump changed unrelated dependency metadata.
+
+### Migration
+
+- Repair or remove configured beans with broken dependency graphs. Optional injection
+  no longer hides their missing or ambiguous dependencies by selecting a default.
+
 ## v26.10.24 (2026-10-31)
 
 ### Added

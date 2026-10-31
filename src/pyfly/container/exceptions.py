@@ -28,6 +28,8 @@ class BeanCreationException(InfrastructureException):
         self.subsystem = subsystem
         self.provider = provider
         self.reason = reason
+        # Optional injection may ignore a missing candidate, never a failure inside a configured one.
+        self.dependency_failure = False
         message = f"Failed to configure {subsystem} with provider '{provider}': {reason}"
         super().__init__(message=message, code=f"BEAN_CREATION_{subsystem.upper()}")
 

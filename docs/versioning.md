@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.25` | 2026-10-31 | Preserve configured optional dependency failures and defer unfinished native policy graphs. |
 | `26.10.24` | 2026-10-31 | Primary-authoritative read-only transactions and explicit replica participant rejection. |
 | `26.10.23` | 2026-10-31 | Immutable authorization policies, approval constraints and monotonic execution ceilings. |
 | `26.10.22` | 2026-10-30 | Bounded native skill interpolation, immutable JSON/defaults and safe resource loading. |
@@ -122,20 +123,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.24"
+print(pyfly.__version__)  # → "26.10.25"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.24
+pyfly --version            # → pyfly, version 26.10.25
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.24) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.25) (Python 3.13.9)
 ```
 
 ---

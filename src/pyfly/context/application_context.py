@@ -1206,15 +1206,14 @@ class ApplicationContext:
                 # Parameters are resolved BEFORE the method runs, so deferring never re-runs a
                 # factory body that already started.
                 #
-                # An auto-configuration is never deferred: it is processed last, so a dependency
-                # it cannot resolve will not appear later, and raising now keeps the error at the
-                # bean that declared it.
+                # An auto-configuration may reach a configured user bean whose own dependency
+                # comes from a later auto-configuration. Keep that graph intact and defer it too.
                 try:
                     kwargs = self._bean_method_kwargs(config_instance, method)
                 except (NoSuchBeanError, NoUniqueBeanError) as exc:
                     # An ambiguous parameter is deferred too: an auto-configuration may register the
                     # @primary candidate that settles it.
-                    if auto:
+                    if auto and not exc.dependency_failure:
                         raise
                     self._defer_bean_method(config_instance, attr_name, method, return_type, cause=exc)
                     continue
@@ -1448,7 +1447,7 @@ class ApplicationContext:
                 del container._registrations[cls]
 
     def _process_deferred_bean_methods(self) -> None:
-        """Step 2d: complete the user @bean methods deferred in step 2.
+        """Step 2d: complete @bean methods deferred while their dependency graph was unavailable.
 
         Runs after the auto-configurations, so every bean the framework provides is registered.
         Deferred methods may depend on one another; the pass repeats while it makes progress and
@@ -1532,6 +1531,8 @@ class ApplicationContext:
             try:
                 kwargs[param_name] = self._container._resolve_param(param_type)
             except NoUniqueBeanError as exc:
+                if exc.dependency_failure:
+                    raise
                 if has_default:
                     continue
                 raise NoUniqueBeanError(
@@ -1542,7 +1543,9 @@ class ApplicationContext:
                     required_by=f"{type(config_instance).__qualname__}.{method.__name__}()",
                     parameter=f"{param_name}: {getattr(param_type, '__name__', repr(param_type))}",
                 ) from None
-            except NoSuchBeanError:
+            except NoSuchBeanError as exc:
+                if exc.dependency_failure:
+                    raise
                 if has_default:
                     continue
                 raise NoSuchBeanError(
