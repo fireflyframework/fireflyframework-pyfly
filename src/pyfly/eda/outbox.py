@@ -94,6 +94,7 @@ import contextlib
 import enum
 import fnmatch
 import functools
+import hashlib
 import json
 import logging
 import uuid
@@ -102,6 +103,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pyfly.audit.recording_binding import AuditRecordingSupport
 from pyfly.data.transaction.synchronization import TransactionSynchronizationAdapter
 from pyfly.domain.domain_event import to_json_value
 from pyfly.eda.dlq import EdaDeadLetterEntry, EdaDeadLetterStore
@@ -123,6 +125,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+    from pyfly.audit.recording import AuditRecorder
     from pyfly.data.transaction import TransactionManager
     from pyfly.messaging.listener_container import ListenerContainerSettings, ListenerInvoker, RetryPolicy
 
@@ -348,7 +351,30 @@ class _LeaseLost(Exception):
     """The delivery was claimed again by another relay after this one's lease ended: roll back its settling."""
 
 
-class SqlOutboxStore:
+def _eda_recorder(target: AuditRecordingSupport) -> AuditRecorder | None:
+    from pyfly.audit._infrastructure import is_audit_infrastructure
+
+    recorder = target._audit_recorder("eda")
+    return None if recorder is not None and is_audit_infrastructure(recorder.journal) else recorder
+
+
+def _terminal_audit_error(error: BaseException) -> bool:
+    from pyfly.audit.ports import AuditAdmissionRefused
+    from pyfly.audit.recording import AuditEffectUncertain
+
+    return isinstance(error, AuditAdmissionRefused | AuditEffectUncertain)
+
+
+def _require_audited_sql_outbox(target: AuditRecordingSupport, store: OutboxStore) -> None:
+    recorder = _eda_recorder(target)
+    if recorder is not None and (not isinstance(store, SqlOutboxStore) or store.manager() is not recorder.manager):
+        from pyfly.audit.ports import AuditError
+
+        recorder._poison_active()
+        raise AuditError("Strict audited publication requires a native SQL outbox on the audit datasource")
+
+
+class SqlOutboxStore(AuditRecordingSupport):
     """The :class:`~pyfly.eda.ports.outbox.OutboxStore` on SQL: the outbox tables on one datasource, and the
     statements that write and read them.
 
@@ -359,6 +385,8 @@ class SqlOutboxStore:
     *clock* gives the current UTC instant: the nodes compare it with ``available_at``, so keep their clocks
     synchronized (NTP) well within ``claim_timeout``.
     """
+
+    __pyfly_audit_module__ = "eda"
 
     def __init__(
         self,
@@ -504,11 +532,24 @@ class SqlOutboxStore:
         if groups is not None:
             groups, included = list(dict.fromkeys([*groups, *included])), []
         postgresql = self.dialect() == "postgresql"
-        single = postgresql and groups is None
+        recorder = _eda_recorder(self)
+        single = postgresql and groups is None and recorder is None
         async with infrastructure_unit(self._target, single_statement=single) as session:
             if single:
                 return await self._append_on_postgresql(session, values, included)
-            return await self._append(session, values, groups, included, notify=postgresql)
+            outbox_id = await self._append(session, values, groups, included, notify=postgresql)
+            if recorder is not None:
+                from pyfly.audit.recording_context import AuditOperation
+
+                await recorder.state(
+                    AuditOperation(
+                        module="eda",
+                        action="outbox.enqueued",
+                        resource_kind="delivery",
+                        resource_key=f"outbox-{outbox_id}",
+                    )
+                )
+            return outbox_id
 
     async def _append(
         self,
@@ -1217,7 +1258,7 @@ class _WakeAfterCommit(TransactionSynchronizationAdapter):
         self._relay.wake()
 
 
-class OutboxRelay:
+class OutboxRelay(AuditRecordingSupport):
     """Hands the events an outbox store (:class:`~pyfly.eda.ports.outbox.OutboxStore`: a :class:`SqlOutboxStore`,
     or any other adapter) owes consumer group *group* to its subscriptions (see the module documentation).
 
@@ -1232,6 +1273,8 @@ class OutboxRelay:
     - *poll_interval*, *batch_size*, *claim_timeout* (the lease) and *handler_timeout* (``None``: none), in
       seconds; *retention* (``None``: the relay prunes nothing); *owner* identifies this relay in the claims.
     """
+
+    __pyfly_audit_module__ = "eda"
 
     #: The relay stops before any ``@pre_destroy``, draining the delivery in flight.
     phase = CONSUMER_PHASE
@@ -1393,6 +1436,7 @@ class OutboxRelay:
 
     async def start(self) -> None:
         """Start the relay in a detached task. Idempotent; a stopped relay can be started again."""
+        self._audit_outside_units()
         async with self._lock:
             if self._state in (RelayState.RUNNING, RelayState.STARTING):
                 return
@@ -1544,10 +1588,28 @@ class OutboxRelay:
         """Claim one batch and deliver it; returns how many deliveries were claimed. The loop calls it; a test
         or a maintenance script may too, on a relay that is not running (a registering relay then registers
         its group first)."""
+        self._audit_outside_units()
         if not self._subscriptions:
             return 0
         await self.register()
         return await self._round(in_loop=self._task is not None and asyncio.current_task() is self._task)
+
+    def _strict_recorder(self) -> AuditRecorder | None:
+        recorder = _eda_recorder(self)
+        if recorder is not None:
+            _require_audited_sql_outbox(self, self._outbox)
+        if recorder is not None and self._dead_letter_store is not None:
+            from pyfly.audit.ports import AuditError
+
+            raise AuditError("Strict audited delivery does not support an external dead-letter store")
+        return recorder
+
+    def _audit_outside_units(self) -> None:
+        from pyfly.audit._infrastructure import has_active_data_units
+        from pyfly.audit.ports import AuditError
+
+        if self._strict_recorder() is not None and has_active_data_units():
+            raise AuditError("Strict audited delivery requires no held native Data unit")
 
     @property
     def registered(self) -> bool:
@@ -1571,6 +1633,23 @@ class OutboxRelay:
         self._registered = True
 
     async def _round(self, *, in_loop: bool) -> int:
+        from pyfly.audit.ports import AuditError
+
+        recorder = self._strict_recorder()
+        try:
+            return await self._round_once(in_loop=in_loop)
+        except asyncio.CancelledError:
+            if recorder is None:
+                raise
+            raise asyncio.CancelledError() from None
+        except AuditError:
+            raise
+        except Exception:
+            if recorder is None:
+                raise
+            raise AuditError("Strict audited delivery round could not be confirmed") from None
+
+    async def _round_once(self, *, in_loop: bool) -> int:
         """Claim a batch and deliver it (see the module documentation): the deliveries every subscription handled
         are settled together, and what the round does not get to is given back."""
         claimed = await self._outbox.claim(
@@ -1656,9 +1735,13 @@ class OutboxRelay:
         round's others), after settling a failed one on its own."""
         done = set(delivery.done)
         failures: list[tuple[Subscription, BaseException]] = []
+        recorder = self._strict_recorder()
         for subscription in self._matching(delivery):
             try:
-                await self._invoke(subscription, delivery.envelope)
+                if recorder is None:
+                    await self._invoke(subscription, delivery.envelope)
+                else:
+                    await self._audited_invoke(recorder, subscription, delivery)
             except asyncio.CancelledError as cancelled:
                 if _cancel_requested():
                     raise  # the relay is being stopped: the round gives the delivery back
@@ -1671,6 +1754,55 @@ class OutboxRelay:
             return True
         self.counters.failures += len(failures)
         return await self._handle_failures(delivery, done, failures)
+
+    async def _audited_invoke(self, recorder: AuditRecorder, subscription: Subscription, delivery: Delivery) -> None:
+        from pyfly.audit.ports import AuditError
+        from pyfly.audit.recording import AuditEffectUncertain
+        from pyfly.audit.recording_context import AuditOperation
+
+        try:
+            self._audit_outside_units()
+            until = self._outbox.now() + self._claim_timeout + self._budget(delivery)
+            extended = await self._outbox.extend([delivery], until=until)
+            if (
+                len(extended) != 1
+                or extended[0].outbox_id != delivery.outbox_id
+                or extended[0].group != delivery.group
+                or extended[0].token != delivery.token
+                or extended[0].leased_until is None
+                or extended[0].leased_until <= self._outbox.now()
+            ):
+                raise AuditError("Audited delivery no longer owns a valid native claim")
+            # The durable permission survives changing claim tokens, leases, processes and acknowledgements.
+            assert isinstance(self._outbox, SqlOutboxStore)
+            identity = json.dumps(
+                [
+                    "pyfly.eda.delivery.v1",
+                    self._outbox.tables.events.fullname,
+                    delivery.group,
+                    delivery.outbox_id,
+                    subscription.key,
+                ],
+                separators=(",", ":"),
+            )
+            key = hashlib.sha256(identity.encode()).hexdigest()
+            operation = AuditOperation(
+                module="eda", action="delivery.dispatched", resource_kind="delivery", resource_key=f"delivery-{key}"
+            )
+            async with recorder.effect(operation, admission_key=key):
+                if extended[0].leased_until <= self._outbox.now():
+                    raise AuditError("Audited delivery claim expired after intent admission")
+                await self._invoke(subscription, delivery.envelope)
+        except asyncio.CancelledError:
+            if _cancel_requested():
+                raise asyncio.CancelledError() from None
+            raise AuditEffectUncertain(
+                "Audited delivery was interrupted; explicit reconciliation is required"
+            ) from None
+        except AuditError:
+            raise
+        except Exception:
+            raise AuditError("Audited delivery admission could not be confirmed") from None
 
     async def _invoke(self, subscription: Subscription, envelope: EventEnvelope) -> None:
         from pyfly.messaging.listener_container import DeliveryState
@@ -1709,11 +1841,16 @@ class OutboxRelay:
                 },
                 exc_info=(type(error), error, error.__traceback__) if level > logging.DEBUG else None,
             )
-        if strategy in (ErrorStrategy.IGNORE, ErrorStrategy.LOG_AND_CONTINUE):
+        if strategy in (ErrorStrategy.IGNORE, ErrorStrategy.LOG_AND_CONTINUE) and not any(
+            _terminal_audit_error(error) for _, error in failures
+        ):
             return True
         dead: list[tuple[Subscription, BaseException]] = []
         delays: list[float] = []
         for subscription, error in failures:
+            if strategy in (ErrorStrategy.IGNORE, ErrorStrategy.LOG_AND_CONTINUE) and not _terminal_audit_error(error):
+                done.add(subscription.key)
+                continue
             delay = self._retry_delay(subscription, error, delivery.attempts)
             if delay is None:
                 dead.append((subscription, error))
@@ -1742,7 +1879,11 @@ class OutboxRelay:
         letters, under the error strategy and the subscription's own listener options."""
         from pyfly.messaging.listener_container import PoisonMessageError, listener_options
 
-        if self._error_strategy is ErrorStrategy.FAIL_FAST or isinstance(error, PoisonMessageError):
+        if (
+            _terminal_audit_error(error)
+            or self._error_strategy is ErrorStrategy.FAIL_FAST
+            or isinstance(error, PoisonMessageError)
+        ):
             return None
         policy = self._retry.with_options(listener_options(subscription.handler))
         if self._error_strategy is ErrorStrategy.RETRY:
