@@ -31,6 +31,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
+from pyfly.security._audit import SecurityAuditSupport
 from pyfly.security.context import SecurityContext
 from pyfly.security.http_security import AccessRuleType, SecurityRule
 from pyfly.web.filters import OncePerRequestFilter
@@ -66,7 +67,7 @@ def _matches(path: str, patterns: list[str]) -> bool:
 
 
 @order(HIGHEST_PRECEDENCE + 350)
-class HttpSecurityFilter(OncePerRequestFilter):
+class HttpSecurityFilter(SecurityAuditSupport, OncePerRequestFilter):
     """Filter that enforces URL-pattern authorization rules.
 
     Rules are evaluated in declaration order; **first match wins**.
@@ -82,6 +83,22 @@ class HttpSecurityFilter(OncePerRequestFilter):
         self._rules = list(rules)
 
     async def do_filter(self, request: Request, call_next: CallNext) -> Response:
+        if not self._rules:
+            return cast(Response, await call_next(request))
+        continued = False
+
+        async def admitted(current: Request) -> Response:
+            nonlocal continued
+            await self._record_security("authorize", "http-rule-set", "admitted")
+            continued = True
+            return cast(Response, await call_next(current))
+
+        response = await self._authorize(request, admitted)
+        if not continued:
+            await self._record_security("authorize", "http-rule-set", "denied")
+        return response
+
+    async def _authorize(self, request: Request, call_next: CallNext) -> Response:
         path: str = request.url.path
         security_context: SecurityContext = getattr(request.state, "security_context", SecurityContext.anonymous())
 

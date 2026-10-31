@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse, Response
 from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
 from pyfly.context.request_context import RequestContext
 from pyfly.kernel.exceptions import SecurityException
+from pyfly.security._audit import SecurityAuditSupport
 from pyfly.security.context import SecurityContext
 from pyfly.security.oauth2.resource_server import JWKSTokenValidator
 from pyfly.web.filters import OncePerRequestFilter
@@ -41,7 +42,7 @@ ERROR_MODE_401 = "401"
 
 
 @order(HIGHEST_PRECEDENCE + 250)
-class OAuth2ResourceServerFilter(OncePerRequestFilter):
+class OAuth2ResourceServerFilter(SecurityAuditSupport, OncePerRequestFilter):
     """Extracts the Bearer token and validates it against a JWKS endpoint.
 
     Populates ``request.state.security_context`` (and the active
@@ -83,6 +84,7 @@ class OAuth2ResourceServerFilter(OncePerRequestFilter):
 
     async def do_filter(self, request: Request, call_next: CallNext) -> Response:
         token = self._extract_token(request.headers.get("authorization", ""))
+        invalid = False
 
         if token is not None:
             try:
@@ -101,8 +103,7 @@ class OAuth2ResourceServerFilter(OncePerRequestFilter):
                 # A token was presented but failed validation (bad signature,
                 # expired, wrong iss/aud, unknown kid, failed proof-of-possession).
                 logger.warning("OAuth2 token rejected (invalid_token)")
-                if self._error_mode == ERROR_MODE_401:
-                    return self._invalid_token_response()
+                invalid = True
                 security_context = SecurityContext.anonymous()
         else:
             # No bearer credentials presented — anonymous; the gate decides.
@@ -112,6 +113,12 @@ class OAuth2ResourceServerFilter(OncePerRequestFilter):
         req_ctx = RequestContext.current()
         if req_ctx is not None:
             req_ctx.security_context = security_context
+        if token is not None:
+            await self._record_security(
+                "authenticate", "oauth2-bearer", "admitted" if security_context.is_authenticated else "denied"
+            )
+        if invalid and self._error_mode == ERROR_MODE_401:
+            return self._invalid_token_response()
         return cast(Response, await call_next(request))
 
     def _enforce_sender_constraint(self, request: Request, payload: dict[str, Any], token: str) -> None:

@@ -163,6 +163,7 @@ nav:
           - Events (EDA): modules/events.md
           - Audit Journal: audit.md
           - Audit Archive: audit-archive.md
+          - HTTP & Security Audit: audit-web-security.md
           - Event Sourcing: modules/eventsourcing.md
       - Distributed Transactions:
           - Transactional Engine: modules/transactional.md
