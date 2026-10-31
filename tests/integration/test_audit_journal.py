@@ -445,3 +445,26 @@ async def test_export_rejects_truncated_range_between_verification_and_materiali
         resume.set()
     with pytest.raises(AuditIntegrityError):
         await task
+
+
+@pytest.mark.backends("sqlite-file")
+@pytest.mark.parametrize(
+    "insertion,sequence", [("INSERT OR REPLACE", "sequence"), ("REPLACE", "sequence"), ("REPLACE", "sequence+1")]
+)
+async def test_sqlite_replace_cannot_bypass_append_only_guards(
+    relational_backend: RelationalBackend,
+    insertion: str,
+    sequence: str,
+) -> None:
+    instance = await journal(relational_backend)
+    async with infrastructure_unit(instance.engine):
+        await instance.append(event())
+    with pytest.raises(Exception, match="append.only"):
+        async with instance.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"{insertion} INTO pyfly_audit_entries "
+                    f"SELECT chain_id,{sequence},event_id,entry_hash,'{{}}' FROM pyfly_audit_entries"
+                )
+            )
+    assert (await instance.verify(SCOPE)).head.sequence == 1

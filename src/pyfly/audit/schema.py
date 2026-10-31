@@ -17,6 +17,11 @@ def mutation_guard_ddl(dialect: str) -> tuple[str, ...]:
             f"CREATE TRIGGER IF NOT EXISTS pyfly_audit_entries_no_{operation.lower()} "
             f"BEFORE {operation} ON pyfly_audit_entries BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END"
             for operation in ("UPDATE", "DELETE")
+        ) + (
+            "CREATE TRIGGER IF NOT EXISTS pyfly_audit_entries_no_replace BEFORE INSERT ON pyfly_audit_entries "
+            "WHEN EXISTS (SELECT 1 FROM pyfly_audit_entries WHERE chain_id=NEW.chain_id "
+            "AND (sequence=NEW.sequence OR event_id=NEW.event_id)) "
+            "BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END",
         )
     if dialect == "postgresql":
         return (
@@ -39,7 +44,11 @@ async def ensure_mutation_guards(datasource: object, dialect: str, *, create: bo
             rows = await session.execute(
                 text("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='pyfly_audit_entries'")
             )
-            required = {"pyfly_audit_entries_no_update", "pyfly_audit_entries_no_delete"}
+            required = {
+                "pyfly_audit_entries_no_update",
+                "pyfly_audit_entries_no_delete",
+                "pyfly_audit_entries_no_replace",
+            }
         else:
             rows = await session.execute(
                 text(
