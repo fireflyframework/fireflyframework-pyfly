@@ -165,6 +165,10 @@ def retryable(
 
         @functools.wraps(original_execute)
         async def _retrying_execute(**kwargs: Any) -> Any:
+            from pyfly.agentic._audit import current_audit_invocation
+
+            if current_audit_invocation() is not None:
+                return await original_execute(**kwargs)
             delay = backoff
             last_exc: Exception | None = None
             # Attempt the original _execute up to (max_retries + 1) times
@@ -173,6 +177,8 @@ def retryable(
                 try:
                     return await original_execute(**kwargs)
                 except Exception as exc:
+                    if getattr(exc, "retryable", True) is False:
+                        raise
                     last_exc = exc
                     if attempt < max_retries:
                         logger.debug(

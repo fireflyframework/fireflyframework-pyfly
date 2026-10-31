@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - optional dep
 
 from pydantic import BaseModel
 
+from pyfly.agentic._audit import current_audit_invocation, pipeline_admitted, pipeline_node_effect, pipeline_recording
 from pyfly.agentic._runtime_context import selected_runtime
 from pyfly.agentic.config import get_config
 from pyfly.agentic.exceptions import PipelineError
@@ -49,6 +50,8 @@ from pyfly.agentic.pipeline.result import (
     NodeResult,
     PipelineResult,
 )
+from pyfly.audit import AuditError
+from pyfly.audit.recording_binding import AuditRecordingSupport
 from pyfly.data.transaction.template import shielded
 
 logger = logging.getLogger(__name__)
@@ -263,7 +266,7 @@ async def _drain_nodes(tasks: list[asyncio.Task[Any]]) -> None:
         await shielded(asyncio.gather(*tasks, return_exceptions=True))
 
 
-class PipelineEngine:
+class PipelineEngine(AuditRecordingSupport):
     """Executes ready nodes as their dependencies complete.
 
     Cyclic and dynamic routes use bounded frontier-based execution.
@@ -271,6 +274,8 @@ class PipelineEngine:
     Parameters:
         dag: The DAG to execute.
     """
+
+    __pyfly_audit_module__ = "agentic"
 
     def __init__(
         self,
@@ -386,6 +391,7 @@ class PipelineEngine:
         with contextlib.suppress(Exception):
             await method(**call_kwargs)
 
+    @pipeline_recording
     async def run(
         self,
         context: PipelineContext | None = None,
@@ -465,6 +471,7 @@ class PipelineEngine:
 
         if run_id is None:
             run_id = uuid.uuid4().hex[:12]
+        await pipeline_admitted(self._dag.name, run_id)
 
         # Observability: pipeline-level span + start event
         # State-aware runs use the "pipeline.state.*" span prefix to match
@@ -633,6 +640,8 @@ class PipelineEngine:
                         try:
                             nr = task.result()
                         except Exception as exc:
+                            if getattr(exc, "retryable", True) is False:
+                                raise
                             nr = NodeResult(
                                 node_id=node_id,
                                 success=False,
@@ -814,6 +823,10 @@ class PipelineEngine:
         Returns ``True`` on success, ``False`` if any worker failed (the
         caller treats this as an abort signal).
         """
+        if current_audit_invocation() is not None:
+            raise AuditError(
+                "Automatic audit requires stable worker replay identities; dynamic fan-out was not admitted"
+            )
         # Validate targets up front so unknown ones fail loud, not after gather().
         for send in sends:
             if send.target not in self._dag.nodes:
@@ -1250,13 +1263,14 @@ class PipelineEngine:
                 started_at = datetime.now(UTC)
                 start_time = time.perf_counter()
                 try:
-                    if node.timeout_seconds > 0:
-                        output = await asyncio.wait_for(
-                            node.step.execute(context, inputs),
-                            timeout=node.timeout_seconds,
-                        )
-                    else:
-                        output = await node.step.execute(context, inputs)
+                    async with pipeline_node_effect(self._dag.name, node_id):
+                        if node.timeout_seconds > 0:
+                            output = await asyncio.wait_for(
+                                node.step.execute(context, inputs),
+                                timeout=node.timeout_seconds,
+                            )
+                        else:
+                            output = await node.step.execute(context, inputs)
 
                     elapsed = (time.perf_counter() - start_time) * 1000
                     completed_at = datetime.now(UTC)
@@ -1276,6 +1290,8 @@ class PipelineEngine:
                         retries=retries,
                     )
                 except Exception as exc:
+                    if getattr(exc, "retryable", True) is False:
+                        raise
                     last_error = str(exc)
                     last_error_type = type(exc).__name__
                     retries += 1
