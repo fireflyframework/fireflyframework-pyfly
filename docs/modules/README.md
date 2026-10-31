@@ -180,7 +180,7 @@ Cross-cutting concerns, testing patterns, and aspect-oriented programming.
 
 ## Agentic
 
-[Agentic](agentic.md) adds opt-in agents, tools, model configuration, knowledge retrieval, reasoning, validation, pipelines and workflows. [Native DI/lifecycle](agentic/native-runtime.md), [all capability guides](agentic/catalogue.md), [installation/extras](agentic/getting-started/installation.md) and [migration](agentic/migration.md) cover its application-owned runtime.
+[Agentic](agentic.md) adds opt-in agents, tools, model configuration, knowledge retrieval, reasoning, validation, pipelines and workflows. [Native DI/lifecycle](agentic/native-runtime.md), [function sandbox](agentic/sandbox.md), [all capability guides](agentic/catalogue.md), [installation/extras](agentic/getting-started/installation.md) and [migration](agentic/migration.md) cover its application-owned runtime.
 
 ---
 

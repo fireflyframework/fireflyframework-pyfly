@@ -209,6 +209,7 @@ nav:
           - Agents: modules/agentic/agents.md
           - Templates: modules/agentic/templates.md
           - Tools: modules/agentic/tools.md
+          - Function Sandbox: modules/agentic/sandbox.md
           - Models: modules/agentic/models.md
           - Skills: modules/agentic/skills.md
           - Prompts: modules/agentic/prompts.md

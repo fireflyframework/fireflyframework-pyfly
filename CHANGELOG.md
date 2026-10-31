@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.21 (2026-10-30)
+
+### Added
+
+- Run bounded JSON functions in operator-approved Docker and Kubernetes sandboxes with explicit authorization, resource observation, effect callbacks and fail-closed reconciliation.
+- Isolate Kubernetes control traffic with a bounded direct websocket, protected connection snapshots and a verified restricted namespace.
+- Add the optional `agentic-sandbox-kubernetes` extra and document sandbox lifecycle and isolation requirements.
+
 ## v26.10.20 (2026-10-30)
 
 ### Added
