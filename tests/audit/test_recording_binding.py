@@ -20,3 +20,25 @@ def test_native_binding_is_lazy_and_cannot_rebind_shared_instances():
     assert calls == []
     with pytest.raises(AuditError, match="another application"):
         AuditModulePostProcessor(lambda: object()).after_init(target, "other")
+
+
+async def test_binding_failure_poisoning_is_safe_across_two_native_contexts(tmp_path):
+    from pyfly.data.relational.sqlalchemy import SessionProvider
+    from pyfly.data.transaction import UnexpectedRollbackError
+    from tests.audit.test_infrastructure_context import application
+
+    one, two = application(tmp_path / "one.db"), application(tmp_path / "two.db")
+    await one.start()
+    await two.start()
+    try:
+        target = AuditRecordingSupport()
+        target._bind_audit_recorder(lambda: two.get_bean_by_name("fixture-private-value"))
+        with pytest.raises(UnexpectedRollbackError) as rollback:
+            async with one.get_bean(SessionProvider).unit():
+                with pytest.raises(AuditError) as refusal:
+                    target._audit_recorder("data")
+                assert "fixture-private-value" not in str(refusal.value)
+        assert "fixture-private-value" not in str(rollback.value)
+    finally:
+        await two.stop()
+        await one.stop()
