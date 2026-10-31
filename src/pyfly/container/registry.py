@@ -35,7 +35,7 @@ class Registration:
     # used for @bean factories (class-level @primary uses __pyfly_primary__).
     primary: bool = False
     # A synthetic @bean return-type alias must not hide other implementations of that port.
-    declared_alias: bool = False
+    declared_alias: bool = field(default=False, kw_only=True)
     # Optional factory (e.g. a @bean method closure). When set it takes
     # precedence over ``impl_type.__init__`` so TRANSIENT @bean factory logic is
     # preserved on every resolution instead of being reconstructed via __init__.

@@ -32,6 +32,16 @@ class AuditContext(Fact):
     usage: AuditUsage | None = None
 
 
+class AuditAdapterEnrollment(Fact):
+    module: Identifier
+    adapter: Identifier
+
+
+class AuditRecordingCoverage(Fact):
+    configured_modules: tuple[Identifier, ...]
+    di_bound_adapters: tuple[AuditAdapterEnrollment, ...] = ()
+
+
 @runtime_checkable
 class AuditContextResolver(Protocol):
     async def resolve(self, operation: AuditOperation) -> AuditContext: ...

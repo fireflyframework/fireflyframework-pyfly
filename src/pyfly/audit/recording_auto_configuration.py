@@ -15,6 +15,17 @@ from pyfly.data.relational.framework_schema import context_datasource_registry, 
 from pyfly.data.transaction import resolve_manager
 
 
+def _modules(config: Config) -> frozenset[str]:
+    modules = config.get("pyfly.audit.recording.modules")
+    if (
+        not isinstance(modules, list)
+        or not modules
+        or any(not isinstance(module, str) or module not in AUTOMATIC_AUDIT_MODULES for module in modules)
+    ):
+        raise AuditError("Configure explicit supported automatic audit modules: agentic, data, eda, security, web")
+    return frozenset(modules)
+
+
 @auto_configuration
 @conditional_on_property("pyfly.audit.recording.enabled", having_value="true")
 class AuditRecordingAutoConfiguration:
@@ -23,13 +34,7 @@ class AuditRecordingAutoConfiguration:
     def audit_recorder(
         self, config: Config, journal: AuditJournal, resolver: AuditContextResolver, container: Container
     ) -> AuditRecorder:
-        modules = config.get("pyfly.audit.recording.modules")
-        if (
-            not isinstance(modules, list)
-            or not modules
-            or any(not isinstance(module, str) or module not in AUTOMATIC_AUDIT_MODULES for module in modules)
-        ):
-            raise AuditError("Configure explicit supported automatic audit modules: agentic, data, eda, security, web")
+        modules = _modules(config)
         registry = context_datasource_registry(config, container)
         datasource = module_datasource(registry, config, "pyfly.audit", name="audit")
         return AuditRecorder(
@@ -40,5 +45,7 @@ class AuditRecordingAutoConfiguration:
         )
 
     @bean
-    def audit_module_post_processor(self, recorder: Provider[AuditRecorder]) -> AuditModulePostProcessor:
-        return AuditModulePostProcessor(recorder.get)
+    def audit_module_post_processor(
+        self, config: Config, recorder: Provider[AuditRecorder]
+    ) -> AuditModulePostProcessor:
+        return AuditModulePostProcessor(recorder.get, modules=_modules(config))

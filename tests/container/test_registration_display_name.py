@@ -6,6 +6,7 @@ during startup (``BeanCreationException``). ``display_name`` must never crash.
 """
 
 from pyfly.container.registry import Registration
+from pyfly.container.types import Scope
 
 
 class _A:
@@ -36,3 +37,11 @@ def test_display_name_handles_optional_union() -> None:
     # it is always a usable, non-empty name.
     name = Registration(impl_type=(_A | None)).display_name
     assert isinstance(name, str) and name
+
+
+def test_declared_alias_metadata_preserves_the_existing_positional_factory_signature() -> None:
+    factory = _A
+    reg = Registration(_A, Scope.TRANSIENT, None, None, "named", True, factory, None, False, False, "close")
+    assert reg.factory is factory
+    assert reg.destroy_method == "close"
+    assert not reg.declared_alias
