@@ -2057,6 +2057,54 @@ class UserService:
 
 Routing applies when the unit is new. A read-only method called inside a read-write unit that is already open joins that unit, on the primary. A repository call outside any transaction runs in an auto unit on the primary.
 
+### Read-only snapshots on the primary
+
+Use `read_from_primary=True` when a read must see the primary's committed state, such as a newly
+granted or revoked authorization, while keeping `read_only=True` and the requested isolation:
+
+```python
+from pyfly.data import Isolation, Propagation, transactional
+from pyfly.data.transaction import TransactionTemplate
+
+@transactional(
+    datasource="primary",
+    propagation=Propagation.REQUIRES_NEW,
+    isolation=Isolation.SERIALIZABLE,
+    read_only=True,
+    read_from_primary=True,
+)
+async def authorization_snapshot() -> Grant | None:
+    return await grants.find_by_id(grant_id)
+
+snapshot = TransactionTemplate(
+    "primary", read_only=True, read_from_primary=True, isolation=Isolation.SERIALIZABLE,
+    propagation=Propagation.REQUIRES_NEW,
+)
+async with snapshot.transaction():
+    grant = await grants.find_by_id(grant_id)
+```
+
+The setting bypasses only the selected datasource's replica. It preserves its transaction manager,
+session options, read-only guards, dialect hints, after-begin customizers and isolation. SQLite uses
+deferred `BEGIN` for this read-only unit, so a snapshot can read committed state on a separate
+connection while a suspended outer writing unit holds its write lock. It does not observe that
+outer unit's uncommitted changes.
+
+`REQUIRED` repository and `SessionProvider` participants share the bound session and its route.
+An explicit `read_from_primary=True` participant (`REQUIRED`, `SUPPORTS`, `MANDATORY` or `NESTED`)
+cannot join a replica unit: it raises `IllegalTransactionStateError` before running the body. Use
+`REQUIRES_NEW` to suspend that replica unit and open a primary snapshot. `UnitOfWork.read_from_primary`
+reports the actual route. The default `False` retains existing replica routing; writing units already
+use the primary, so setting it on a writing boundary is redundant. It does not turn a named datasource
+into the application's default datasource, create a transaction for a nontransactional propagation,
+or change the behavior of independently owned `RoutingSessionFactory` sessions.
+In particular, `factory()` still selects the replica in a read-only context, including inside a primary
+snapshot, and creates its own session. Inject `AsyncSession` or use `SessionProvider` to participate in
+the snapshot instead. Passing a registry-owned replica datasource, engine or session factory to a
+transaction template resolves its canonical primary manager. A custom factory bound directly to a
+known replica engine cannot claim primary authority: `read_from_primary=True` fails before opening a
+connection; select the actual primary with `TransactionTemplate(registry.primary, ...)` instead.
+
 ### RoutingSessionFactory
 
 `RoutingSessionFactory` (the `routing_session_factory` bean) is for code that opens its own sessions instead of using repositories. Calling it (`factory()`) returns a **new** `AsyncSession`, routed by context. That session is not part of any unit of work: the caller owns it and must close it, so always open it with `async with`.
@@ -2432,6 +2480,9 @@ The write auto unit of a repository call counts as a bound unit for a boundary i
   `delete()` before it is sent, and adds the dialect hint: `BEGIN READ ONLY` on PostgreSQL,
   `SET TRANSACTION READ ONLY` on MySQL and MariaDB (which also refuses a raw `text()` write; SQLite has
   no read-only transaction).
+- **`read_from_primary=True`** keeps a new read-only unit on the selected datasource's primary, with
+  the same guards and isolation. A primary-demanding participant cannot join a replica unit; use
+  `REQUIRES_NEW` for an independent primary snapshot (see [primary snapshots](#read-only-snapshots-on-the-primary)).
 - **`timeout=`** (seconds) bounds a new unit's body with `asyncio.timeout`: on expiry the unit rolls
   back and `TransactionTimedOutError` (a `TimeoutError`) is raised. On PostgreSQL the unit also gets
   `SET LOCAL statement_timeout`, so a stuck statement is cancelled on the server. A participant cannot

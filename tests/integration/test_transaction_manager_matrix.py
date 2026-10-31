@@ -69,6 +69,7 @@ from pyfly.data.transaction import (
     CommitOutcomeUnknownError,
     IllegalTransactionStateError,
     TransactionSynchronizationAdapter,
+    TransactionTemplate,
     TransactionTimedOutError,
     UnexpectedRollbackError,
     infrastructure_unit,
@@ -513,6 +514,42 @@ async def test_read_only_refuses_writes(matrix: Matrix) -> None:
     assert await matrix.committed() == []
     await matrix.outer.place("writable-again")  # the hint does not leak into the next unit
     assert await matrix.committed() == ["writable-again"]
+
+
+async def test_primary_read_preserves_isolation_and_backend_readonly(relational_backend: RelationalBackend) -> None:
+    await relational_backend.create_tables(MxItem)
+    ctx = ApplicationContext(
+        relational_backend.config({"pyfly.data.relational.read-replica.url": relational_backend.url})
+    )
+    ctx.register_bean(RelationalAutoConfiguration)
+    await ctx.start()
+    registry = ctx.get_bean(DataSourceRegistry)
+    replica = registry.replica()
+    assert replica is not None
+
+    @event.listens_for(replica.engine.sync_engine, "connect")
+    def refuse_replica(_connection: Any, _record: Any) -> None:
+        pytest.fail("a primary-authoritative read must never connect to the replica engine")
+
+    snapshot = TransactionTemplate("primary", read_only=True, read_from_primary=True, isolation=Isolation.SERIALIZABLE)
+    try:
+        with pytest.raises(IllegalTransactionStateError, match="read-only"):
+            async with snapshot.transaction() as unit:
+                assert unit is not None and unit.read_from_primary
+                assert await _isolation_level(unit.resource, relational_backend.dialect) == "SERIALIZABLE"
+                await unit.resource.execute(insert(MxItem).values(name="forbidden-core"))
+        if not relational_backend.is_embedded:
+            with pytest.raises(DBAPIError, match="(?i)read.only"):
+                async with snapshot.transaction() as unit:
+                    assert unit is not None
+                    await unit.resource.execute(text("INSERT INTO mx_item (name) VALUES ('forbidden-raw')"))
+        # Neither the isolation nor the read-only dialect hint leaks into the next primary write.
+        async with TransactionTemplate("primary", read_from_primary=True).transaction() as writer:
+            assert writer is not None
+            await writer.resource.execute(insert(MxItem).values(name="writable-again"))
+        assert all(ds.engine.sync_engine.pool.checkedout() == 0 for ds in registry.all_datasources())
+    finally:
+        await ctx.stop()
 
 
 async def test_a_core_write_in_a_read_only_unit_is_refused_before_it_runs(matrix: Matrix) -> None:
