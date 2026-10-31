@@ -68,6 +68,7 @@ def transactional(
     propagation: Propagation | None = None,
     isolation: Isolation | None = None,
     read_only: bool | None = None,
+    read_from_primary: bool | None = None,
     timeout: float | None = None,
     rollback_for: tuple[type[BaseException], ...] | None = None,
     no_rollback_for: tuple[type[BaseException], ...] | None = None,
@@ -81,7 +82,8 @@ def transactional(
     Args:
         propagation: How the call relates to a unit already bound for its datasource (default ``REQUIRED``).
         isolation: The isolation level of a new unit, validated per dialect (default ``DEFAULT``).
-        read_only: Route a new unit to the datasource's replica, refuse ORM writes, add the dialect hint.
+        read_only: Refuse writes, add the dialect hint, and prefer a configured replica for a new unit.
+        read_from_primary: Keep reads on the datasource's primary, preserving read-only and isolation.
         timeout: Seconds a new unit's body may run; on expiry it rolls back (``TransactionTimedOutError``).
         rollback_for: Extra exception classes that roll back (any ``Exception`` already does).
         no_rollback_for: Exception classes that commit, unless a more specific rollback rule matches.
@@ -95,6 +97,7 @@ def transactional(
             ("propagation", propagation),
             ("isolation", isolation),
             ("read_only", read_only),
+            ("read_from_primary", read_from_primary),
             ("timeout", timeout),
             ("rollback_for", rollback_for),
             ("no_rollback_for", no_rollback_for),
@@ -118,6 +121,7 @@ def _definition(options: dict[str, Any]) -> TransactionDefinition:
         propagation=options.get("propagation", Propagation.REQUIRED),
         isolation=options.get("isolation", Isolation.DEFAULT),
         read_only=bool(options.get("read_only", False)),
+        read_from_primary=bool(options.get("read_from_primary", False)),
         timeout=options.get("timeout"),
         rollback_for=tuple(options.get("rollback_for", ())),
         no_rollback_for=tuple(options.get("no_rollback_for", ())),

@@ -317,6 +317,7 @@ class UnitOfWork:
         definition: TransactionDefinition | None = None,
         auto: bool = False,
         read_only: bool | None = None,
+        read_from_primary: bool = True,
         deadline: float | None = None,
     ) -> None:
         self.id = next(_IDS)
@@ -326,6 +327,8 @@ class UnitOfWork:
         self.definition = definition if definition is not None else TransactionDefinition(read_only=bool(read_only))
         self.auto = auto
         self.read_only = self.definition.read_only if read_only is None else read_only
+        #: The actual route, independent of read-only enforcement. A manager routing to a replica sets False.
+        self.read_from_primary = read_from_primary
         self.isolation: Isolation = self.definition.isolation
         self.deadline = deadline
         self.owner_task: asyncio.Task[Any] | None = asyncio.current_task()

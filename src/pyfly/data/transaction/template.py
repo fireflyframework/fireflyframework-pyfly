@@ -574,6 +574,7 @@ class TransactionBoundary:
         return None
 
     def _join(self, existing: UnitOfWork) -> None:
+        self._validate_read_source(existing)
         self._mode = _Mode.JOIN
         self._unit = existing
         definition = self._definition
@@ -584,6 +585,7 @@ class TransactionBoundary:
             )
 
     async def _nested(self, existing: UnitOfWork) -> UnitOfWork:
+        self._validate_read_source(existing)
         if not self._manager.capabilities.supports_savepoints:
             raise NestedTransactionNotSupportedError(
                 f"Propagation.NESTED needs savepoints, which the '{self._manager.capabilities.backend}' backend "
@@ -599,6 +601,14 @@ class TransactionBoundary:
         self._mode = _Mode.NESTED
         self._unit = existing
         return existing
+
+    def _validate_read_source(self, existing: UnitOfWork) -> None:
+        if self._definition.read_from_primary and not existing.read_from_primary:
+            raise IllegalTransactionStateError(
+                f"read_from_primary=True cannot join a replica unit on datasource '{existing.datasource}'; "
+                "use Propagation.REQUIRES_NEW to open an independent primary transaction",
+                datasource=existing.datasource,
+            )
 
     def _run_without(self, state: TransactionState, datasource: str, suspended: UnitOfWork | None) -> None:
         self._mode = _Mode.NONE
@@ -987,8 +997,8 @@ class TransactionTemplate:
     *manager* is a :class:`~pyfly.data.transaction.manager.TransactionManager`, a datasource name, a
     resource the application built (an ``async_sessionmaker``) or ``None``; it is resolved at each use.
     *settings* are :class:`~pyfly.data.transaction.definition.TransactionDefinition` fields
-    (``propagation``, ``isolation``, ``read_only``, ``timeout``, ``rollback_for``, ``no_rollback_for``,
-    ``datasource``, ``name``), overridable per call.
+    (``propagation``, ``isolation``, ``read_only``, ``read_from_primary``, ``timeout``, ``rollback_for``,
+    ``no_rollback_for``, ``datasource``, ``name``), overridable per call.
 
     The datasource can be named either way: ``TransactionTemplate("reporting")``,
     ``TransactionTemplate(datasource="reporting")`` or ``template.transaction(datasource="reporting")``.
