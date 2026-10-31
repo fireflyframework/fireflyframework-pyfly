@@ -122,20 +122,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.23"
+print(pyfly.__version__)  # → "26.10.24"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.23
+pyfly --version            # → pyfly, version 26.10.24
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.23) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.24) (Python 3.13.9)
 ```
 
 ---
