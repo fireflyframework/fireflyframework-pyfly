@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.22` | 2026-10-30 | Bounded native skill interpolation, immutable JSON/defaults and safe resource loading. |
 | `26.10.21` | 2026-10-30 | Bounded Docker and Kubernetes function sandboxes. |
 | `26.10.20` | 2026-10-30 | Native Google Cloud Storage document versions and create-only uploads. |
 | `26.10.19` | 2026-10-30 | MCP transport and managed Kafka and RabbitMQ subscriptions. |
@@ -119,20 +120,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.21"
+print(pyfly.__version__)  # → "26.10.22"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.21
+pyfly --version            # → pyfly, version 26.10.22
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.21) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.22) (Python 3.13.9)
 ```
 
 ---
