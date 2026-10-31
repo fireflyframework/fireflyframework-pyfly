@@ -100,8 +100,11 @@ class AuditRecorder:
                     seen.add(id(unit))
 
     async def _context(self, operation: AuditOperation) -> AuditContext:
-        operation = AuditOperation.model_validate(operation)
-        context = AuditContext.model_validate(await self.resolver.resolve(operation))
+        try:
+            operation = AuditOperation.model_validate(operation)
+            context = AuditContext.model_validate(await self.resolver.resolve(operation))
+        except Exception:
+            raise AuditError("Trusted audit context is unavailable") from None
         if context.correlation.operation_id is None:
             context = context.model_copy(
                 update={"correlation": context.correlation.model_copy(update={"operation_id": str(uuid4())})}

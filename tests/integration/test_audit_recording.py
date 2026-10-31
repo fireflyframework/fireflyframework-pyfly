@@ -95,6 +95,22 @@ async def test_caught_resolver_failure_marks_actual_business_unit_rollback_only(
         assert await unit.resource.scalar(select(func.count()).select_from(orders)) == 0
 
 
+async def test_context_resolver_cannot_leak_a_raw_audit_error(relational_backend: RelationalBackend):
+    manager, journal, recorder = await setup(relational_backend)
+
+    class BrokenResolver:
+        async def resolve(self, operation):
+            raise AuditError("fixture private resolver value")
+
+    recorder.resolver = BrokenResolver()
+    with pytest.raises(UnexpectedRollbackError):
+        async with TransactionTemplate(manager).transaction():
+            with pytest.raises(AuditError) as error:
+                await recorder.state(api().AuditOperation(module="data", action="order.saved"))
+            assert "fixture private" not in str(error.value)
+    assert not await journal.read(SCOPE)
+
+
 async def test_forged_operation_cannot_disable_capture_and_commit_unaudited_state(
     relational_backend: RelationalBackend,
 ):
