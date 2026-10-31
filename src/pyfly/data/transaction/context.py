@@ -37,9 +37,13 @@ import inspect
 from collections.abc import Callable, Coroutine, Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from typing import Any, ParamSpec, TypeVar, overload
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, overload
 
+from pyfly.data.transaction.errors import IllegalTransactionStateError
 from pyfly.data.transaction.unit_of_work import UnitOfWork
+
+if TYPE_CHECKING:
+    from pyfly.data.transaction.manager import TransactionManager
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -112,6 +116,17 @@ class TransactionState:
         if scoped is not None and scoped not in out:
             out.append(scoped)
         return out
+
+    def check_manager(self, manager: TransactionManager, *, datasource: str | None = None) -> None:
+        """Reject another manager's same-named held units before joining or shadowing them."""
+        foreign = [unit for unit in self.held_units(datasource or manager.datasource) if unit.manager is not manager]
+        if foreign:
+            reason = "A native Data unit belongs to a different transaction manager"
+            for unit in foreign:
+                if not unit.completed:
+                    unit.set_rollback_only(reason)
+                    unit.redact_rollback_reason(reason)
+            raise IllegalTransactionStateError(reason) from None
 
     # -- deriving -----------------------------------------------------------------------------------------
 

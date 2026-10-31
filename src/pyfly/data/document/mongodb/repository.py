@@ -478,8 +478,10 @@ class MongoRepository(Generic[T, ID]):
 
     def _current_unit(self) -> UnitOfWork:
         """The unit of the current call (its operation scope, else the bound unit of the datasource)."""
-        datasource = self._transaction_manager().datasource
+        manager = self._transaction_manager()
+        datasource = manager.datasource
         state = current_state()
+        state.check_manager(manager)
         unit = state.scope(datasource) or state.unit(datasource)
         if unit is None:
             raise IllegalTransactionStateError(
@@ -550,6 +552,7 @@ class MongoRepository(Generic[T, ID]):
         manager = self._transaction_manager()
         datasource = manager.datasource
         state = current_state()
+        state.check_manager(manager)
         scoped = state.scope(datasource)
         if scoped is not None:
             return await _run_on(scoped, function, self, args, kwargs, atomic)
@@ -587,6 +590,7 @@ class MongoRepository(Generic[T, ID]):
             manager = self._transaction_manager()
             datasource = manager.datasource
             state = current_state()
+            state.check_manager(manager)
             unit = state.scope(datasource) or state.unit(datasource)
             owned = unit is None
             since = cancel_requests()
@@ -600,6 +604,7 @@ class MongoRepository(Generic[T, ID]):
             error: BaseException | None = None
             try:
                 while True:
+                    current_state().check_manager(unit.manager)
                     unit.check_usable()
                     token = bind_state(scoped)
                     try:

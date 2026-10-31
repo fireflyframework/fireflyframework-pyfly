@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from pyfly.audit import AuditActor, AuditCorrelation, AuditEvent, AuditResource, AuditScope
 from pyfly.data.transaction import infrastructure_unit
 
-scope = AuditScope(tenant_id="local", workspace_id="studio", project_id="default")
+scope = AuditScope(tenant_id="tenant-example", workspace_id="workspace-example", project_id="project-example")
 
 # In a service, an existing @transactional boundary or SessionProvider.unit() is preferred.
 async with infrastructure_unit(business_datasource) as session:
@@ -55,7 +55,7 @@ async with infrastructure_unit(business_datasource) as session:
 
 For a custom Store whose `connection()` joins `SessionProvider.unit()` on the same datasource, call `await journal.append(event)` inside that block. Preserve the lock order: business/advisory locks first, then the journal scope's head. When a transaction touches multiple scopes, acquire their journal heads in a consistent sorted order across every producer. Do not call external providers while holding a journal/business transaction.
 
-Append requires an already active native write unit and rejects read-only/autocommit units. It validates facts, serializes callers sharing the same native unit, obtains the scope's database head lock and writes entry, head and outbox notification atomically. Any failed append marks that native unit rollback-only even when business code catches the exception; native savepoint rollback semantics still apply. Storage failures are raised as a static `AuditError` and the native rollback diagnostic is redacted, so a later caught-failure rollback does not expose SQL or payload facts. No manual SQL BEGIN/COMMIT is introduced by the adapter.
+Append requires an already active native write unit and rejects read-only/autocommit units. Reads and writes reject a bound unit owned by a different transaction manager, even when two application contexts use the same datasource name. It validates facts, serializes callers sharing the same native unit, obtains the scope's database head lock and writes entry, head and outbox notification atomically. Any failed append marks that native unit rollback-only even when business code catches the exception; native savepoint rollback semantics still apply. Storage failures are raised as a static `AuditError` and the native rollback diagnostic is redacted, so a later caught-failure rollback does not expose SQL or payload facts. No manual SQL BEGIN/COMMIT is introduced by the adapter.
 
 The same event ID with identical validated facts returns the original entry and does not enqueue another notification. The same ID with different facts raises `AuditConflict`; keep `occurred_at` stable when retrying the same event. Aware event timestamps normalize to UTC. Ordering is per-scope transaction serialization, not cross-scope wall-clock chronology. A rollback leaves no sequence allocation or accepted entry. External effects require separate intent and observed-result events; unknown outcomes remain unknown until evidence supports a new reconciliation event.
 

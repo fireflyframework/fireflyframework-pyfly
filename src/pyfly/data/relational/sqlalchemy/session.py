@@ -54,6 +54,7 @@ from sqlalchemy.orm import Session, SessionTransaction
 
 from pyfly.data.transaction.context import current_state
 from pyfly.data.transaction.errors import IllegalTransactionStateError
+from pyfly.data.transaction.manager import TransactionManager
 from pyfly.data.transaction.registry import PRIMARY, TransactionManagerRegistry, installed_registry, resolve_manager
 from pyfly.data.transaction.template import infrastructure_unit
 from pyfly.data.transaction.unit_of_work import UnitOfWork
@@ -570,16 +571,18 @@ class ScopedAsyncSession(AsyncSession):
     def __init__(self, *args: Any, pyfly_datasource: str = PRIMARY, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pyfly_datasource = pyfly_datasource
+        self._pyfly_manager: TransactionManager | None = None
 
     @classmethod
     def of(cls, factory: async_sessionmaker[AsyncSession], *, datasource: str | None = None) -> ScopedAsyncSession:
         """A scoped session configured like *factory*'s sessions, for *datasource* (by default the datasource
         *factory* belongs to)."""
-        if datasource is None:
-            from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
+        from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
 
-            datasource = SqlAlchemyTransactionManager.for_sessionmaker(factory).datasource
-        return cls(pyfly_datasource=datasource, **factory.kw)
+        manager = SqlAlchemyTransactionManager.for_sessionmaker(factory)
+        session = cls(pyfly_datasource=datasource or manager.datasource, **factory.kw)
+        session._pyfly_manager = manager
+        return session
 
     @property
     def datasource(self) -> str:
@@ -587,7 +590,12 @@ class ScopedAsyncSession(AsyncSession):
         return self._pyfly_datasource
 
     def _pyfly_delegate(self) -> AsyncSession | None:
-        unit = current_state().target(self._pyfly_datasource)
+        state = current_state()
+        if self._pyfly_manager is not None:
+            state.check_manager(self._pyfly_manager)
+            if self._pyfly_datasource != self._pyfly_manager.datasource:
+                state.check_manager(self._pyfly_manager, datasource=self._pyfly_datasource)
+        unit = state.target(self._pyfly_datasource)
         if unit is None or not isinstance(unit.resource, AsyncSession):
             return None
         unit.check_usable()
@@ -725,9 +733,14 @@ class SessionProvider:
     def current(self, datasource: str | None = None) -> AsyncSession | None:
         """The session of the unit bound for *datasource* now (a repository's operation scope counts), or
         ``None`` outside one."""
-        unit = current_state().target(datasource or self._datasource)
+        name = datasource or self._datasource
+        state = current_state()
+        unit = state.target(name)
         if unit is None or unit.completed or not isinstance(unit.resource, AsyncSession):
             return None
+        registry = self._registry()
+        if registry is not None:
+            state.check_manager(registry.get(name))
         return unit.resource
 
     def unit(
