@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.20 (2026-10-30)
+
+### Added
+
+- Select native Google Cloud Storage through ECM auto-configuration and the optional `ecm-gcs` extra.
+- Create each document version with a generation precondition and no SDK retry. Preserve ambiguous upload failures for explicit readback; reads select retained document versions.
+- Document the adapter, credentials, configuration and large-file boundaries in the module guide and both book editions.
+
 ## v26.10.19 (2026-10-30)
 
 ### Added
