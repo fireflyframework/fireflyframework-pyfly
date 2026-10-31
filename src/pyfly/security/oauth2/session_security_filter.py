@@ -20,6 +20,7 @@ from typing import Any
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE
 from pyfly.context.request_context import RequestContext
+from pyfly.security._audit import SecurityAuditSupport
 from pyfly.security.context import SecurityContext
 from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 _SECURITY_CONTEXT_KEY = "SECURITY_CONTEXT"
 
 
-class OAuth2SessionSecurityFilter(OncePerRequestFilter):
+class OAuth2SessionSecurityFilter(SecurityAuditSupport, OncePerRequestFilter):
     """Restores a :class:`SecurityContext` from the HTTP session.
 
     Runs at ``HIGHEST_PRECEDENCE + 225``, which is *after* the JWT-based
@@ -59,6 +60,7 @@ class OAuth2SessionSecurityFilter(OncePerRequestFilter):
                 if request_context is not None:
                     request_context.security_context = stored_ctx
                 logger.debug("Restored SecurityContext from session for user: %s", stored_ctx.user_id)
+                await self._record_security("session_restore", "oauth2-session", "admitted")
                 return await call_next(request)
 
         # No session-based context — set anonymous so downstream filters can override

@@ -25,6 +25,7 @@ from starlette.responses import Response
 from pyfly.container.ordering import HIGHEST_PRECEDENCE, order
 from pyfly.context.request_context import RequestContext
 from pyfly.kernel.exceptions import SecurityException
+from pyfly.security._audit import SecurityAuditSupport
 from pyfly.security.context import SecurityContext
 from pyfly.security.jwt import JWTService
 from pyfly.web.filters import OncePerRequestFilter
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 @order(HIGHEST_PRECEDENCE + 220)
-class SecurityFilter(OncePerRequestFilter):
+class SecurityFilter(SecurityAuditSupport, OncePerRequestFilter):
     """Extracts Bearer token and populates ``request.state.security_context``.
 
     Uses ``exclude_patterns`` (fnmatch globs) to skip public endpoints.
@@ -66,4 +67,8 @@ class SecurityFilter(OncePerRequestFilter):
         req_ctx = RequestContext.current()
         if req_ctx is not None:
             req_ctx.security_context = security_context
+        if auth_header.startswith("Bearer "):
+            await self._record_security(
+                "authenticate", "jwt-bearer", "admitted" if security_context.is_authenticated else "denied"
+            )
         return cast(Response, await call_next(request))

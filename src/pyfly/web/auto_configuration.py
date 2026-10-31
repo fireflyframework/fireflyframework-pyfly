@@ -20,7 +20,9 @@ from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
     conditional_on_missing_bean,
+    conditional_on_property,
 )
+from pyfly.web.audit_filter import AuditWebFilter
 from pyfly.web.ports.outbound import WebServerPort
 
 
@@ -31,6 +33,12 @@ class WebAutoConfiguration:
 
     Priority: FastAPI (preferred) -> Starlette (fallback).
     """
+
+    @bean
+    @conditional_on_property("pyfly.audit.recording.enabled", having_value="true")
+    @conditional_on_missing_bean(AuditWebFilter)
+    def audit_web_filter(self) -> AuditWebFilter:
+        return AuditWebFilter()
 
     @bean
     @conditional_on_class("fastapi")
