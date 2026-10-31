@@ -69,6 +69,7 @@ async def test_business_journal_head_and_outbox_rollback_together(relational_bac
     deliveries = await instance.outbox.pending("pyfly.audit.export")
     assert len(deliveries) == 1
     assert deliveries[0].envelope.payload == {
+        "scope": SCOPE.model_dump(mode="json"),
         "journal_id": "default",
         "chain_id": first.chain_id,
         "sequence": 1,

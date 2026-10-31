@@ -239,6 +239,7 @@ class SqlAuditJournal:
                     destination=EXPORT_GROUP,
                     payload={
                         "journal_id": self.journal_id,
+                        "scope": event.scope.model_dump(mode="json"),
                         "chain_id": chain,
                         "sequence": sequence,
                         "entry_hash": entry.entry_hash,
