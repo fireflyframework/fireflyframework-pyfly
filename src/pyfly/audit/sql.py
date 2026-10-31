@@ -15,6 +15,7 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from pyfly.audit._infrastructure import audit_infrastructure_call
 from pyfly.audit.models import (
     AuditEvent,
     AuditHead,
@@ -78,6 +79,7 @@ class SqlAuditJournal:
             raise AuditError("Audit journal requires a native relational datasource")
         return engine
 
+    @audit_infrastructure_call
     async def start(self) -> None:
         if self._started:
             return
@@ -94,6 +96,7 @@ class SqlAuditJournal:
         await self.outbox.start()
         self._started = True
 
+    @audit_infrastructure_call
     async def stop(self) -> None:
         self._started = False
         await self.outbox.stop()
@@ -120,6 +123,7 @@ class SqlAuditJournal:
         except Exception:
             pass
 
+    @audit_infrastructure_call
     async def append(self, event: AuditEvent) -> JournalEntry:
         manager = resolve_manager(self._target)
         unit = current_unit_of_work(manager.datasource)
@@ -275,6 +279,7 @@ class SqlAuditJournal:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("Audit page limit must be between 1 and 1000")
 
+    @audit_infrastructure_call
     async def head(self, scope: AuditScope) -> AuditHead:
         """Observe the scoped high-watermark in one indexed lookup; this is not chain verification."""
         self._ready()
@@ -292,6 +297,7 @@ class SqlAuditJournal:
             except ValueError:
                 raise AuditIntegrityError("Audit journal has an invalid head") from None
 
+    @audit_infrastructure_call
     async def read(self, scope: AuditScope, *, after_sequence: int = 0, limit: int = 100) -> tuple[JournalEntry, ...]:
         self._ready()
         self._bounds(after_sequence, limit)
@@ -314,6 +320,7 @@ class SqlAuditJournal:
             )
             return tuple(self._decode(row, scope) for row in rows)
 
+    @audit_infrastructure_call
     async def verify(self, scope: AuditScope, *, trusted_head: AuditHead | None = None) -> VerificationResult:
         try:
             result = await self._verify(scope, trusted_head=trusted_head)
@@ -400,6 +407,7 @@ class SqlAuditJournal:
                 raise AuditIntegrityError("Audit journal head does not match its entries")
             return VerificationResult(head=head, anchored=trusted_head == head)
 
+    @audit_infrastructure_call
     async def export(
         self,
         scope: AuditScope,
