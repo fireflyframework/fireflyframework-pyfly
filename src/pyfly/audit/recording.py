@@ -142,16 +142,13 @@ class AuditRecorder:
 
     @staticmethod
     def _outside_units() -> None:
-        from pyfly.data.transaction.context import current_state
-        from pyfly.data.transaction.unit_of_work import UnitStatus
+        from pyfly.audit._infrastructure import has_active_data_units
 
-        state = current_state()
-        for name, _ in (*state.units, *state.scopes):
-            if any(unit.status in {UnitStatus.ACTIVE, UnitStatus.COMPLETING} for unit in state.held_units(name)):
-                raise AuditError(
-                    "Independent audit and external effects require no open Data unit; "
-                    "dispatch from an outbox or after the business unit exits"
-                )
+        if has_active_data_units():
+            raise AuditError(
+                "Independent audit and external effects require no open Data unit; "
+                "dispatch from an outbox or after the business unit exits"
+            )
 
     async def _independent(self, event: AuditEvent) -> JournalEntry:
         from pyfly.data.transaction import TransactionTemplate
