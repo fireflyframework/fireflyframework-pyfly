@@ -4,7 +4,7 @@
 
 import asyncio
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import httpx
 import pytest
@@ -402,3 +402,116 @@ async def test_http_capture_refuses_dispatch_inside_a_native_data_unit(relationa
         async with TransactionTemplate(context.get_bean(SqlAlchemyTransactionManager)).transaction(read_only=True):
             assert (await client.get("/private", headers={"authorization": f"Bearer {token}"})).status_code == 500
         assert not calls and not await context.get_bean(AuditJournal).read(scope)
+
+
+async def test_cancelled_dispatch_preserves_cancellation_when_unknown_sql_write_fails(relational_backend):
+    from sqlalchemy import text
+
+    from pyfly.data.relational.sqlalchemy import SqlAlchemyTransactionManager
+    from pyfly.data.transaction import TransactionTemplate
+    from pyfly.web.audit_filter import AuditWebFilter
+
+    async with application(relational_backend) as values:
+        context, client, jwt, scope, calls, resolver, operations = values
+        manager = context.get_bean(SqlAlchemyTransactionManager)
+
+        async def cancelled(request):
+            async with TransactionTemplate(manager).transaction() as unit:
+                if relational_backend.is_embedded:
+                    await unit.resource.execute(
+                        text(
+                            "CREATE TRIGGER fixture_reject BEFORE INSERT ON pyfly_audit_entries "
+                            "BEGIN SELECT RAISE(ABORT, 'PRIVATE fixture database detail'); END"
+                        )
+                    )
+                else:
+                    await unit.resource.execute(
+                        text(
+                            "CREATE FUNCTION fixture_reject() RETURNS trigger AS $$ "
+                            "BEGIN RAISE EXCEPTION 'PRIVATE fixture database detail'; END $$ LANGUAGE plpgsql"
+                        )
+                    )
+                    await unit.resource.execute(
+                        text(
+                            "CREATE TRIGGER fixture_reject BEFORE INSERT ON pyfly_audit_entries "
+                            "FOR EACH ROW EXECUTE FUNCTION fixture_reject()"
+                        )
+                    )
+            raise asyncio.CancelledError("PRIVATE original cancellation")
+
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await context.get_bean(AuditWebFilter).do_filter(None, cancelled)
+        assert not caught.value.args
+        entries = await context.get_bean(AuditJournal).read(scope)
+        assert len(entries) == 1 and entries[0].event.outcome == "started"
+
+
+@pytest.mark.parametrize("cancellation", ["asyncio-repeat", "anyio-level"])
+async def test_cancelled_dispatch_shields_unknown_sql_settlement_from_repeated_cancellation(
+    relational_backend, monkeypatch, cancellation
+):
+    import anyio
+
+    from pyfly.web.audit_filter import AuditWebFilter
+
+    async with application(relational_backend) as values:
+        context, client, jwt, scope, calls, resolver, operations = values
+        journal = context.get_bean(AuditJournal)
+        append = journal.append
+        dispatched, settling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        captured = []
+
+        async def wait_for_unknown(event):
+            if event.outcome == "unknown":
+                settling.set()
+                await release.wait()
+            return await append(event)
+
+        monkeypatch.setattr(journal, "append", wait_for_unknown)
+
+        async def downstream(request):
+            dispatched.set()
+            await asyncio.Event().wait()
+
+        cancel_scope = anyio.CancelScope()
+
+        async def invoke():
+            async def dispatch():
+                try:
+                    await context.get_bean(AuditWebFilter).do_filter(None, downstream)
+                except asyncio.CancelledError as error:
+                    captured.append(error.args)
+                    raise
+
+            if cancellation == "anyio-level":
+                with cancel_scope:
+                    await dispatch()
+            else:
+                await dispatch()
+
+        pending = asyncio.create_task(invoke())
+        try:
+            await asyncio.wait_for(dispatched.wait(), 2)
+            if cancellation == "anyio-level":
+                cancel_scope.cancel()
+            else:
+                pending.cancel("PRIVATE first cancellation")
+            await asyncio.wait_for(settling.wait(), 2)
+            if cancellation == "asyncio-repeat":
+                pending.cancel("PRIVATE repeated cancellation")
+            await asyncio.sleep(0)
+            assert not pending.done()
+            release.set()
+            if cancellation == "asyncio-repeat":
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            else:
+                await pending
+            assert captured == [()]
+            assert [item.event.outcome for item in await journal.read(scope)] == ["started", "unknown"]
+        finally:
+            release.set()
+            if not pending.done():
+                pending.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending

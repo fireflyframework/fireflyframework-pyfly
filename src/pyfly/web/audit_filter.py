@@ -25,7 +25,9 @@ class AuditWebFilter(AuditRecordingSupport, OncePerRequestFilter):
         try:
             response = await call_next(request)
         except asyncio.CancelledError:
-            await recorder.observation(operation, outcome="unknown")
+            from pyfly.data.transaction.template import run_shielded
+
+            await run_shielded(recorder.observation(operation, outcome="unknown"))
             raise asyncio.CancelledError from None
         except Exception:
             await recorder.observation(operation, outcome="unknown")
