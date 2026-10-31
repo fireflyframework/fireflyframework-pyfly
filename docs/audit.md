@@ -53,7 +53,7 @@ async with infrastructure_unit(business_datasource) as session:
 # entry is accepted only after the outer native unit commits.
 ```
 
-For Studio's Store, `async with store.connection()` already joins `SessionProvider.unit()` on the same datasource; call `await journal.append(event)` inside that block. Preserve the lock order: business/advisory locks first, then the journal scope's head. When a transaction touches multiple scopes, acquire their journal heads in a consistent sorted order across every producer. Do not call external providers while holding a journal/business transaction.
+For a custom Store whose `connection()` joins `SessionProvider.unit()` on the same datasource, call `await journal.append(event)` inside that block. Preserve the lock order: business/advisory locks first, then the journal scope's head. When a transaction touches multiple scopes, acquire their journal heads in a consistent sorted order across every producer. Do not call external providers while holding a journal/business transaction.
 
 Append requires an already active native write unit and rejects read-only/autocommit units. It validates facts, serializes callers sharing the same native unit, obtains the scope's database head lock and writes entry, head and outbox notification atomically. Any failed append marks that native unit rollback-only even when business code catches the exception; native savepoint rollback semantics still apply. Storage failures are raised as a static `AuditError` and the native rollback diagnostic is redacted, so a later caught-failure rollback does not expose SQL or payload facts. No manual SQL BEGIN/COMMIT is introduced by the adapter.
 
