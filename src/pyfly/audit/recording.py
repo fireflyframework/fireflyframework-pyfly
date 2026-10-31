@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -14,7 +16,7 @@ from uuid import uuid4
 from pydantic import Field, TypeAdapter
 
 from pyfly.audit.models import AuditEvent, AuditResource, AuditUsage, Fact, Identifier, JournalEntry
-from pyfly.audit.ports import AuditError, AuditJournal
+from pyfly.audit.ports import AuditAdmissionJournal, AuditAdmissionRefused, AuditError, AuditJournal
 from pyfly.audit.recording_context import AuditContext, AuditContextResolver, AuditOperation
 
 if TYPE_CHECKING:
@@ -150,13 +152,19 @@ class AuditRecorder:
                 "dispatch from an outbox or after the business unit exits"
             )
 
-    async def _independent(self, event: AuditEvent) -> JournalEntry:
+    async def _independent(self, event: AuditEvent, *, require_new: bool = False) -> JournalEntry:
         from pyfly.data.transaction import TransactionTemplate
 
         self._outside_units()
+        if require_new and not isinstance(self.journal, AuditAdmissionJournal):
+            raise AuditAdmissionRefused("This journal does not support durable effect admission")
         try:
             async with TransactionTemplate(self.manager).transaction():
-                entry = await self.journal.append(event)
+                if require_new:
+                    assert isinstance(self.journal, AuditAdmissionJournal)
+                    entry = await self.journal.admit_once(event)
+                else:
+                    entry = await self.journal.append(event)
             return entry
         except AuditError:
             raise
@@ -198,9 +206,13 @@ class AuditRecorder:
         await self._independent(self._event(operation, enriched, outcome))
 
     @asynccontextmanager
-    async def effect(self, operation: AuditOperation) -> AsyncIterator[AuditEffect]:
+    async def effect(
+        self, operation: AuditOperation, *, admission_key: str | None = None
+    ) -> AsyncIterator[AuditEffect]:
         try:
             operation = AuditOperation.model_validate(operation)
+            if admission_key is not None:
+                admission_key = TypeAdapter(Identifier).validate_python(admission_key)
         except ValueError:
             raise AuditError("A bounded semantic audit operation is required") from None
         if not self.enabled(operation.module):
@@ -209,7 +221,20 @@ class AuditRecorder:
         self._outside_units()
         try:
             context = await self._context(operation)
-            intent = await self._independent(self._event(operation, context, "intent"))
+            event = self._event(operation, context, "intent")
+            if admission_key is not None:
+                identity = json.dumps(
+                    {
+                        "scope": context.scope.model_dump(mode="json"),
+                        "module": operation.module,
+                        "action": operation.action,
+                        "command": admission_key,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                event = event.model_copy(update={"event_id": "intent." + hashlib.sha256(identity.encode()).hexdigest()})
+            intent = await self._independent(event, require_new=admission_key is not None)
         except AuditError:
             raise
         except Exception:
