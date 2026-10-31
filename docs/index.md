@@ -380,6 +380,7 @@ PyFly is organized into four layers:
 - [Testing](modules/testing.md) — Test fixtures, assertions, mock containers
 - [Integration Testing](modules/integration-testing.md) — Real-backend adapter tests (testcontainers, docker-compose, CI)
 - [Transactional Engine](modules/transactional.md) — Saga, Workflow, TCC distributed transaction patterns
+- [Audit Journal](audit.md) — Typed append-only facts, transaction ordering, verification and NDJSON export
 - [Event Sourcing](modules/eventsourcing.md) — AggregateRoot, EventStore, snapshots, outbox, projections
 - [Domain (DDD primitives)](modules/domain.md) — Entity, ValueObject, AggregateRoot, DomainEvent, Specification
 - [Plugins](modules/plugins.md) — Plugin SPI, extension points, lifecycle
