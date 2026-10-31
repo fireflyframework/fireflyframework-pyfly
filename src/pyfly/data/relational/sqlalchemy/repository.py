@@ -94,6 +94,7 @@ Spring Data semantics, at the minimum statement count:
 from __future__ import annotations
 
 import functools
+import hashlib
 import inspect
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterable, Sequence
@@ -109,6 +110,10 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.orm.interfaces import MANYTOONE
 
+from pyfly.audit._infrastructure import is_audit_infrastructure
+from pyfly.audit.ports import AuditError
+from pyfly.audit.recording_binding import AuditRecordingSupport
+from pyfly.audit.recording_context import AuditOperation
 from pyfly.container.types import NoAutowire
 from pyfly.data.exception_translation import translate_exception
 from pyfly.data.page import Page, Slice, Window
@@ -326,7 +331,7 @@ def _persistable_hook(cls: type) -> Callable[[Any], bool] | None:
     return None
 
 
-class Repository(Generic[T, ID]):
+class Repository(AuditRecordingSupport, Generic[T, ID]):
     """Generic CRUD repository for SQLAlchemy entities.
 
     Implements the Spring-parity ``PagingAndSortingRepository`` contract
@@ -351,6 +356,7 @@ class Repository(Generic[T, ID]):
             __sortable__ = ("placed_at", "total")   # the only properties a Sort may name
     """
 
+    __pyfly_audit_module__ = "data"
     _entity_type: type | None = None
     _id_type: type | None = None
     __datasource__: ClassVar[str | None] = None
@@ -476,6 +482,9 @@ class Repository(Generic[T, ID]):
         transactional: bool = False,
     ) -> Any:
         if self._manual_session is not None:
+            if not read and (recorder := self._audit_recorder("data")) is not None:
+                recorder._poison_active()
+                raise AuditError("Automatic Data audit writes require a managed repository") from None
             return await function(self, *args, **kwargs)
         datasource = self._datasource
         state = current_state()
@@ -483,13 +492,13 @@ class Repository(Generic[T, ID]):
             state.check_manager(self._transaction_manager())
         scoped = state.scope(datasource)
         if scoped is not None:
-            return await _run_on(scoped, function, self, args, kwargs, atomic)
+            return await _run_on(scoped, function, self, args, kwargs, atomic, read)
         unit = state.unit(datasource)
         if unit is not None:
             unit.check_usable()
             token = bind_state(state.with_scope(datasource, unit))
             try:
-                return await _run_on(unit, function, self, args, kwargs, atomic)
+                return await _run_on(unit, function, self, args, kwargs, atomic, read)
             finally:
                 reset_state(token)
         if transactional:
@@ -500,7 +509,7 @@ class Repository(Generic[T, ID]):
         for attempt in range(1, attempts + 1):
             try:
                 async with AutoUnit(manager, read_only=read) as auto:
-                    return await _run_on(auto, function, self, args, kwargs, atomic)
+                    return await _run_on(auto, function, self, args, kwargs, atomic, read)
             except Exception as error:
                 if attempt < attempts and manager.is_disconnect(error):
                     _logger.info(
@@ -510,6 +519,22 @@ class Repository(Generic[T, ID]):
                     continue
                 raise
         raise AssertionError("unreachable")  # pragma: no cover — the loop returns or raises
+
+    async def _pyfly_audit_write(self, function: Callable[..., Any], *, read: bool) -> None:
+        if read:
+            return
+        recorder = self._audit_recorder("data")
+        if recorder is None or is_audit_infrastructure(recorder.journal):
+            return
+        hint = f"{type(self).__module__}.{type(self).__qualname__}:{function.__name__}"
+        await recorder.state(
+            AuditOperation(
+                module="data",
+                action="repository.write",
+                resource_kind="repository",
+                resource_key=hashlib.sha256(hint.encode()).hexdigest(),
+            )
+        )
 
     async def _pyfly_stream(
         self, function: Callable[..., AsyncGenerator[Any, None]], args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -1433,7 +1458,9 @@ async def _run_on(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     atomic: bool,
+    read: bool,
 ) -> Any:
+    await repository._pyfly_audit_write(function, read=read)
     if not atomic:
         unit.check_usable()
         return await function(repository, *args, **kwargs)

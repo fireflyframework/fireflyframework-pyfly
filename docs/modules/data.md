@@ -251,6 +251,33 @@ unit.operation():`), records it there with `unit.savepoint_opened(handle)` and r
 refuses any other task's statement or savepoint while that savepoint is open: savepoints are a stack on
 one connection.
 
+### Mandatory repository audit
+
+The optional [native audit journal](../audit.md) is separate from mutable entity metadata such as
+`created_by` and `updated_at`. Enroll the `data` recording module and supply the trusted host context
+resolver to capture managed SQLAlchemy repository write admissions. The native bean post-processor
+binds the repository to its application's recorder; there is no process-wide audit registry.
+
+The hook runs inside the actual native write unit, before the repository's mutation. The journal
+entry, business write and outbox reference commit together, and rollback removes all three. A caught
+mandatory audit failure marks that unit rollback-only. The fact says `admitted`, not that a provisional
+write has already committed. Read operations do not generate audit writes. Internal suppression is
+scoped to the actual journal instance, so infrastructure from one application cannot suppress another.
+
+The operation is `data.repository.write`. Its resolver-only resource hint hashes the server-owned
+repository/method symbol; entity values, SQL, arguments and credentials are never passed to the
+resolver or journal. The host resolves the authoritative actor, scope and resource. Nested write
+methods can produce multiple admission facts in their shared transaction; use application semantic
+facts when one domain operation needs its own identity.
+
+Automatic capture covers managed repository methods, including native compiled write queries. Raw
+`SessionProvider`/`AsyncSession` SQL and custom transactional methods doing direct SQL require an
+explicit `AuditRecorder.state()` call inside their business unit. A repository using an explicitly
+supplied manual session refuses writes when enrolled for automatic Data audit, because its separate
+transaction cannot establish this atomic contract. Unenrolled manual sessions keep their existing
+caller-owned behavior. Automatic state recording requires the journal's exact supported SQLite or
+PostgreSQL manager; it never creates a second transaction on another datasource or backend.
+
 ### CrudRepository[T, ID]
 
 The Spring Data-style CRUD interface with type parameters for both entity and ID. It is the root of
