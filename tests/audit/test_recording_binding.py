@@ -1,6 +1,8 @@
 # Copyright 2026 Firefly Software Foundation
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+
 import pytest
 
 from pyfly.audit import AuditError
@@ -22,7 +24,8 @@ def test_native_binding_is_lazy_and_cannot_rebind_shared_instances():
         AuditModulePostProcessor(lambda: object()).after_init(target, "other")
 
 
-async def test_binding_failure_poisoning_is_safe_across_two_native_contexts(tmp_path):
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_binding_failure_poisoning_is_safe_across_two_native_contexts(tmp_path, cancelled):
     from pyfly.data.relational.sqlalchemy import SessionProvider
     from pyfly.data.transaction import UnexpectedRollbackError
     from tests.audit.test_infrastructure_context import application
@@ -32,12 +35,20 @@ async def test_binding_failure_poisoning_is_safe_across_two_native_contexts(tmp_
     await two.start()
     try:
         target = AuditRecordingSupport()
-        target._bind_audit_recorder(lambda: two.get_bean_by_name("fixture-private-value"))
+
+        def unavailable():
+            if cancelled:
+                raise asyncio.CancelledError("fixture-private-value")
+            return two.get_bean_by_name("fixture-private-value")
+
+        target._bind_audit_recorder(unavailable)
         with pytest.raises(UnexpectedRollbackError) as rollback:
             async with one.get_bean(SessionProvider).unit():
-                with pytest.raises(AuditError) as refusal:
+                with pytest.raises(asyncio.CancelledError if cancelled else AuditError) as refusal:
                     target._audit_recorder("data")
                 assert "fixture-private-value" not in str(refusal.value)
+                if cancelled:
+                    assert refusal.value.args == ()
         assert "fixture-private-value" not in str(rollback.value)
     finally:
         await two.stop()

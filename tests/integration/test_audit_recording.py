@@ -111,6 +111,40 @@ async def test_context_resolver_cannot_leak_a_raw_audit_error(relational_backend
     assert not await journal.read(SCOPE)
 
 
+@pytest.mark.parametrize("method", ["state", "observation", "effect"])
+async def test_resolver_cancellation_preserves_control_without_private_message(
+    relational_backend: RelationalBackend,
+    method: str,
+):
+    manager, journal, recorder = await setup(relational_backend)
+
+    class CancelledResolver:
+        async def resolve(self, operation):
+            raise asyncio.CancelledError("fixture private cancellation")
+
+    recorder.resolver = CancelledResolver()
+    operation = api().AuditOperation(module="data", action="order.saved")
+
+    async def invoke():
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            if method == "effect":
+                async with recorder.effect(operation):
+                    pytest.fail("Cancellation must not admit an effect")
+            else:
+                await getattr(recorder, method)(operation)
+        assert cancelled.value.args == ()
+        assert cancelled.value.__suppress_context__
+
+    if method == "state":
+        with pytest.raises(UnexpectedRollbackError) as rollback:
+            async with TransactionTemplate(manager).transaction():
+                await invoke()
+        assert "fixture private" not in str(rollback.value)
+    else:
+        await invoke()
+    assert not await journal.read(SCOPE)
+
+
 async def test_forged_operation_cannot_disable_capture_and_commit_unaudited_state(
     relational_backend: RelationalBackend,
 ):
@@ -221,9 +255,11 @@ async def test_wrong_manager_state_failure_poisoning_cannot_commit_caught_unaudi
 
 async def test_cancelled_effect_records_unknown_and_preserves_cancellation(relational_backend: RelationalBackend):
     _, journal, recorder = await setup(relational_backend)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as cancelled:
         async with recorder.effect(api().AuditOperation(module="agentic", action="model.request")):
-            raise asyncio.CancelledError()
+            raise asyncio.CancelledError("fixture private effect cancellation")
+    assert cancelled.value.args == ()
+    assert cancelled.value.__suppress_context__
     assert [entry.event.outcome for entry in await journal.read(SCOPE)] == ["intent", "unknown"]
 
 
