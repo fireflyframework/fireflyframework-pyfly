@@ -104,6 +104,10 @@ class SqlAuditJournal:
     def _ready(self) -> None:
         if not self._started:
             raise AuditError("Start the audit journal before use")
+        manager = resolve_manager(self._target)
+        unit = current_unit_of_work(manager.datasource)
+        if unit is not None and unit.manager is not manager:
+            raise AuditError("Audit journal cannot join a different native Data manager")
 
     def _identity(self, scope: AuditScope) -> str:
         return chain_id(self.journal_id, AuditScope.model_validate(scope))
