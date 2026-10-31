@@ -1160,6 +1160,7 @@ Browse all guides in the [Module Guides Index](docs/modules/README.md):
 - [Actuator](docs/modules/actuator.md) — Health checks, extensible endpoints
 - [Custom Actuator Endpoints](docs/modules/custom-actuator-endpoints.md) — Build your own actuator endpoints
 - [Transactional Engine](docs/modules/transactional.md) — Saga, Workflow, and TCC distributed transaction patterns
+- [Audit Journal](docs/audit.md) — Typed append-only facts, native transactional outbox, verification and NDJSON export
 - [Event Sourcing](docs/modules/eventsourcing.md) — Aggregates, event store, snapshots, outbox, projections
 - [Domain (DDD primitives)](docs/modules/domain.md) — Entity, ValueObject, AggregateRoot, DomainEvent, Specification, DomainRepository, exceptions
 - [Starters](docs/modules/starters.md) — Layered bundles (`@enable_core_stack`, `@enable_web_stack`, `@enable_application_stack`, `@enable_data_stack`, `@enable_domain_stack`) with one-line imperative APIs for .NET parity

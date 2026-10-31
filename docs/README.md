@@ -57,6 +57,7 @@ All module guides are organized in the [`modules/`](modules/README.md) directory
 | Guide | Description |
 |-------|-------------|
 | [Data Commons](modules/data.md) | Generic repository ports, derived query parsing, pagination, sorting, entity mapping — the shared layer for all data adapters |
+| [Audit Journal](audit.md) | Typed append-only facts, native Data/outbox atomicity, verification and NDJSON export |
 | [Data Relational (SQL)](modules/data-relational.md) | SQLAlchemy adapter — `Repository[T, ID]`, specifications, transactions, custom queries |
 | [Data Document (MongoDB)](modules/data-document.md) | MongoDB adapter — `MongoRepository[T, ID]`, `BaseDocument`, Beanie ODM patterns |
 

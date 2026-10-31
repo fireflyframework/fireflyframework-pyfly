@@ -391,6 +391,15 @@ class UnitOfWork:
             self._rollback_only_depth = level
             self._rollback_only_reason = reason
 
+    def redact_rollback_reason(self, reason: str) -> None:
+        """Replace diagnostic detail with a safe message without changing the rollback/savepoint mark.
+
+        A boundary that suppresses sensitive adapter errors uses this before raising its safe exception;
+        a later caught-failure rollback must not disclose the original SQL or parameters instead.
+        """
+        if self.rollback_only:
+            self._rollback_only_reason = reason
+
     def marked_within(self, depth: int) -> bool:
         """Whether the rollback-only mark was set inside the savepoint at *depth* (or a deeper one)."""
         return self._rollback_only_depth is not None and self._rollback_only_depth >= depth

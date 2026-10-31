@@ -161,6 +161,7 @@ nav:
       - Messaging & Eventing:
           - Messaging: modules/messaging.md
           - Events (EDA): modules/events.md
+          - Audit Journal: audit.md
           - Event Sourcing: modules/eventsourcing.md
       - Distributed Transactions:
           - Transactional Engine: modules/transactional.md
