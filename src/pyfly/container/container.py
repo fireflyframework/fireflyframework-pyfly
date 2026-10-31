@@ -403,17 +403,18 @@ class Container:
 
     def resolve(self, cls: type[T]) -> T:
         """Resolve an instance of the given type."""
-        # Direct registration. Only a class registered under two or more names has to choose among
-        # several beans (see _registration_for); every other lookup stays one dictionary hit.
+        # Explicit registrations retain precedence. Synthetic @bean port aliases use all bound candidates.
         reg = self._registrations.get(cls)
-        if reg is not None:
+        if reg is not None and not reg.declared_alias:
             if cls in self._shared_types:
                 reg = self._registration_for(cls)
             return cast(T, self._resolve_registration(reg))
 
         # Follow binding(s)
-        impls = self._bindings.get(cls, [])
-        if not impls:
+        registrations = self._bound_registrations(cls)
+        if not registrations:
+            if reg is not None:
+                return cast(T, self._resolve_registration(reg))
             raise NoSuchBeanError(
                 bean_type=cls,
                 suggestions=self._get_similar_type_names(
@@ -421,17 +422,42 @@ class Container:
                 ),
             )
 
-        if len(impls) == 1:
-            return cast(T, self._resolve_registration(self._registration_for(impls[0])))
+        candidates = self._distinct_registrations(registrations)
+        if len(candidates) == 1:
+            return cast(T, self._resolve_registration(candidates[0]))
+        primaries = self._distinct_registrations(
+            reg for reg in registrations if reg.primary or getattr(reg.impl_type, "__pyfly_primary__", False)
+        )
+        if len(primaries) == 1:
+            return cast(T, self._resolve_registration(primaries[0]))
+        raise NoUniqueBeanError(
+            bean_type=cls,
+            candidates=[reg.impl_type for reg in candidates],
+            candidate_names=[reg.display_name for reg in candidates],
+            primary_names=[reg.display_name for reg in primaries],
+        )
 
-        # Multiple impls: pick @primary — a class-level marker OR an @bean-level
-        # primary recorded on the registration (the @Bean @Primary equivalent).
-        for impl in impls:
-            reg = self._registrations.get(impl)
-            if getattr(impl, "__pyfly_primary__", False) or (reg is not None and reg.primary):
-                return cast(T, self._resolve_registration(self._registration_for(impl)))
+    def _bound_registrations(self, cls: type) -> list[Registration]:
+        registrations: list[Registration] = []
+        for implementation in self._bindings.get(cls, []):
+            if implementation in self._shared_types:
+                registrations.extend(
+                    reg for (registered, _name), reg in self._all.items() if registered is implementation
+                )
+            elif (reg := self._registrations.get(implementation)) is not None:
+                registrations.append(reg)
+        return registrations
 
-        raise NoUniqueBeanError(bean_type=cls, candidates=impls)
+    @staticmethod
+    def _distinct_registrations(registrations: Iterable[Registration]) -> list[Registration]:
+        found: list[Registration] = []
+        seen: set[int] = set()
+        for reg in registrations:
+            identity = id(reg.instance) if reg.instance is not None else id(reg.factory) if reg.factory else id(reg)
+            if identity not in seen:
+                seen.add(identity)
+                found.append(reg)
+        return found
 
     def _registration_for(self, cls: type) -> Registration:
         """The registration that answers a lookup of exactly *cls*.
@@ -516,10 +542,8 @@ class Container:
                 seen.add(id(instance))
                 ordered.append((get_order(reg.impl_type), instance))
 
-        for impl in self._bindings.get(cls, []):
-            reg = self._registrations.get(impl)
-            if reg is not None:
-                _add(reg)
+        for reg in self._bound_registrations(cls):
+            _add(reg)
         for reg in self._all.values():
             if reg.impl_type is cls:
                 _add(reg)
