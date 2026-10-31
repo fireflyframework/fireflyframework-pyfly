@@ -24,17 +24,25 @@ from pyfly.audit.ports import (
     CheckpointSigner,
     CheckpointVerifier,
 )
+from pyfly.audit.recording import AuditEffect, AuditEffectUncertain, AuditRecorder
+from pyfly.audit.recording_context import AuditContext, AuditContextResolver, AuditOperation
 
 __all__ = [
     "AuditActor",
     "AuditCheckpoint",
     "AuditConflict",
+    "AuditContext",
+    "AuditContextResolver",
+    "AuditEffectUncertain",
+    "AuditEffect",
     "AuditCorrelation",
     "AuditError",
     "AuditEvent",
     "AuditHead",
     "AuditIntegrityError",
     "AuditJournal",
+    "AuditOperation",
+    "AuditRecorder",
     "AuditResource",
     "AuditScope",
     "AuditUsage",

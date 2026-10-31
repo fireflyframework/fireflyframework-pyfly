@@ -11,6 +11,18 @@ from typing import Any, Protocol, overload
 _infrastructure: ContextVar[tuple[object, ...]] = ContextVar("pyfly.audit.infrastructure", default=())
 
 
+def has_active_data_units() -> bool:
+    from pyfly.data.transaction.context import current_state
+    from pyfly.data.transaction.unit_of_work import UnitStatus
+
+    state = current_state()
+    return any(
+        unit.status in {UnitStatus.ACTIVE, UnitStatus.COMPLETING}
+        for name, _ in (*state.units, *state.scopes)
+        for unit in state.held_units(name)
+    )
+
+
 def _identity(owner: object) -> object:
     from pyfly.container.scoped_proxy import is_scoped_proxy, proxy_target
 
