@@ -25,6 +25,12 @@ from pyfly.context.conditions import (
     conditional_on_single_candidate,
     conditional_on_web_application,
 )
+from pyfly.context.consumer_context import (
+    PRIVATE_CONSUMER_CONTEXT,
+    bind_consumer_context,
+    consumer_context,
+    public_consumer_data,
+)
 from pyfly.context.environment import Environment
 from pyfly.context.events import (
     ApplicationEvent,
@@ -54,6 +60,10 @@ __all__ = [
     "RefreshScopeRefreshedEvent",
     "Environment",
     "RequestContext",
+    "PRIVATE_CONSUMER_CONTEXT",
+    "bind_consumer_context",
+    "consumer_context",
+    "public_consumer_data",
     "app_event_listener",
     "auto_configuration",
     "conditional_on_bean",

@@ -114,8 +114,8 @@ from pyfly.data.transaction.registry import (
     installed_registry,
     register_resource_resolver,
 )
-from pyfly.data.transaction.template import run_shielded, shield_scope
-from pyfly.data.transaction.unit_of_work import UnitOfWork
+from pyfly.data.transaction.template import complete_auto_unit, run_shielded, shield_scope
+from pyfly.data.transaction.unit_of_work import UnitOfWork, cancel_requests
 
 __all__ = [
     "SqlAlchemyTransactionManager",
@@ -455,21 +455,28 @@ class SqlAlchemyTransactionManager:
                     if statement is not None and not unit.autocommit:
                         await connection.exec_driver_sql(statement)
             if target is not None:
-                await target.run_after_begin(session)
-        except BaseException:
-            await self._discard(unit)
+                await target.run_after_begin(session, register_synchronization=unit.register_synchronization)
+        except BaseException as error:
+            await self._discard(unit, error)
             raise
 
     async def _guard_start(self, unit: UnitOfWork, session: UnitSession, statement: Any) -> None:
         try:
             await statement
-        except BaseException:
-            await self._discard(unit)
+        except BaseException as error:
+            await self._discard(unit, error)
             raise
 
-    async def _discard(self, unit: UnitOfWork) -> None:
+    async def _discard(self, unit: UnitOfWork, failure: BaseException | None = None) -> None:
         """Close the session of a unit that failed to start (shielded; its failure is the one to raise)."""
-        _result, error, _cancelled = await run_shielded(self._close(unit, invalidate=unit.poisoned))
+        if unit.completed:
+            return
+        cleanup = (
+            complete_auto_unit(unit, failure or RuntimeError("Transaction failed to start"), since=cancel_requests())
+            if unit.synchronizations
+            else self._close(unit, invalidate=unit.poisoned)
+        )
+        _result, error, _cancelled = await run_shielded(cleanup)
         if error is not None:
             _logger.debug("unit_of_work_discard_failed", exc_info=(type(error), error, error.__traceback__))
 

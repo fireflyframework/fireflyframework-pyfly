@@ -13,8 +13,9 @@
 # limitations under the License.
 """X.509 client-certificate authentication (Spring ``x509()``).
 
-Authenticates a request by the client certificate forwarded by the TLS-terminating
-proxy in a header (e.g. ``X-Client-Cert``, PEM, possibly URL-encoded). The
+Authenticates a deployment-validated ingress assertion containing a client certificate.
+The host must provide trusted_ingress validation; headers alone are never trusted.
+The TLS-terminating proxy forwards the certificate in a header (e.g. ``X-Client-Cert``, PEM, possibly URL-encoded). The
 certificate subject's Common Name becomes the principal; when a
 :class:`~pyfly.security.user_details.UserDetailsService` is configured, the
 principal must resolve to a (enabled) user, whose authorities are applied.
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import cast
 from urllib.parse import unquote
 
@@ -51,11 +53,13 @@ class X509AuthenticationFilter(OncePerRequestFilter):
         self,
         *,
         cert_header: str = "x-client-cert",
+        trusted_ingress: Callable[[Request], bool] | None = None,
         user_details_service: UserDetailsService | None = None,
         subject_regex: str | None = None,
         error_mode: str = ERROR_MODE_ANONYMOUS,
     ) -> None:
         self._cert_header = cert_header
+        self._trusted_ingress = trusted_ingress
         self._users = user_details_service
         self._subject_regex = re.compile(subject_regex) if subject_regex else None
         self._error_mode = error_mode if error_mode in (ERROR_MODE_ANONYMOUS, ERROR_MODE_401) else ERROR_MODE_ANONYMOUS
@@ -66,6 +70,15 @@ class X509AuthenticationFilter(OncePerRequestFilter):
             if not hasattr(request.state, "security_context"):
                 request.state.security_context = SecurityContext.anonymous()
             return cast(Response, await call_next(request))
+
+        if len(request.headers.getlist(self._cert_header)) != 1 or self._trusted_ingress is None:
+            return self._unauthorized()
+        try:
+            trusted = self._trusted_ingress(request) is True
+        except Exception:
+            trusted = False
+        if not trusted:
+            return self._unauthorized()
 
         principal = self._extract_principal(unquote(raw))
         context = await self._build_context(principal) if principal else None

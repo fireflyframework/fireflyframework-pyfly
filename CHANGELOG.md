@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## v26.10.27 (2026-10-31)
+## v26.10.29 (2026-10-31)
 
 ### Added
 
@@ -58,6 +58,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Review supported adapters and reconciliation requirements before enabling
   strict delivery. Local archive readback is not business-table restoration,
   independent signing custody, WORM retention or remote exactly-once execution.
+
+## v26.10.28 (2026-10-31)
+
+### Added
+
+- Add inline CID attachments across native SMTP, SendGrid, Resend and optional
+  Azure Communication Email, preserving existing positional message constructors.
+- Add explicit email transport capabilities and an optional operation-status port.
+  Azure email uses the official async SDK, explicitly selected managed identity or
+  injected credentials, stable operation correlation and bounded same-origin status
+  lookup. It does not automatically replay POSTs, follow operation URLs to another
+  host or infer mailbox delivery. Azure Email retires September 30, 2028; retain
+  replaceable configuration and review current Microsoft lifecycle guidance.
+
+### Fixed
+
+- Verify SMTP certificate chains and hostnames for STARTTLS and implicit TLS;
+  reject plaintext authentication and unverified injected contexts. Native CA and
+  client-certificate files or a qualified SSLContext can configure trusted endpoints.
+- Fail closed on explicitly unknown email provider names while retaining custom
+  provider overrides and explicit dummy/local compatibility.
+- Keep message payloads, headers, attachments and provider bodies out of default
+  diagnostics. Native error results expose stable codes, with uncertain DATA or
+  SDK outcomes reported as UNKNOWN rather than retryable guaranteed failures.
+
+### Migration
+
+- Treat SENT as provider acceptance. UNKNOWN requires reconciliation or explicit
+  review; a stable message/operation ID is not an exactly-once guarantee. Dummy
+  capabilities do not declare real delivery or observed network readiness.
+- Consumers relying on raw provider error strings must use the safe native codes.
+
+## v26.10.27 (2026-10-31)
+
+### Added
+
+- Provide portable authenticated MCP tools, resources and prompts through public SDK
+  registries, with bounded SQL session metadata and admission for independent API replicas.
+- Honor `pyfly.scheduling.enabled` without changing the default scheduling behavior;
+  disabled applications discover and start no scheduled jobs.
+- Add a bounded, copied JSON consumer context with scoped asynchronous lifetimes and
+  recursive private-envelope redaction for composing applications.
+- Allow native after-begin customizers to return transaction synchronizations, registering
+  them before binding a new unit and preserving completion and cleanup on every outcome.
+- Configure verified outbound HTTP TLS and optional client certificates through native
+  HTTP clients, and serve native TLS and mutual TLS through supported server adapters.
+
+### Fixed
+
+- Preserve every managed datasource's parameter-hiding policy, including replicas,
+  migrations and named compatibility factories, to keep bound values out of diagnostics.
+- Restrict certificate-header trust to explicitly configured ingress policy and redact
+  sensitive HTTP headers and span attributes from default diagnostics.
+
+### Migration
+
+- Multi-instance MCP hosts must provision the framework session and admission tables;
+  production schema validation does not create them automatically. Keep inbound credential
+  authorization in the host application and never forward its bearer token to a provider.
+- Customizers returning `None` remain compatible. Hand-opened transactions using a returned
+  synchronization must supply a registration callback; dropping it fails closed.
 
 ## v26.10.26 (2026-10-31)
 

@@ -65,7 +65,10 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from pyfly.data.transaction.synchronization import TransactionSynchronization
 
 from sqlalchemy import MetaData, event
 from sqlalchemy.engine import URL, Dialect, make_url
@@ -413,14 +416,19 @@ class DataSource:
         """Execution options a unit applies before ``BEGIN`` (SQLite write units: ``BEGIN IMMEDIATE``)."""
         return begin_execution_options(self.url.get_backend_name(), read_only=read_only)
 
-    async def run_after_begin(self, connection: AsyncSession | AsyncConnection) -> None:
+    async def run_after_begin(
+        self,
+        connection: AsyncSession | AsyncConnection,
+        *,
+        register_synchronization: Callable[[TransactionSynchronization], None] | None = None,
+    ) -> None:
         """Run the after-begin customizers on *connection*, which just began a transaction here.
 
         The unit of work calls it right after ``BEGIN``; it is
         :func:`~pyfly.data.relational.dialect_customizers.run_after_begin` bound to this datasource. (It
         is not named ``after_begin``: a datasource is not itself an ``AfterBeginCustomizer``.)
         """
-        await run_after_begin(self, connection)
+        await run_after_begin(self, connection, register_synchronization=register_synchronization)
 
     async def dispose(self) -> None:
         """Dispose this datasource's engine (and its replica's)."""
@@ -1055,6 +1063,7 @@ class DataSourceRegistry:
             replica_settings = DataSourceProperties(
                 url=settings.read_replica_url,
                 echo=settings.echo,
+                hide_parameters=settings.hide_parameters,
                 pool=settings.pool,
                 connect_args=dict(settings.connect_args),
                 sqlite=settings.sqlite,
@@ -1088,7 +1097,11 @@ class DataSourceRegistry:
         pool = settings.pool
         connect_args = self._connect_args(url, settings)
         memory_sqlite = backend == "sqlite" and not is_file_database(url)
-        kwargs: dict[str, Any] = {"echo": settings.echo, "pool_pre_ping": pool.pre_ping}
+        kwargs: dict[str, Any] = {
+            "echo": settings.echo,
+            "hide_parameters": settings.hide_parameters,
+            "pool_pre_ping": pool.pre_ping,
+        }
         if not memory_sqlite:
             # Recycling the single StaticPool connection of an in-memory database would drop the database.
             kwargs["pool_recycle"] = pool.recycle

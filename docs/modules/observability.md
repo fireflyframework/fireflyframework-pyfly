@@ -459,6 +459,7 @@ def validate_input(data: dict) -> bool:
 | Parameter | Type  | Description                              |
 |-----------|-------|------------------------------------------|
 | `name`    | `str` | The name of the span in the trace viewer |
+| `include_content` | `bool` | Default `false`; explicitly permit exception messages and stacks |
 
 Under the hood, PyFly creates a tracer named `"pyfly"`:
 
@@ -472,38 +473,15 @@ _tracer = trace.get_tracer("pyfly")
 
 ### Error Recording
 
-When the decorated function raises an exception, the span automatically:
+When the decorated function raises an exception or cancellation, the span records
+`ERROR` status and the exception type only. The original exception propagates
+unchanged. Exception messages and stack traces are withheld by default because
+they may contain credentials, prompts, source text, or bound database values.
 
-1. Sets the span status to `ERROR` with the exception message via
-   `trace.Status(trace.StatusCode.ERROR, str(exc))`.
-2. Records the exception on the span via `current_span.record_exception(exc)`.
-3. Re-raises the original exception so callers see it unmodified.
-
-```python
-@span("risky-operation")
-async def risky_operation() -> None:
-    raise ValueError("something went wrong")
-
-# The exception propagates normally, but the span records:
-# - status: ERROR
-# - exception type, message, and traceback
-```
-
-The wrapper implementation (async path shown; sync path is identical without `await`):
-
-```python
-@functools.wraps(func)
-async def wrapper(*args: Any, **kwargs: Any) -> Any:
-    with _tracer.start_as_current_span(name) as current_span:
-        try:
-            return await func(*args, **kwargs)
-        except Exception as exc:
-            current_span.set_status(
-                trace.Status(trace.StatusCode.ERROR, str(exc))
-            )
-            current_span.record_exception(exc)
-            raise
-```
+An explicitly reviewed `@span("operation", include_content=True)` may capture
+messages and stacks. Do not enable content capture for sensitive operations.
+This option controls exception recording, not arbitrary attributes added by
+application code; keep those attributes on a reviewed allowlist.
 
 ### OpenTelemetry Integration
 
@@ -1287,3 +1265,11 @@ async def main():
 
 Each log line is a self-contained JSON object ready for ingestion by log aggregation
 systems such as Elasticsearch, Datadog, or Grafana Loki.
+
+### Configuration header privacy
+
+Configuration diagnostics redact `Authorization`, `Proxy-Authorization`, `Cookie`
+and `Set-Cookie` header leaves, case-insensitively, including native header
+environment overrides and bound client properties. Runtime configuration remains
+unchanged; only diagnostic values are masked. Do not put secrets in arbitrary
+custom header names without a matching application redaction policy.

@@ -15,13 +15,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import timedelta
+from ssl import CERT_REQUIRED, SSLContext
+from typing import Annotated, Any
 
 from pyfly.client.ports.outbound import HttpClientPort, StreamingHttpClientPort
 from pyfly.client.post_processor import HttpClientBeanPostProcessor
 from pyfly.client.protocols.grpc_client import GrpcClientBuilder
 from pyfly.client.protocols.websocket_client import WebSocketClientBuilder
-from pyfly.container.bean import bean
+from pyfly.config.properties.client import ClientTlsProperties
+from pyfly.container.bean import Qualifier, bean
 from pyfly.context.conditions import (
     auto_configuration,
     conditional_on_class,
@@ -37,19 +40,39 @@ class ClientAutoConfiguration:
     """Auto-configures the httpx HTTP client adapter."""
 
     @bean
-    def http_client_adapter(self, config: Config) -> HttpClientPort:
-        from datetime import timedelta
-
+    def http_client_adapter(
+        self,
+        config: Config,
+        ssl_context: Annotated[SSLContext | None, Qualifier("http_client_ssl_context")] = None,
+    ) -> HttpClientPort:
         from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
 
-        timeout_s = float(config.get("pyfly.client.timeout", 30))
-        return HttpxClientAdapter(
-            timeout=timedelta(seconds=timeout_s),
-            trust_env=str(config.get("pyfly.client.trust-env", True)).lower() == "true",
-            follow_redirects=str(config.get("pyfly.client.follow-redirects", False)).lower() == "true",
-            retries=config.get("pyfly.client.transport-retries", 0),
-            headers=config.get("pyfly.client.headers"),
+        return HttpxClientAdapter(**self._adapter_options(config, ssl_context))
+
+    @staticmethod
+    def _adapter_options(config: Config, ssl_context: SSLContext | None = None) -> dict[str, Any]:
+        tls = ClientTlsProperties(
+            ca_file=config.get("pyfly.client.tls.ca-file"),
+            certfile=config.get("pyfly.client.tls.certfile"),
+            keyfile=config.get("pyfly.client.tls.keyfile"),
         )
+        configured_tls = any((tls.ca_file, tls.certfile, tls.keyfile))
+        if ssl_context is not None:
+            if configured_tls:
+                raise ValueError("Configure TLS files or the named SSLContext bean, not both")
+            if not ssl_context.check_hostname or ssl_context.verify_mode != CERT_REQUIRED:
+                raise ValueError("Native client SSLContext requires certificate and hostname verification")
+        options: dict[str, Any] = {
+            "timeout": timedelta(seconds=float(config.get("pyfly.client.timeout", 30))),
+            "trust_env": str(config.get("pyfly.client.trust-env", True)).lower() == "true",
+            "follow_redirects": str(config.get("pyfly.client.follow-redirects", False)).lower() == "true",
+            "retries": config.get("pyfly.client.transport-retries", 0),
+            "headers": config.get("pyfly.client.headers"),
+            "tls": tls if configured_tls else None,
+        }
+        if ssl_context is not None:
+            options["verify"] = ssl_context
+        return options
 
     @bean
     def streaming_http_client(self, client: HttpClientPort) -> StreamingHttpClientPort:
@@ -58,9 +81,11 @@ class ClientAutoConfiguration:
         return client
 
     @bean
-    def http_client_post_processor(self, config: Config) -> HttpClientBeanPostProcessor:
-        from datetime import timedelta
-
+    def http_client_post_processor(
+        self,
+        config: Config,
+        ssl_context: Annotated[SSLContext | None, Qualifier("http_client_ssl_context")] = None,
+    ) -> HttpClientBeanPostProcessor:
         retry_cfg = config.get("pyfly.client.retry")
         cb_cfg = config.get("pyfly.client.circuit_breaker") or config.get("pyfly.client.circuit-breaker")
 
@@ -74,12 +99,12 @@ class ClientAutoConfiguration:
 
         # Build per-bean adapters with the configured timeout so declarative
         # clients honor pyfly.client.timeout (audit #15).
-        timeout_s = int(config.get("pyfly.client.timeout", 30))
+        options = self._adapter_options(config, ssl_context)
 
         def factory(base_url: str) -> Any:
             from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
 
-            return HttpxClientAdapter(base_url=base_url, timeout=timedelta(seconds=timeout_s))
+            return HttpxClientAdapter(base_url=base_url, **options)
 
         return HttpClientBeanPostProcessor(
             factory,

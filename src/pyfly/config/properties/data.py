@@ -336,9 +336,11 @@ class DataSourceProperties:
     connect_args: dict[str, Any] = field(default_factory=dict)
     sqlite: SqliteProperties = field(default_factory=SqliteProperties)
     read_replica_url: str | None = None
+    hide_parameters: bool = True
 
     def __post_init__(self) -> None:
         self.echo = parse_echo(self.echo, f"{PREFIX}.echo")
+        self.hide_parameters = parse_bool(self.hide_parameters, f"{PREFIX}.hide-parameters")
         if isinstance(self.pool, Mapping):
             self.pool = PoolProperties(**_fields_of(PoolProperties, self.pool))
         if isinstance(self.sqlite, Mapping):
@@ -377,12 +379,14 @@ class RelationalProperties:
     schema: SchemaProperties = field(default_factory=SchemaProperties)
     #: Deprecated: ``pyfly.data.relational.pool-size`` was never read; it now aliases ``pool.size``.
     pool_size: int | None = None
+    hide_parameters: bool = True
 
     def __post_init__(self) -> None:
         # Config.bind hands raw strings and nested dicts to fields it cannot type; normalize them so the
         # bound object holds the same typed values as from_config().
         self.enabled = parse_bool(self.enabled, f"{PREFIX}.enabled")
         self.echo = parse_echo(self.echo, f"{PREFIX}.echo")
+        self.hide_parameters = parse_bool(self.hide_parameters, f"{PREFIX}.hide-parameters")
         if isinstance(self.migrations, Mapping):
             self.migrations = MigrationsProperties(**_fields_of(MigrationsProperties, self.migrations))
         if isinstance(self.schema, Mapping):
@@ -405,6 +409,7 @@ class RelationalProperties:
         return DataSourceProperties(
             url=self.url,
             echo=self.echo,
+            hide_parameters=self.hide_parameters,
             pool=self.pool,
             connect_args=dict(self.connect_args),
             sqlite=self.sqlite,
@@ -418,6 +423,7 @@ class RelationalProperties:
         return DataSourceProperties(
             url=url,
             echo=self.echo,
+            hide_parameters=self.hide_parameters,
             pool=self.pool,
             connect_args=dict(self.connect_args) if same_driver else {},
             sqlite=self.sqlite,
@@ -464,6 +470,7 @@ class RelationalProperties:
             enabled=parse_bool(reader.raw(f"{PREFIX}.enabled", False), f"{PREFIX}.enabled"),
             url=url,
             echo=echo,
+            hide_parameters=parse_bool(reader.raw(f"{PREFIX}.hide-parameters", True), f"{PREFIX}.hide-parameters"),
             ddl_auto=ddl_auto_strategy(reader.raw(f"{PREFIX}.ddl-auto"), url=url, migrations=migrations.enabled),
             pool=pool,
             connect_args=connect_args,
@@ -625,6 +632,9 @@ class _Reader:
             result[name] = DataSourceProperties(
                 url=url,
                 echo=parent.echo if raw_echo is None else parse_echo(raw_echo, f"{base}.echo"),
+                hide_parameters=parse_bool(
+                    self.raw(f"{base}.hide-parameters", parent.hide_parameters), f"{base}.hide-parameters"
+                ),
                 pool=self.pool(f"{base}.pool", parent.pool),
                 connect_args={**inherited_args, **own_args},
                 sqlite=self.sqlite(f"{base}.sqlite", parent.sqlite),

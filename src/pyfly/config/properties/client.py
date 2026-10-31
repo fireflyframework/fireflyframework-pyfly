@@ -15,10 +15,37 @@
 
 from __future__ import annotations
 
+import ssl
 from dataclasses import dataclass, field
 from typing import Any
 
 from pyfly.core.config import config_properties
+
+
+@dataclass
+class ClientTlsProperties:
+    """Verified HTTP TLS, with an optional client identity loaded from files."""
+
+    ca_file: str | None = None
+    certfile: str | None = None
+    keyfile: str | None = None
+
+    def __post_init__(self) -> None:
+        for value in (self.ca_file, self.certfile, self.keyfile):
+            if value is not None and (
+                not isinstance(value, str) or not value or any(char in value for char in ("\0", "\r", "\n"))
+            ):
+                raise ValueError("TLS certificate and key paths must be non-empty strings")
+
+    def ssl_context(self) -> ssl.SSLContext:
+        if bool(self.certfile) != bool(self.keyfile):
+            raise ValueError("TLS client certificate and key must be configured together")
+        import certifi
+
+        context = ssl.create_default_context(cafile=self.ca_file or certifi.where())
+        if self.certfile and self.keyfile:
+            context.load_cert_chain(self.certfile, self.keyfile)
+        return context
 
 
 @config_properties(prefix="pyfly.client")
@@ -33,3 +60,4 @@ class ClientProperties:
     headers: dict[str, str] = field(default_factory=dict)
     retry: dict[str, Any] = field(default_factory=lambda: {"max-attempts": 3, "base-delay": 1.0})
     circuit_breaker: dict[str, Any] = field(default_factory=lambda: {"failure-threshold": 5, "recovery-timeout": 30})
+    tls: ClientTlsProperties = field(default_factory=ClientTlsProperties)

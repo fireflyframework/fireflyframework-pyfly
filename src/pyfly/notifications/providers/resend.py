@@ -7,19 +7,25 @@ from __future__ import annotations
 from typing import Any
 
 from pyfly.client.pooled import PooledHttpClient
+from pyfly.notifications._email import message_headers, secure_endpoint
+from pyfly.notifications.capabilities import EmailProviderCapabilities
 from pyfly.notifications.models import EmailMessage, EmailStatus, NotificationResult
+from pyfly.notifications.providers._http import dispatch_http_email
 
 
 class ResendEmailProvider:
     """Bridge to Resend's REST API."""
 
     name = "resend"
+    capabilities = EmailProviderCapabilities(real_delivery=True, inline_cid=True)
 
     def __init__(
         self, api_key: str, *, api_base: str = "https://api.resend.com", default_from: str | None = None
     ) -> None:
+        if not isinstance(api_key, str) or not api_key:
+            raise ValueError("Email API credential must be configured")
         self._api_key = api_key
-        self._api_base = api_base.rstrip("/")
+        self._api_base = secure_endpoint(api_base)
         self._default_from = default_from
         self._http: Any = None
 
@@ -34,49 +40,39 @@ class ResendEmailProvider:
         return PooledHttpClient(self._http)
 
     async def send(self, message: EmailMessage) -> NotificationResult:
-        async with await self._client() as client:
-            payload: dict[str, Any] = {
-                "from": message.sender or self._default_from,
-                "to": message.to,
-                "subject": message.subject,
-            }
-            if message.cc:
-                payload["cc"] = message.cc
-            if message.bcc:
-                payload["bcc"] = message.bcc
-            if message.body_text:
-                payload["text"] = message.body_text
-            if message.body_html:
-                payload["html"] = message.body_html
-            if message.attachments:
-                import base64
+        try:
+            payload = self._payload(message)
+        except Exception:
+            return NotificationResult(message.id, self.name, EmailStatus.FAILED, error="EMAIL_PREPARATION_FAILED")
+        return await dispatch_http_email(self, message, payload, "/emails")
 
-                payload["attachments"] = [
-                    {
-                        "filename": a.filename,
-                        "content": base64.b64encode(a.data).decode("ascii"),
-                    }
-                    for a in message.attachments
-                ]
-            resp = await client.post(
-                f"{self._api_base}/emails",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            if 200 <= resp.status_code < 300:
-                provider_id = resp.json().get("id")
-                return NotificationResult(
-                    id=message.id, provider=self.name, status=EmailStatus.SENT, provider_id=provider_id
-                )
-            return NotificationResult(
-                id=message.id,
-                provider=self.name,
-                status=EmailStatus.FAILED,
-                error=f"http {resp.status_code}: {resp.text}",
-            )
+    def _payload(self, message: EmailMessage) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "headers": message_headers(message),
+            "from": message.sender or self._default_from,
+            "to": message.to,
+            "subject": message.subject,
+        }
+        if message.cc:
+            payload["cc"] = message.cc
+        if message.bcc:
+            payload["bcc"] = message.bcc
+        if message.body_text:
+            payload["text"] = message.body_text
+        if message.body_html:
+            payload["html"] = message.body_html
+        if message.attachments:
+            import base64
+
+            payload["attachments"] = [
+                {
+                    "filename": a.filename,
+                    "content": base64.b64encode(a.data).decode("ascii"),
+                    **({"content_id": a.content_id} if a.inline else {}),
+                }
+                for a in message.attachments
+            ]
+        return payload
 
     async def start(self) -> None:
         """No-op — the pooled HTTP client is created lazily on first use."""

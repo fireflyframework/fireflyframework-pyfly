@@ -33,15 +33,18 @@ except ImportError:
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def span(name: str) -> Callable[[F], F]:
+def span(name: str, *, include_content: bool = False) -> Callable[[F], F]:
     """Decorator that wraps a function in an OpenTelemetry span.
 
-    No-op when opentelemetry is not installed.
+    No-op when opentelemetry is not installed. Exception content is withheld
+    unless the caller explicitly opts in with ``include_content=True``.
 
     Usage:
         @span("process-order")
         async def process_order(order_id: str) -> dict: ...
     """
+    if type(include_content) is not bool:
+        raise ValueError("include_content must be a boolean")
     if not _HAS_OTEL:
 
         def noop_decorator(func: F) -> F:
@@ -54,26 +57,40 @@ def span(name: str) -> Callable[[F], F]:
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with _tracer.start_as_current_span(name) as current_span:
+                with _tracer.start_as_current_span(
+                    name, record_exception=False, set_status_on_exception=False
+                ) as current_span:
                     try:
                         return await func(*args, **kwargs)
-                    except Exception as exc:
-                        current_span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
-                        current_span.record_exception(exc)
+                    except BaseException as exc:
+                        _record_error(current_span, exc, include_content=include_content)
                         raise
 
             return async_wrapper  # type: ignore[return-value]
 
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            with _tracer.start_as_current_span(name) as current_span:
+            with _tracer.start_as_current_span(
+                name, record_exception=False, set_status_on_exception=False
+            ) as current_span:
                 try:
                     return func(*args, **kwargs)
-                except Exception as exc:
-                    current_span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
-                    current_span.record_exception(exc)
+                except BaseException as exc:
+                    _record_error(current_span, exc, include_content=include_content)
                     raise
 
         return sync_wrapper  # type: ignore[return-value]
 
     return decorator
+
+
+def _record_error(current_span: Any, error: BaseException, *, include_content: bool) -> None:
+    current_span.set_status(trace.Status(trace.StatusCode.ERROR, str(error) if include_content else None))
+    if include_content:
+        current_span.record_exception(error)
+    else:
+        error_type = type(error)
+        name = error_type.__qualname__
+        if error_type.__module__ != "builtins":
+            name = f"{error_type.__module__}.{name}"
+        current_span.add_event("exception", attributes={"exception.type": name})

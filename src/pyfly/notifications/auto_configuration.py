@@ -29,10 +29,14 @@ each service bean when one is present in the container.  Absent → no-op.
 
 from __future__ import annotations
 
-from typing import Any
+import ssl
+from typing import Annotated, Any
 
+from pyfly.config.properties.client import ClientTlsProperties
+from pyfly.config.properties.data import parse_bool
+from pyfly.container import Qualifier
 from pyfly.container.bean import bean
-from pyfly.context.conditions import auto_configuration, conditional_on_property
+from pyfly.context.conditions import auto_configuration, conditional_on_missing_bean, conditional_on_property
 from pyfly.core.config import Config
 from pyfly.notifications.ports import EmailProvider, PushProvider, SmsProvider
 from pyfly.notifications.services import (
@@ -46,7 +50,12 @@ from pyfly.notifications.services import (
 @conditional_on_property("pyfly.notifications.enabled", having_value="true")
 class NotificationsAutoConfiguration:
     @bean
-    def email_provider(self, config: Config) -> EmailProvider:
+    @conditional_on_missing_bean(EmailProvider)
+    def email_provider(
+        self,
+        config: Config,
+        ssl_context: Annotated[ssl.SSLContext | None, Qualifier("smtp_email_ssl_context")] = None,
+    ) -> EmailProvider:
         provider = str(config.get("pyfly.notifications.email.provider", "dummy")).lower()
         if provider == "sendgrid":
             from pyfly.notifications.providers.sendgrid import SendGridEmailProvider
@@ -67,10 +76,48 @@ class NotificationsAutoConfiguration:
                 port=int(config.get("pyfly.notifications.email.smtp.port", 587)),
                 username=str(config.get("pyfly.notifications.email.smtp.username", "")) or None,
                 password=str(config.get("pyfly.notifications.email.smtp.password", "")) or None,
+                use_tls=parse_bool(config.get("pyfly.notifications.email.smtp.use-tls", True), "SMTP use-tls"),
+                tls_mode=config.get("pyfly.notifications.email.smtp.tls-mode"),
+                timeout=config.get("pyfly.notifications.email.smtp.timeout", 30),
+                ssl_context=self._smtp_context(config, ssl_context),
             )
+        if provider == "azure-communication-email":
+            from pyfly.notifications.providers.azure_email import AzureCommunicationEmailProvider
+
+            if config.get("pyfly.notifications.email.azure.credential-mode") != "managed-identity":
+                raise ValueError("Azure Email requires explicit managed-identity mode or an injected EmailProvider")
+            return AzureCommunicationEmailProvider(
+                endpoint=config.get("pyfly.notifications.email.azure.endpoint", ""),
+                managed_identity=True,
+                managed_identity_client_id=config.get("pyfly.notifications.email.azure.managed-identity-client-id"),
+                default_from=config.get("pyfly.notifications.email.from"),
+                timeout=config.get("pyfly.notifications.email.azure.timeout", 10),
+                poll_timeout=config.get("pyfly.notifications.email.azure.poll-timeout", 30),
+                poll_interval=config.get("pyfly.notifications.email.azure.poll-interval", 1),
+            )
+        if provider != "dummy":
+            raise ValueError("Unknown configured email provider")
         from pyfly.notifications.providers.dummy import DummyEmailProvider
 
         return DummyEmailProvider()
+
+    @staticmethod
+    def _smtp_context(config: Config, context: ssl.SSLContext | None) -> ssl.SSLContext | None:
+        fields = ClientTlsProperties(
+            ca_file=config.get("pyfly.notifications.email.smtp.tls.ca-file"),
+            certfile=config.get("pyfly.notifications.email.smtp.tls.certfile"),
+            keyfile=config.get("pyfly.notifications.email.smtp.tls.keyfile"),
+        )
+        configured = any((fields.ca_file, fields.certfile, fields.keyfile))
+        if context is not None and configured:
+            raise ValueError("Configure SMTP TLS files or its qualified SSLContext, not both")
+        if bool(fields.certfile) != bool(fields.keyfile):
+            raise ValueError("SMTP client certificate and key must be configured together")
+        if configured:
+            context = ssl.create_default_context(cafile=fields.ca_file)
+            if fields.certfile and fields.keyfile:
+                context.load_cert_chain(fields.certfile, fields.keyfile)
+        return context
 
     @bean
     def template_engine(self, config: Config) -> Any:

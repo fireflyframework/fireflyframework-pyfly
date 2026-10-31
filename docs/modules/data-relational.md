@@ -1733,6 +1733,7 @@ such as `event-store` in YAML, where the environment can still override its keys
 |-----|---------|-------------|
 | `pyfly.data.relational.url` | — (required) | Primary datasource URL. |
 | `pyfly.data.relational.echo` | `false` | Log SQL: `true`, `false`, or `debug` (also logs result rows). |
+| `pyfly.data.relational.hide-parameters` | `true` | Withhold bound values from SQLAlchemy exception strings and parameter logs; inherited by named, replica and module engines. |
 | `pyfly.data.relational.ddl-auto` | `create` on SQLite (or no URL in the `dev` profile); `none` on a database server, and whenever `migrations.enabled` | Schema strategy of `engine_lifecycle` (`none`, `validate`, `create`, `create-drop`; see [Schema Strategy](#schema-strategy-ddl-auto)). |
 | `pyfly.data.relational.schema.lock-timeout` | `300` | Seconds an instance waits for another one's schema changes. |
 | `pyfly.data.relational.schema.drop-timeout` | `10` | Seconds the `create-drop` teardown may take. |
@@ -1966,6 +1967,18 @@ factory over an engine the registry did not build has none. A
 datasource with customizers gets transactional read auto units on PostgreSQL instead of `AUTOCOMMIT`
 ones, so a transaction-local setting applies to the read. A transaction you open yourself runs them with
 `await datasource.run_after_begin(session)` (or `run_after_begin(datasource, session)`).
+
+A customizer may return a `TransactionSynchronization` instead of `None`. The native manager registers
+it on the new unit before the unit becomes current. This supports a current-authority or lease check in
+`before_commit()` using the same connection as the operation. A failed begin, cancelled body, rollback
+or refused commit still runs the registered completion callbacks and releases the resource. A later
+customizer failing during begin also completes synchronizations registered by earlier customizers.
+Do not open a provider or perform a remote request while holding a policy or lease lock.
+
+For a transaction opened by hand, pass `register_synchronization=unit.register_synchronization` to
+`run_after_begin()` when using a customizer that returns a synchronization. Omitting this callback fails
+closed rather than silently dropping the returned synchronization. Existing customizers returning
+`None` remain compatible.
 
 ### Credential Rotation
 
@@ -3067,3 +3080,16 @@ class ProductService:
 - [Data Module Guide](data.md) — Generic commons: repository ports, pagination, query parsing, entity mapping, extensibility
 - [Data Document Guide](data-document.md) — MongoDB adapter
 - [SQLAlchemy Adapter Reference](../adapters/sqlalchemy.md) — Setup, configuration, adapter-specific features
+
+### Database diagnostic privacy
+
+Native datasource and migration engines default `hide_parameters=True`;
+`pyfly.data.relational.hide-parameters` is a strictly parsed boolean inherited by
+named, module and replica engines. A named datasource can explicitly override it.
+The compatibility `build_named_data_sources` factory now receives the
+`hide_parameters` keyword as well as `echo`; custom factories must honor it.
+SQL echo remains off by default. Opting into echo, especially `debug`, can expose
+SQL text and result rows; literal values embedded in raw SQL are not redacted.
+`hide_parameters` protects formatted diagnostics, not exception objects'
+`.params` or application code that deliberately logs entities or raw values.
+Keep these objects and arbitrary exception content out of exported logs/traces.

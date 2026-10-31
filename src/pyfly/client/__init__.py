@@ -29,11 +29,13 @@ from pyfly.client.protocols import (
     WebSocketClientBuilder,
 )
 from pyfly.client.retry import RetryPolicy
+from pyfly.config.properties.client import ClientTlsProperties
 
 __all__ = [
     "BoundedHttpClientPort",
     "CircuitBreaker",
     "CircuitState",
+    "ClientTlsProperties",
     "GraphQLClient",
     "GraphQLClientBuilder",
     "GrpcClientBuilder",

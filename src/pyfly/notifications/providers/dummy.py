@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 
+from pyfly.notifications.capabilities import EmailProviderCapabilities
 from pyfly.notifications.models import (
     EmailMessage,
     EmailStatus,
@@ -19,13 +20,14 @@ _logger = logging.getLogger(__name__)
 
 class DummyEmailProvider:
     name = "dummy"
+    capabilities = EmailProviderCapabilities()
 
     def __init__(self) -> None:
         self.sent: list[EmailMessage] = []
 
     async def send(self, message: EmailMessage) -> NotificationResult:
         self.sent.append(message)
-        _logger.info("[dummy email] to=%s subject=%s", message.to, message.subject)
+        _logger.info("Dummy email accepted locally; no delivery was attempted")
         return NotificationResult(id=message.id, provider=self.name, status=EmailStatus.SENT, provider_id=message.id)
 
 

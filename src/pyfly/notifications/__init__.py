@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from pyfly.notifications.capabilities import EmailProviderCapabilities, email_capabilities
 from pyfly.notifications.models import (
     Attachment,
     EmailMessage,
@@ -13,6 +14,7 @@ from pyfly.notifications.models import (
     SmsMessage,
 )
 from pyfly.notifications.ports import (
+    EmailOperationProvider,
     EmailProvider,
     EmailService,
     PushProvider,
@@ -20,6 +22,7 @@ from pyfly.notifications.ports import (
     SmsProvider,
     SmsService,
 )
+from pyfly.notifications.providers.azure_email import AzureCommunicationEmailProvider
 from pyfly.notifications.providers.dummy import (
     DummyEmailProvider,
     DummyPushProvider,
@@ -45,7 +48,11 @@ __all__ = [
     "DummyPushProvider",
     "DummySmsProvider",
     "EmailMessage",
+    "EmailProviderCapabilities",
+    "email_capabilities",
     "EmailProvider",
+    "EmailOperationProvider",
+    "AzureCommunicationEmailProvider",
     "EmailService",
     "EmailStatus",
     "FirebasePushProvider",

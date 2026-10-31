@@ -22,6 +22,7 @@ from ssl import SSLContext
 from typing import TYPE_CHECKING, Any
 
 from pyfly.client.exceptions import ResponseTooLargeException, UnsupportedContentEncodingException
+from pyfly.config.properties.client import ClientTlsProperties
 
 if TYPE_CHECKING:
     import httpx
@@ -46,6 +47,7 @@ class HttpxClientAdapter:
         transport: httpx.AsyncBaseTransport | None = None,
         owns_transport: bool = False,
         verify: bool | SSLContext | None = None,
+        tls: ClientTlsProperties | None = None,
         proxy: str | httpx.Proxy | None = None,
         trust_env: bool | None = None,
         retries: int = 0,
@@ -53,6 +55,7 @@ class HttpxClientAdapter:
     ) -> None:
         import httpx
 
+        self._tls_request_hook: Any = None
         if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
             raise ValueError("retries must be a non-negative integer")
         if client is not None:
@@ -63,6 +66,7 @@ class HttpxClientAdapter:
                 or transport is not None
                 or owns_transport
                 or verify is not None
+                or tls is not None
                 or proxy is not None
                 or trust_env is not None
                 or retries
@@ -76,9 +80,11 @@ class HttpxClientAdapter:
             raise ValueError("An internally constructed client must be owned by the adapter")
         if transport is None and owns_transport:
             raise ValueError("owns_transport requires a supplied transport")
-        if transport is not None and (verify is not None or proxy is not None or retries):
+        if tls is not None and verify is not None:
+            raise ValueError("Configure typed TLS or an explicit SSLContext, not both")
+        if transport is not None and (verify is not None or tls is not None or proxy is not None or retries):
             raise ValueError("Configure TLS, proxy and retries on the supplied transport")
-        resolved_verify = True if verify is None else verify
+        resolved_verify = tls.ssl_context() if tls is not None else (True if verify is None else verify)
         resolved_trust_env = True if trust_env is None else trust_env
         if retries:
             # Passing a transport disables HTTPX's environment proxy discovery.
@@ -107,6 +113,17 @@ class HttpxClientAdapter:
             follow_redirects=follow_redirects,
         )
         self._owns_client = True
+        if tls is not None or isinstance(verify, SSLContext):
+
+            async def require_https(request: httpx.Request) -> None:
+                if request.url.scheme != "https":
+                    raise ValueError("Configured TLS requires HTTPS for requests and redirects")
+
+            self._tls_request_hook = require_https
+            self._client.event_hooks["request"].append(require_https)
+
+    def _has_custom_event_hooks(self) -> bool:
+        return any(hook is not self._tls_request_hook for hooks in self._client.event_hooks.values() for hook in hooks)
 
     @staticmethod
     def _prepare_request(kwargs: dict[str, Any]) -> None:
@@ -139,7 +156,7 @@ class HttpxClientAdapter:
         redirects = kwargs.pop("follow_redirects", False)
         auth = kwargs.pop("auth", httpx.USE_CLIENT_DEFAULT)
         if suppress_cookies:
-            if redirects or auth not in (None, httpx.USE_CLIENT_DEFAULT) or any(self._client.event_hooks.values()):
+            if redirects or auth not in (None, httpx.USE_CLIENT_DEFAULT) or self._has_custom_event_hooks():
                 raise ValueError("Cookie-suppressed streams require no redirects, auth flows, or event hooks")
             auth = None
         request = self._client.build_request(method, url, **kwargs)
@@ -167,7 +184,7 @@ class HttpxClientAdapter:
             raise ValueError("Bounded requests do not support automatic redirects")
         if kwargs.pop("auth", None) is not None:
             raise ValueError("Bounded requests require explicit auth headers, not auth flows")
-        if any(self._client.event_hooks.values()):
+        if self._has_custom_event_hooks():
             raise ValueError("Bounded requests do not support client event hooks")
         self._prepare_request(kwargs)
         headers = httpx.Headers(kwargs.pop("headers"))

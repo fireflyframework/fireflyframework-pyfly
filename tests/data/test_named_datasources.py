@@ -56,7 +56,8 @@ def test_build_from_config_skips_entries_without_url() -> None:
     )
     created: list[tuple[str, bool]] = []
 
-    def engine_factory(url: str, echo: bool = False) -> str:
+    def engine_factory(url: str, echo: bool = False, hide_parameters: bool = True) -> str:
+        assert hide_parameters is True
         created.append((url, echo))
         return f"engine:{url}"
 
@@ -110,7 +111,8 @@ def test_build_resolves_placeholders_and_env_overrides(monkeypatch: pytest.Monke
     )
     created: dict[str, tuple[str, object]] = {}
 
-    def engine_factory(url: str, echo: object = False) -> str:
+    def engine_factory(url: str, echo: object = False, hide_parameters: bool = True) -> str:
+        assert hide_parameters is True
         created[url] = (url, echo)
         return url
 

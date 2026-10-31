@@ -1835,6 +1835,12 @@ class ApplicationContext:
 
     def _wire_scheduled(self) -> None:
         """Discover @scheduled methods and start the TaskScheduler."""
+        from pyfly.config.properties.data import parse_bool
+
+        enabled = self._config.get("pyfly.scheduling.enabled")
+        if not parse_bool(True if enabled is None else enabled, "pyfly.scheduling.enabled"):
+            self._wiring_counts["scheduled"] = 0
+            return
         try:
             from pyfly.scheduling.task_scheduler import TaskScheduler
         except ImportError:

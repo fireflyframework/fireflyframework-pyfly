@@ -36,6 +36,8 @@ class HypercornServerAdapter:
     server-metrics middleware supplies them uniformly instead).
     """
 
+    supports_client_auth = True
+
     def __init__(self) -> None:
         self._shutdown_event: asyncio.Event | None = None
         self._info: ServerInfo | None = None
@@ -50,6 +52,9 @@ class HypercornServerAdapter:
         from hypercorn.asyncio import serve  # type: ignore[import-not-found,unused-ignore]
         from hypercorn.config import Config as HypercornConfig  # type: ignore[import-not-found,unused-ignore]
 
+        from pyfly.server.tls import client_verify_mode
+
+        verify_mode = client_verify_mode(config)
         workers = config.workers if config.workers > 0 else 1
         host = getattr(config, "host", None) or "0.0.0.0"
         port = getattr(config, "port", None)
@@ -67,6 +72,10 @@ class HypercornServerAdapter:
             hc_config.certfile = config.ssl_certfile
         if config.ssl_keyfile:
             hc_config.keyfile = config.ssl_keyfile
+
+        if getattr(config, "ssl_ca_certs", None):
+            hc_config.ca_certs = config.ssl_ca_certs
+            hc_config.verify_mode = verify_mode
 
         event_loop = config.event_loop
         if event_loop == "uvloop":

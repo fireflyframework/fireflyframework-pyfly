@@ -13,7 +13,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.10.27-brightgreen" alt="Version: 26.10.27"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.10.29-brightgreen" alt="Version: 26.10.29"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -881,13 +881,13 @@ hotfix baseline and the migration from the removed Presidio backend.
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.27-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.29-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.27-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.29-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.27-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.29-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -1220,7 +1220,9 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
-- **`v26.10.27`** (2026-10-31) — add a native same-transaction append-only audit journal with safe reference facts, scoped hash-chain verification and deterministic NDJSON export.
+- **`v26.10.29`** (2026-10-31) — add native transactional audit, trusted module recording, signed archive delivery and conservative effect admission.
+- **`v26.10.28`** (2026-10-31) — verified email TLS, private diagnostics, explicit unknown send outcomes and optional managed-identity Azure email.
+- **`v26.10.27`** (2026-10-31) — portable MCP sessions, process scheduling control, transactional consumer fences and verified TLS/privacy defaults.
 - **`v26.10.26`** (2026-10-31) — hide model credential secrets from representations; expose immutable, provider-specific native text-rate quotes and reject invalid scalar cost results.
 - **`v26.10.25`** (2026-10-31) — retain configured policies when their dependencies arrive later and fail startup for broken optional dependency graphs.
 - **`v26.10.24`** (2026-10-31) — add primary-authoritative read-only transactions with preserved isolation, native participants and replica-join rejection.

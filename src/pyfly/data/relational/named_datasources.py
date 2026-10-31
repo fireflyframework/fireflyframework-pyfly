@@ -104,7 +104,7 @@ class NamedDataSources:
 def build_named_data_sources(config: Any, engine_factory: Any, session_factory: Any) -> NamedDataSources:
     """Build a :class:`NamedDataSources` from ``pyfly.data.relational.datasources.*`` config.
 
-    *engine_factory* is called ``engine_factory(url, echo=...)`` and *session_factory* is
+    *engine_factory* is called ``engine_factory(url, echo=..., hide_parameters=...)`` and *session_factory* is
     called ``session_factory(engine)`` — injected so this stays free of a hard SQLAlchemy
     import (the relational extra owns those). The settings are read like the registry reads them:
     placeholders resolve, ``PYFLY_*`` overrides win, and ``echo`` is a real boolean. The auto-configured
@@ -113,7 +113,7 @@ def build_named_data_sources(config: Any, engine_factory: Any, session_factory: 
     factories: dict[str, Any] = {}
     engines: dict[str, Any] = {}
     for name, settings in RelationalProperties.from_config(config).datasources.items():
-        engine = engine_factory(str(settings.url), echo=settings.echo)
+        engine = engine_factory(str(settings.url), echo=settings.echo, hide_parameters=settings.hide_parameters)
         engines[name] = engine
         factories[name] = session_factory(engine)
     return NamedDataSources(factories, engines)

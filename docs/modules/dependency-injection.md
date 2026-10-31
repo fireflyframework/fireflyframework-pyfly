@@ -1,5 +1,14 @@
 # Dependency Injection Guide
 
+Applications that submit durable work can borrow bounded server-captured JSON facts through
+`pyfly.context.bind_consumer_context(facts)` and read an independent copy with `consumer_context()`.
+The carrier accepts at most 16 KiB of JSON, propagates through asynchronous tasks, restores the prior
+scope after exceptions and refuses inherited access after the submitting scope closes. It supplies no
+authorization: the application validates its own facts before execution and publication. Never capture
+bearer tokens, provider secrets or caller-selected authority. Persist facts only in a private envelope
+under `PRIVATE_CONSUMER_CONTEXT`, then use `public_consumer_data(value)` to remove that key recursively
+from public DTOs, exported metadata and event payloads.
+
 This guide covers PyFly's dependency injection (DI) system in depth -- from the low-level
 `Container` to the high-level `ApplicationContext`, stereotypes, scopes, lifecycle hooks,
 conditional beans, and application events. By the end you will understand how to structure
