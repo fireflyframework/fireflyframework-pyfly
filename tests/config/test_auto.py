@@ -46,7 +46,7 @@ class TestAutoConfiguration:
 class TestDiscoverAutoConfigurations:
     def test_returns_all_auto_config_classes(self):
         classes = discover_auto_configurations()
-        assert len(classes) == 57
+        assert len(classes) == 58
 
     def test_all_classes_have_auto_configuration_marker(self):
         for cls in discover_auto_configurations():
@@ -79,6 +79,7 @@ class TestDiscoverAutoConfigurations:
             "AopAutoConfiguration",
             "AuditAutoConfiguration",
             "AuditRecordingAutoConfiguration",
+            "AuditArchiveAutoConfiguration",
             "CacheAutoConfiguration",
             "CallbacksAutoConfiguration",
             "ClientAutoConfiguration",
