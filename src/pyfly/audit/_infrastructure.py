@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Execution-local trust for audit infrastructure, never a client-supplied opt-out."""
 
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
+from typing import Any
 
 _trusted = object()
 _infrastructure: ContextVar[object | None] = ContextVar("pyfly.audit.infrastructure", default=None)
@@ -24,7 +25,7 @@ def is_audit_infrastructure() -> bool:
     return _infrastructure.get() is _trusted
 
 
-def audit_infrastructure_call[**P, R](function: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+def audit_infrastructure_call[**P, R](function: Callable[P, Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
     @wraps(function)
     async def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
         with audit_infrastructure():
