@@ -23,8 +23,14 @@ class AuditRecordingSupport:
         factory = self._pyfly_audit_factory
         if factory is None:
             return None
-        recorder = factory()
-        return recorder if recorder.enabled(module) else None
+        try:
+            recorder = factory()
+            return recorder if recorder.enabled(module) else None
+        except BaseException as error:
+            AuditRecorder._poison_active()
+            if not isinstance(error, Exception):
+                raise
+            raise AuditError("Configured audit recording dependency is unavailable") from None
 
 
 class AuditModulePostProcessor:
