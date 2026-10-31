@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.23 (2026-10-31)
+
+### Added
+
+- Add `read_from_primary=True` to native `@transactional`, `TransactionTemplate` and
+  `TransactionDefinition` boundaries for read-only snapshots on a datasource's primary
+  even when a read replica is configured. Preserve isolation, read-only guards, dialect
+  hints, native session participants and application session options.
+- Expose the actual route through `UnitOfWork.read_from_primary`; reject an explicit
+  primary-demanding participant joining a replica unit with `IllegalTransactionStateError`
+  and guidance to open an independent `REQUIRES_NEW` snapshot.
+
+### Fixed
+
+- Allow read-only primary snapshots to use SQLite's deferred read transaction while an
+  outer writing unit is suspended, avoiding the write-lock cycle of a writing workaround.
+- Refuse explicit primary authority on a custom session factory bound directly to a
+  known replica engine, and report that replica route accurately for transactional and auto units.
+
 ## v26.10.22 (2026-10-30)
 
 ### Fixed

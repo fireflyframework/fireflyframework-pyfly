@@ -71,6 +71,8 @@ class TransactionDefinition:
     deadline). ``rollback_for`` / ``no_rollback_for`` are additive rollback rules
     (:mod:`pyfly.data.transaction.rules`). ``datasource`` names the datasource whose transaction manager
     runs the boundary; ``None`` lets the caller resolve it. ``name`` labels the unit in logs and errors.
+    ``read_from_primary`` keeps a read-only unit on its datasource's primary rather than a configured
+    replica. It does not change read-only enforcement or isolation; writing units already use primary.
     """
 
     propagation: Propagation = Propagation.REQUIRED
@@ -81,6 +83,7 @@ class TransactionDefinition:
     no_rollback_for: tuple[type[BaseException], ...] = ()
     datasource: str | None = None
     name: str | None = None
+    read_from_primary: bool = False
     rules: RollbackRules = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:

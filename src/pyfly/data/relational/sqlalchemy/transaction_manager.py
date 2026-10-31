@@ -24,7 +24,8 @@ or ``DataSourceRegistry`` bean that replaced it. Every unit it opens gets a fres
 - the isolation level, through ``session.connection(execution_options={"isolation_level": ...})``,
   validated against the dialect (asyncpg has no ``READ UNCOMMITTED``; SQLite has only ``SERIALIZABLE`` and
   ``READ UNCOMMITTED``);
-- for a read-only unit: the datasource's replica when one is configured, ``session.info["read_only"]``,
+- for a read-only unit: the datasource's replica when configured (unless ``read_from_primary=True``),
+  ``session.info["read_only"]``,
   an ORM ``before_flush`` guard that refuses writes, and the dialect hint (``BEGIN READ ONLY`` on
   PostgreSQL, ``SET TRANSACTION READ ONLY`` on MySQL and MariaDB);
 - the datasource's after-begin customizers (a tenant GUC), right after ``BEGIN``;
@@ -316,13 +317,25 @@ class SqlAlchemyTransactionManager:
         target = self._datasource
         factory = self._sessionmaker
         bind: AsyncEngine | None = None
-        if read_only and target is not None and target.replica is not None:
+        use_replica = (
+            read_only and not definition.read_from_primary and target is not None and target.replica is not None
+        )
+        if use_replica:
+            assert target is not None and target.replica is not None
             if factory is target.sessionmaker:
                 factory = target.replica.sessionmaker
             else:
                 bind = target.replica.engine  # the application's session options, on the replica
             target = target.replica
         engine = target.engine if target is not None else self.engine
+        actual_source = target if target is not None else datasource_of(engine)
+        from_primary = not use_replica and (actual_source is None or not actual_source.is_replica)
+        if definition.read_from_primary and not from_primary:
+            raise IllegalTransactionStateError(
+                f"read_from_primary=True cannot use a session factory bound directly to a replica "
+                f"on datasource '{self.datasource}'; use the primary DataSource from DataSourceRegistry",
+                datasource=self.datasource,
+            )
         dialect = _backend(engine)
         isolation = definition.isolation
         if not self.capabilities.supports_isolation(isolation):
@@ -340,7 +353,7 @@ class SqlAlchemyTransactionManager:
             options["postgresql_readonly"] = True
         self._refuse_sharing_the_connection(engine)
         session = self._new_session(factory, bind=bind)
-        unit = UnitOfWork(self, self.datasource, session, definition=definition)
+        unit = UnitOfWork(self, self.datasource, session, definition=definition, read_from_primary=from_primary)
         _claim_the_connection(engine, unit)
         await self._start(unit, session, options, target, read_only=read_only, dialect=dialect)
         if definition.timeout is not None and dialect == "postgresql":
@@ -373,7 +386,15 @@ class SqlAlchemyTransactionManager:
         self._refuse_sharing_the_connection(engine)
         # What an auto unit's call returns outlives its commit: it is never expired, whatever the factory says.
         session = self._new_session(self._sessionmaker, expire_on_commit=False)
-        unit = UnitOfWork(self, self.datasource, session, auto=True, read_only=read_only)
+        actual_source = target if target is not None else datasource_of(engine)
+        unit = UnitOfWork(
+            self,
+            self.datasource,
+            session,
+            auto=True,
+            read_only=read_only,
+            read_from_primary=actual_source is None or not actual_source.is_replica,
+        )
         unit.autocommit = autocommit
         _claim_the_connection(engine, unit)
         await self._start(unit, session, options, None if autocommit else target, read_only=read_only, dialect=dialect)
