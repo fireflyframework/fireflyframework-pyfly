@@ -227,8 +227,10 @@ creation again.
 Constructor parameters are resolved recursively via type hints. If a parameter uses
 `Annotated[T, Qualifier("name")]`, the container resolves by name instead of type.
 
-**Parameter defaults:** When a constructor parameter has a default value and the container
-cannot resolve the type, the default is used instead of raising an error. This enables
+**Parameter defaults:** When a constructor parameter has a default value and no candidate
+can be selected for its type, the default is used instead of raising an error. A configured
+candidate whose own dependencies are missing or ambiguous raises that dependency error;
+its failure never silently selects the default. This enables
 patterns like `Repository[T, ID]` where `model: type[T] | None = None` falls back to the
 auto-extracted entity type from `__init_subclass__`.
 
@@ -1127,6 +1129,12 @@ The inner type of an Optional is resolved like any other parameter, so generics,
 `async_sessionmaker[AsyncSession] | None`, `Provider[Job] | None` and `Repository[User, int] | None`
 receive the bean (through 26.09.07 they always received `None`), and `None` when no candidate exists.
 
+Optional injection applies to the requested bean's absence, not to errors inside a configured
+bean. A missing or ambiguous dependency of that bean propagates with its original diagnostic.
+The same rule applies to parameter defaults and `Autowired(required=False)` fields. A factory
+that explicitly returns `None` still declines normally. This prevents a configured security
+or model transport policy from silently disappearing when one of its dependencies is unavailable.
+
 ### list[T]
 
 Declare a parameter as `list[T]` to collect **all** implementations bound to type `T`.
@@ -1390,9 +1398,10 @@ When `ApplicationContext.start()` is called, it executes these steps in order:
 2c. **Process `@auto_configuration` classes** -- resolves auto-configuration `@bean` methods
     after user beans are visible. Each auto-configuration class uses `@conditional_on_class`,
     `@conditional_on_property`, and `@conditional_on_missing_bean` to guard its beans,
-    so user-provided beans always take precedence. An auto-configuration `@bean` is never
-    deferred: it is processed last, so a dependency it cannot resolve is a real error.
-2d. **Complete deferred user `@bean` methods** -- every factory parked in step 2 is called now
+    so user-provided beans always take precedence. A method that reaches a configured bean
+    whose dependencies await a later auto-configuration is deferred too. A directly missing
+    required dependency still fails immediately.
+2d. **Complete deferred `@bean` methods** -- every factory parked in step 2 or 2c is called now
     that the framework's beans exist. The pass repeats while it makes progress (deferred
     factories may depend on each other); a dependency nobody registers raises the same
     `NoSuchBeanError`, naming the configuration, the method and the parameter, that an eager

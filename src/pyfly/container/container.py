@@ -740,6 +740,7 @@ class Container:
             chain = list(self._resolving.keys())
             raise BeanCurrentlyInCreationError(chain=chain, current=reg.impl_type)
         self._resolving[reg.impl_type] = None
+        declined = False
         try:
             start = time.perf_counter_ns()
 
@@ -752,6 +753,7 @@ class Container:
                     # A factory declared ``-> Port | None`` declined. A scoped one is asked on every
                     # resolution; declining means there is no bean (an Optional parameter gets None,
                     # a required one fails), never a bean whose value is None.
+                    declined = True
                     raise NoSuchBeanError(
                         bean_type=reg.impl_type,
                         required_by=f"the factory of bean {reg.display_name!r}, which returned None (it declined)",
@@ -775,17 +777,31 @@ class Container:
                 for param_name, param_type, has_default in reg.init_plan:
                     try:
                         kwargs[param_name] = self._resolve_param(param_type)
-                    except (NoSuchBeanError, NoUniqueBeanError):
+                    except (NoSuchBeanError, NoUniqueBeanError) as exc:
+                        if exc.dependency_failure:
+                            raise
                         if has_default:
                             continue
-                        raise NoSuchBeanError(
-                            bean_type=param_type if isinstance(param_type, type) else None,
-                            required_by=f"{reg.impl_type.__qualname__}.__init__()",
-                            parameter=f"{param_name}: {getattr(param_type, '__name__', repr(param_type))}",
-                            suggestions=self._get_similar_type_names(
-                                getattr(param_type, "__name__", ""),
-                            ),
-                        ) from None
+                        required_by = f"{reg.impl_type.__qualname__}.__init__()"
+                        parameter = f"{param_name}: {getattr(param_type, '__name__', repr(param_type))}"
+                        failure: NoSuchBeanError | NoUniqueBeanError
+                        if isinstance(exc, NoUniqueBeanError):
+                            failure = NoUniqueBeanError(
+                                bean_type=exc.bean_type,
+                                candidates=exc.candidates,
+                                candidate_names=exc.candidate_names,
+                                primary_names=exc.primary_names,
+                                required_by=required_by,
+                                parameter=parameter,
+                            )
+                        else:
+                            failure = NoSuchBeanError(
+                                bean_type=param_type if isinstance(param_type, type) else None,
+                                required_by=required_by,
+                                parameter=parameter,
+                                suggestions=self._get_similar_type_names(getattr(param_type, "__name__", "")),
+                            )
+                        raise failure from None
 
                 instance = reg.impl_type(**kwargs)
 
@@ -797,6 +813,10 @@ class Container:
             metrics.created_at = time.time()
 
             return instance
+        except (NoSuchBeanError, NoUniqueBeanError) as exc:
+            if not declined:
+                exc.dependency_failure = True
+            raise
         finally:
             self._resolving.pop(reg.impl_type, None)
 
@@ -873,7 +893,9 @@ class Container:
                 # lookup always failed and the parameter silently received None.
                 try:
                     return self._resolve_param(non_none[0])
-                except (NoSuchBeanError, NoUniqueBeanError):
+                except (NoSuchBeanError, NoUniqueBeanError) as exc:
+                    if exc.dependency_failure:
+                        raise
                     return None
 
         # list[T]
@@ -956,7 +978,9 @@ class Container:
                     value = self.resolve_by_name(default.qualifier, expected_type=base)
                 else:
                     value = self._resolve_param(attr_type)
-            except (NoSuchBeanError, NoUniqueBeanError):
+            except (NoSuchBeanError, NoUniqueBeanError) as exc:
+                if exc.dependency_failure:
+                    raise
                 if default.required and default.qualifier:
                     raise
                 if default.required:

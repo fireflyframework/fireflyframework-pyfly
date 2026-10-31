@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 
 import httpx
 import pytest
@@ -25,6 +26,7 @@ from pyfly.agentic.models import (
 from pyfly.client import HttpClientPort, HttpxClientAdapter
 from pyfly.container import bean, configuration
 from pyfly.context.application_context import ApplicationContext
+from pyfly.context.conditions import auto_configuration
 from pyfly.core.config import Config
 from pyfly.observability.auto_configuration import MeterProviderAutoConfiguration, TracingAutoConfiguration
 
@@ -212,6 +214,68 @@ def test_sdk_retry_policy_rejects_invalid_values(retries):
 def test_connect_timeout_requires_native_transport():
     with pytest.raises(ValueError, match="connect_timeout requires"):
         ModelClientPolicy(connect_timeout=3)
+
+
+async def test_di_optional_model_policy_from_later_auto_configuration_never_uses_network(monkeypatch):
+    requests = []
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("The configured native model port must handle every request")
+
+    def answer(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "response",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "answer"}}
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            },
+        )
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+
+        @configuration
+        class UserPolicy:
+            @bean
+            def policy(self, http: HttpClientPort) -> ModelClientPolicy:
+                return ModelClientPolicy(max_retries=0, http_client=http)
+
+        @auto_configuration
+        class LateHttp:
+            @bean
+            def http(self) -> HttpClientPort:
+                return HttpxClientAdapter(client=client)
+
+        context = ApplicationContext(config(), auto_configurations=[AgenticAutoConfiguration, LateHttp])
+        context.register_bean(UserPolicy)
+        try:
+            await context.start()
+            model = await context.get_bean(ModelFactory).build(
+                ModelSpec(
+                    provider="openai-chat",
+                    model="model",
+                    base_url="http://controlled-port.invalid/v1",
+                    credential=Credential.api_key("test-capability"),
+                )
+            )
+            from pydantic_ai import Agent
+
+            async with model:
+                assert (await Agent(model).run("question")).output == "answer"
+            assert len(requests) == 1
+            assert str(requests[0].url) == "http://controlled-port.invalid/v1/chat/completions"
+            assert requests[0].headers["authorization"] == "Bearer test-capability"
+            assert model.provider.client.is_closed()
+            assert not client.is_closed
+        finally:
+            await context.stop()
 
 
 async def test_ollama_policy_preserves_native_profile_and_does_not_borrow_openai_credentials(monkeypatch):
