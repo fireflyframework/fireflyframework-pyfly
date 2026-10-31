@@ -133,10 +133,9 @@ async def test_socket_transport_redirects_guest_output_before_loading_source():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     source = (
-        "def main(inputs):\n import os, subprocess\n"
+        "def main(inputs):\n import os\n"
         ' os.write(1, b"stdout-marker"); os.write(2, b"stderr-marker")\n'
-        ' subprocess.run(["python", "-c", "import os;os.write(1,b\'Q\'*262144);os.write(2,b\'R\'*262144)"],'
-        " check=True, timeout=3)\n"
+        ' os.write(1, b"Q" * 262144); os.write(2, b"R" * 262144)\n'
         ' return {"ok": True}\n'
     )
     payload = {
