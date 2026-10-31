@@ -45,10 +45,11 @@ import contextlib
 import enum
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from pyfly.audit.recording_binding import AuditRecordingSupport
 from pyfly.eda.dlq import EdaDeadLetterStore
 from pyfly.eda.outbox import (
     OutboxRelay,
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncConnection
 
     from pyfly.actuator.health import HealthStatus
+    from pyfly.audit.recording import AuditRecorder
     from pyfly.messaging.listener_container import ListenerContainerSettings, RetryPolicy
 
 logger = logging.getLogger(__name__)
@@ -243,7 +245,7 @@ class BusState(enum.Enum):
     STOPPED = "stopped"
 
 
-class DatabaseEventBus:
+class DatabaseEventBus(AuditRecordingSupport):
     """``EventPublisher`` on the transactional outbox (see the module documentation).
 
     - *datasource*: where the outbox lives (a name, a ``DataSource``, an ``AsyncEngine``; ``None``: the
@@ -266,6 +268,8 @@ class DatabaseEventBus:
       ``LISTEN`` connection opened on *listen_dsn* when given;
     - *dead_letter_store*: where dead letters go instead of the outbox's table.
     """
+
+    __pyfly_audit_module__ = "eda"
 
     #: The bus consumes: it stops before any ``@pre_destroy``.
     phase = CONSUMER_PHASE
@@ -337,6 +341,12 @@ class DatabaseEventBus:
         self._state = BusState.NEW
         self._lock = asyncio.Lock()
 
+    def _bind_audit_recorder(self, factory: Callable[[], AuditRecorder]) -> None:
+        super()._bind_audit_recorder(factory)
+        for child in (self._outbox, self._relay):
+            if isinstance(child, AuditRecordingSupport):
+                child._bind_audit_recorder(factory)
+
     # -- introspection -----------------------------------------------------------------------------------------
 
     @property
@@ -402,6 +412,9 @@ class DatabaseEventBus:
         The event is published when (and only if) that unit commits. It starts nothing: after :meth:`stop` the
         event is still written, and delivered by whichever process runs the group's relay.
         """
+        from pyfly.eda.outbox import _require_audited_sql_outbox
+
+        _require_audited_sql_outbox(self, self._outbox)
         envelope = EventEnvelope(event_type=event_type, payload=payload, destination=destination, headers=headers or {})
         if self._state is BusState.STOPPED and self._owns_datasource():
             # After stop(), a datasource the bus builds for itself lives for this publish only.
@@ -443,6 +456,9 @@ class DatabaseEventBus:
 
         Serialized and idempotent. When a step fails, what the earlier ones opened is closed again and the
         failure is raised: nothing is left running."""
+        from pyfly.eda.outbox import _require_audited_sql_outbox
+
+        _require_audited_sql_outbox(self, self._outbox)
         async with self._lock:
             if self._state is BusState.RUNNING:
                 return

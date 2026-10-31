@@ -59,10 +59,11 @@ import asyncio
 import contextlib
 import enum
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pyfly.audit.recording_binding import AuditRecordingSupport
 from pyfly.eda.domain_events import EVENT_ID_HEADER
 from pyfly.eda.outbox import OutboxRelay, OutboxSettings, describe_error
 from pyfly.eda.ports.outbound import EventHandler, EventPublisher
@@ -72,6 +73,7 @@ from pyfly.kernel.lifecycle import CONSUMER_PHASE
 
 if TYPE_CHECKING:
     from pyfly.actuator.health import HealthStatus
+    from pyfly.audit.recording import AuditRecorder
     from pyfly.eda.dlq import EdaDeadLetterEntry, EdaDeadLetterStore
     from pyfly.eda.ports.outbox import PendingDelivery
     from pyfly.messaging.listener_container import ListenerContainerSettings, RetryPolicy
@@ -302,7 +304,7 @@ class PublisherState(enum.Enum):
     STOPPED = "stopped"
 
 
-class TransactionalEventPublisher:
+class TransactionalEventPublisher(AuditRecordingSupport):
     """An :class:`~pyfly.eda.ports.outbound.EventPublisher` that publishes to *transport* through the outbox
     *store* (see the module documentation).
 
@@ -312,6 +314,8 @@ class TransactionalEventPublisher:
     :meth:`stop` stops the forwarder first (the publish in flight finishes), then the transport and the store.
     A publish never starts anything: after :meth:`stop` the event is still appended, for a later relay.
     """
+
+    __pyfly_audit_module__ = "eda"
 
     #: The publisher consumes (the transport's subscriptions, the forwarder's claims): it stops before any
     #: ``@pre_destroy``.
@@ -340,6 +344,17 @@ class TransactionalEventPublisher:
         self._forwarder = forwarder
         self._state = PublisherState.NEW
         self._lock = asyncio.Lock()
+
+    def _bind_audit_recorder(self, factory: Callable[[], AuditRecorder]) -> None:
+        super()._bind_audit_recorder(factory)
+        for child in (self._store, self._forwarder):
+            if isinstance(child, AuditRecordingSupport):
+                child._bind_audit_recorder(factory)
+
+    def _audit_sql_outbox(self) -> None:
+        from pyfly.eda.outbox import _require_audited_sql_outbox
+
+        _require_audited_sql_outbox(self, self._store)
 
     # -- introspection ---------------------------------------------------------------------------------------------
 
@@ -400,7 +415,15 @@ class TransactionalEventPublisher:
         """Append the event to the outbox store in the unit of work bound for its datasource (or a short unit of
         its own), owed to the forwarder's group; the forwarder publishes it to the transport once that unit
         committed. A destination the forwarder does not take is published to the transport after the commit."""
+        self._audit_sql_outbox()
         if not self._forwarder.forwards(destination):
+            from pyfly.audit.ports import AuditError
+            from pyfly.eda.outbox import _eda_recorder
+
+            recorder = _eda_recorder(self)
+            if recorder is not None:
+                recorder._poison_active()
+                raise AuditError("Strict audited publication requires an outbox-managed destination")
             await self._publish_after_commit(destination, event_type, payload, headers)
             return
         envelope = EventEnvelope(event_type=event_type, payload=payload, destination=destination, headers=headers or {})
@@ -423,6 +446,7 @@ class TransactionalEventPublisher:
         """Start the transport, the store (its tables) and the forwarder, which registers its group. Serialized
         and idempotent; when a step fails, what the earlier ones started is stopped again and the failure is
         raised."""
+        self._audit_sql_outbox()
         async with self._lock:
             if self._state is PublisherState.RUNNING:
                 return
