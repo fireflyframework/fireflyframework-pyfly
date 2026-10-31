@@ -30,6 +30,7 @@ import contextlib
 import functools
 import logging
 import re
+import sys
 import threading
 import time
 import weakref
@@ -212,6 +213,10 @@ def _default_agent_context() -> _AgentContext:
 def _runtime_bound(method: Any) -> Any:
     @functools.wraps(method)
     async def bound(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if self._runtime is not None:
+            from pyfly.agentic._audit import require_execution_loop
+
+            require_execution_loop(self._runtime)
         state = self._execution_state(kwargs) if method.__name__ in ("run", "run_stream") else None
         if state is not None:
             owner = state.claim()
@@ -223,10 +228,13 @@ def _runtime_bound(method: Any) -> Any:
             await state.enter()
         if self._runtime is None:
             return await method(self, *args, **kwargs)
+        from pyfly.agentic._audit import agent_execution
+
         with self._runtime.operation(config=self._config):
             if method.__name__ in ("run", "run_stream") and self._runtime.quota_manager is not None:
                 self._runtime.quota_manager.reserve_request(self._effective_model_identifier(kwargs))
-            result = await method(self, *args, **kwargs)
+            async with agent_execution(self._runtime):
+                result = await method(self, *args, **kwargs)
         if method.__name__ == "run_stream":
             return _RuntimeStream(result, self._runtime, self._config, state)
         return result
@@ -239,20 +247,34 @@ class _RuntimeStream:
         self.inner, self.runtime, self.config = inner, runtime, config
         self._model_state = state
         self._scope: Any = None
+        self._audit_scope: Any = None
         self._entered = False
 
     async def __aenter__(self) -> Any:
+        from pyfly.agentic._audit import require_execution_loop
+
+        require_execution_loop(self.runtime)
         if self._model_state is not None and self._model_state.owner() is not asyncio.get_running_loop():
             raise AgentError("Run streaming on the provider model's owning event loop")
         self._scope = self.runtime.operation(config=self.config)
         self._scope.__enter__()
+        from pyfly.agentic._audit import agent_execution
+
+        self._audit_scope = agent_execution(self.runtime)
+        audit_entered = False
         try:
+            await self._audit_scope.__aenter__()
+            audit_entered = True
             result = await self.inner.__aenter__()
             self._entered = True
             self.runtime._streams.add(self)
             return result
         except BaseException:
-            self._scope.__exit__(None, None, None)
+            try:
+                if audit_entered:
+                    await self._audit_scope.__aexit__(*sys.exc_info())
+            finally:
+                self._scope.__exit__(None, None, None)
             raise
 
     async def __aexit__(self, *args: Any) -> Any:
@@ -260,7 +282,13 @@ class _RuntimeStream:
             return None
         self._entered = False
         try:
-            return await self.inner.__aexit__(*args)
+            result = await self.inner.__aexit__(*args)
+        except BaseException:
+            await self._audit_scope.__aexit__(*sys.exc_info())
+            raise
+        else:
+            await self._audit_scope.__aexit__(*args)
+            return result
         finally:
             self.runtime._streams.discard(self)
             self._scope.__exit__(*args)
@@ -426,13 +454,37 @@ class Agent(Generic[AgentDepsT, OutputT]):
         native_capabilities = self._build_capabilities(cfg, approval_handler, self._runtime)
         self._native_instrumentation_capabilities = [c for c in native_capabilities if isinstance(c, Instrumentation)]
         resolved_capabilities = [*native_capabilities, *capabilities]
+        resolved_tools = self._resolve_tools(tools)
+        if self._runtime is not None:
+            from pyfly.agentic._audit import AuditAgentCapability
+
+            native_tool_sources = not toolsets and all(
+                isinstance(item, AgentTool)
+                or isinstance(item, ToolKit)
+                and all(isinstance(tool, AgentTool) for tool in item.tools)
+                for item in tools
+            )
+            resolved_capabilities.append(
+                AuditAgentCapability(
+                    self._runtime,
+                    name,
+                    native_handlers=tuple(tool.function for tool in resolved_tools if isinstance(tool, PydanticTool)),
+                    native_tool_sources=native_tool_sources,
+                    native_tools=tuple(
+                        tool
+                        for item in tools
+                        for tool in (item.tools if isinstance(item, ToolKit) else (item,))
+                        if isinstance(tool, AgentTool)
+                    ),
+                )
+            )
 
         self._agent: PydanticAgent[AgentDepsT, OutputT] = PydanticAgent(
             _resolve_model(resolved_model),
             instructions=instructions,
             output_type=effective_output_type,
             deps_type=deps_type,
-            tools=self._resolve_tools(tools),
+            tools=resolved_tools,
             toolsets=list(toolsets),
             retries=resolved_retries,
             model_settings=resolved_settings,
@@ -624,6 +676,10 @@ class Agent(Generic[AgentDepsT, OutputT]):
         and iterated on their provider's owning loop. A closed owner requires a
         new model/client.
         """
+        if self._runtime is not None and self._runtime._audit_recorder("agentic") is not None:
+            from pyfly.audit import AuditError
+
+            raise AuditError("Automatic Agentic audit requires the async agent interface on its host loop")
         if self._runtime is not None:
             try:
                 current_loop = asyncio.get_running_loop()
@@ -693,10 +749,13 @@ class Agent(Generic[AgentDepsT, OutputT]):
                 runtime = self._runtime
 
                 async def scoped_execute() -> Any:
+                    from pyfly.agentic._audit import agent_execution
+
                     with runtime.operation(config=self._config):
                         if runtime.quota_manager is not None:
                             runtime.quota_manager.reserve_request(self._effective_model_identifier(kwargs))
-                        return await execute()
+                        async with agent_execution(runtime):
+                            return await execute()
 
                 return self._runtime.sync_worker.run(on_model_loop(state, scoped_execute))
         return _run_sync_coro(on_model_loop(state, execute))
@@ -1113,7 +1172,11 @@ class Agent(Generic[AgentDepsT, OutputT]):
                 backoff.reset(key)
                 return result
             except Exception as exc:
-                if not self._is_rate_limit_error(exc) or attempt >= max_retries:
+                if (
+                    getattr(exc, "retryable", True) is False
+                    or not self._is_rate_limit_error(exc)
+                    or attempt >= max_retries
+                ):
                     raise
 
                 backoff.record_failure(key)

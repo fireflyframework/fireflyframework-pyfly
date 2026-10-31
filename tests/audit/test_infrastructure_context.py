@@ -39,6 +39,46 @@ def application(path):
     )
 
 
+async def test_admitted_effect_fence_does_not_suppress_another_native_context_state(tmp_path):
+    from pyfly.audit import AuditContext, AuditOperation, AuditRecorder
+    from pyfly.audit._effects import has_admitted_audit_effect
+
+    first, second = application(tmp_path / "first.db"), application(tmp_path / "second.db")
+    await first.start()
+    await second.start()
+    scope = AuditScope(tenant_id="fixture", workspace_id="workspace", project_id="project")
+
+    class Resolver:
+        async def resolve(self, operation):
+            return AuditContext(
+                scope=scope,
+                actor=AuditActor(kind="service", subject_id="verified"),
+                resource=AuditResource(kind="fixture", resource_id="trusted"),
+            )
+
+    def recorder(context):
+        return AuditRecorder(
+            context.get_bean(AuditJournal),
+            Resolver(),
+            transaction_manager=context.get_bean(SqlAlchemyTransactionManager),
+            modules=frozenset({"domain"}),
+        )
+
+    try:
+        a, b = recorder(first), recorder(second)
+        operation = AuditOperation(module="domain", action="changed")
+        async with a.effect(operation, admission_key="server-command"):
+            assert has_admitted_audit_effect()
+            async with second.get_bean(SessionProvider).unit():
+                await b.state(operation)
+        assert not has_admitted_audit_effect()
+        assert len(await second.get_bean(AuditJournal).read(scope)) == 1
+        assert len(await first.get_bean(AuditJournal).read(scope)) == 2
+    finally:
+        await second.stop()
+        await first.stop()
+
+
 async def test_two_native_contexts_and_proxies_share_only_their_own_infrastructure_scope(tmp_path):
     assert "owner" in inspect.signature(audit_infrastructure).parameters
     one, two = application(tmp_path / "one.db"), application(tmp_path / "two.db")

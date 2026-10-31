@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Lazy per-context enrollment for native module adapters, never a process registry."""
 
+import asyncio
 import hashlib
 import threading
 from collections.abc import Callable
@@ -32,6 +33,8 @@ class AuditRecordingSupport:
             return recorder if recorder.enabled(module) else None
         except BaseException as error:
             AuditRecorder._poison_active()
+            if isinstance(error, asyncio.CancelledError):
+                raise asyncio.CancelledError() from None
             if not isinstance(error, Exception):
                 raise
             raise AuditError("Configured audit recording dependency is unavailable") from None

@@ -24,6 +24,13 @@ Inject `AuditJournal` from `pyfly.audit`. `AuditAutoConfiguration` resolves the 
 
 For manual assembly use `SqlAuditJournal(datasource, journal_id="platform", create_tables=False)` from `pyfly.audit.sql`, then `await journal.start()` before opening business units. The datasource may be a native transaction manager, registry datasource, registered name or registered async engine. Do not create another engine for the journal beside the business engine.
 
+Audit entry points remain discoverable without SQL, AI or cryptography packages when disabled.
+Enabling the default SQL journal or archive without `pyfly[data-relational]` fails startup with an
+explicit dependency error; discovery never silently disables configured audit. Recording also requires
+its journal and trusted context resolver. A host-provided `AuditJournal` takes precedence over the
+default SQL bean, and a host archive delivery override prevents default archive resources from being
+created. The Ed25519 adapter's cryptography dependency is separate from custom signer/verifier ports.
+
 For migration-managed deployment, include `framework_metadata` from `pyfly.data.relational.framework_schema` in Alembic metadata. Migrate `pyfly_audit_entries`, `pyfly_audit_heads` and the native `pyfly_outbox_*` tables. SQLAlchemy metadata alone does not install mutation triggers: the migration owner must execute each statement returned by `pyfly.audit.schema.mutation_guard_ddl("postgresql")` (or `"sqlite"`) against that same database. With `ddl-auto: none` startup validates the tables and named enabled guards and refuses missing guards. With `ddl-auto: create` the native journal creates tables/guards at startup; use this for disposable development qualification, not a routine grant to the production application role.
 
 PostgreSQL guard creation uses `CREATE OR REPLACE TRIGGER` and requires PostgreSQL 14 or later. The guards reject UPDATE/DELETE and PostgreSQL TRUNCATE on the entry table. A separate SQLite duplicate-insert guard rejects REPLACE/INSERT OR REPLACE even when SQLite recursive triggers are off. A database owner can replace/disable guards or restore old storage; table/guard validation does not prove an administrator is trustworthy. Keep a separate schema/migration owner. The application role should have SELECT/INSERT on entries, required head SELECT/INSERT/UPDATE and native outbox permissions, with no entry UPDATE/DELETE/TRUNCATE or DDL privileges. These grants and actual intended deployment roles must be qualified in the deployment environment. SQLite file owners have no equivalent server-role separation.

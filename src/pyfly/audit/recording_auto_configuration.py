@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Explicit native hook enrollment; trusted actor and project resolution belongs to the host."""
 
+from pyfly.audit._dependencies import require_audit_sql
 from pyfly.audit.ports import AuditError, AuditJournal
 from pyfly.audit.recording import AuditRecorder
 from pyfly.audit.recording_binding import AUTOMATIC_AUDIT_MODULES, AuditModulePostProcessor
@@ -11,8 +12,6 @@ from pyfly.container.container import Container
 from pyfly.container.provider import Provider
 from pyfly.context.conditions import auto_configuration, conditional_on_missing_bean, conditional_on_property
 from pyfly.core.config import Config
-from pyfly.data.relational.framework_schema import context_datasource_registry, module_datasource
-from pyfly.data.transaction import resolve_manager
 
 
 def _modules(config: Config) -> frozenset[str]:
@@ -34,6 +33,10 @@ class AuditRecordingAutoConfiguration:
     def audit_recorder(
         self, config: Config, journal: AuditJournal, resolver: AuditContextResolver, container: Container
     ) -> AuditRecorder:
+        require_audit_sql("pyfly.audit.recording.enabled")
+        from pyfly.data.relational.framework_schema import context_datasource_registry, module_datasource
+        from pyfly.data.transaction import resolve_manager
+
         modules = _modules(config)
         registry = context_datasource_registry(config, container)
         datasource = module_datasource(registry, config, "pyfly.audit", name="audit")

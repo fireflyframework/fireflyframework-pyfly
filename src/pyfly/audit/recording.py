@@ -100,8 +100,13 @@ class AuditRecorder:
                     seen.add(id(unit))
 
     async def _context(self, operation: AuditOperation) -> AuditContext:
-        operation = AuditOperation.model_validate(operation)
-        context = AuditContext.model_validate(await self.resolver.resolve(operation))
+        try:
+            operation = AuditOperation.model_validate(operation)
+            context = AuditContext.model_validate(await self.resolver.resolve(operation))
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError() from None
+        except Exception:
+            raise AuditError("Trusted audit context is unavailable") from None
         if context.correlation.operation_id is None:
             context = context.model_copy(
                 update={"correlation": context.correlation.model_copy(update={"operation_id": str(uuid4())})}
@@ -138,6 +143,8 @@ class AuditRecorder:
             return await self.journal.append(self._event(operation, context, outcome))
         except BaseException as error:
             self._poison_active()
+            if isinstance(error, asyncio.CancelledError):
+                raise asyncio.CancelledError() from None
             if isinstance(error, AuditError) or not isinstance(error, Exception):
                 raise
             raise AuditError("Trusted semantic audit context or state recording is unavailable") from None
@@ -166,6 +173,8 @@ class AuditRecorder:
                 else:
                     entry = await self.journal.append(event)
             return entry
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError() from None
         except AuditError:
             raise
         except Exception as error:
@@ -183,6 +192,8 @@ class AuditRecorder:
             self._outside_units()
             context = await self._context(operation)
             return await self._independent(self._event(operation, context, outcome))
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError() from None
         except AuditError:
             raise
         except Exception:
@@ -240,13 +251,15 @@ class AuditRecorder:
         except Exception:
             raise AuditError("Trusted audit context or committed effect intent is unavailable") from None
         effect = AuditEffect(intent)
+        from pyfly.audit._effects import admitted_audit_effect
         from pyfly.data.transaction.template import run_shielded
 
         try:
-            yield effect
+            with admitted_audit_effect(self.journal):
+                yield effect
         except asyncio.CancelledError:
             await run_shielded(self._outcome(operation, context, effect, "unknown"))
-            raise
+            raise asyncio.CancelledError() from None
         except Exception:
             await run_shielded(self._outcome(operation, context, effect, "unknown"))
             raise AuditEffectUncertain(

@@ -404,6 +404,12 @@ class AgentTool(ABC):
             await self._notify("on_error", kwargs, ctx, failure)
             raise failure from (None if failure is exc else exc)
 
+        from pyfly.agentic._audit import tool_effect
+
+        async with tool_effect(self._name):
+            return await self._execute_after_guards(kwargs, ctx=ctx)
+
+    async def _execute_after_guards(self, kwargs: dict[str, Any], *, ctx: Any) -> Any:
         logger.debug("Executing tool '%s' with kwargs=%s", self._name, list(kwargs.keys()))
         # ``_ctx`` reaches ``_execute`` only for ctx-aware tools; it is never in
         # the guard-checked / cache-hashed ``kwargs``.
@@ -415,7 +421,7 @@ class AgentTool(ABC):
             else:
                 result = await coro
         except TimeoutError:
-            failure = ToolTimeoutError(f"Tool '{self._name}' timed out after {self._timeout}s")
+            failure: ToolError = ToolTimeoutError(f"Tool '{self._name}' timed out after {self._timeout}s")
             await self._notify("on_error", kwargs, ctx, failure)
             raise failure from None
         except (ApprovalRequired, CallDeferred) as signal:
