@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.22 (2026-10-30)
+
+### Fixed
+
+- Render native Agentic skills through bounded config interpolation without executing
+  template calls, operators, loops or Python attribute traversal.
+- Preserve deeply immutable JSON config, schemas and requirements; validate nested
+  fields, nullable types and defaults with shared expansion limits before allocation.
+- Confine declared skill files and lazy resource reads to descriptor-relative,
+  no-follow filesystem operations with explicit size, depth and resource limits.
+- Reject duplicate skill/resource keys, ambiguous frontmatter and unsupported schema
+  rules instead of silently selecting or ignoring conflicting authoring data.
+
+### Migration
+
+- Canonical skill digest serialization changes existing digest values; republish or
+  version approved snapshots explicitly. Skill bodies now accept the documented
+  interpolation/filter subset, and nested JSON arrays are immutable tuples. Review
+  the [skill authoring and migration guidance](docs/modules/agentic/skills.md#bind-and-render)
+  before upgrading existing published skills.
+
 ## v26.10.21 (2026-10-30)
 
 ### Added

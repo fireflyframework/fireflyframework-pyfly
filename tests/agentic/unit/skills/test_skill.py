@@ -105,7 +105,7 @@ class TestParse:
         assert skill.requires == SkillRequirements(
             tools=("dw_workspace_write", "dw_knowledge_search"), connectors=("sharepoint",), skills=("x_ifrs_bridge",)
         )
-        assert skill.parameters_schema["required"] == ["entity"]
+        assert skill.parameters_schema["required"] == ("entity",)
         assert skill.examples == ("Close FY2025 for Acme SL",)
         assert skill.instructions.startswith("# Closing under local GAAP")
 
