@@ -548,6 +548,10 @@ cost = resolve_cost(CostContext(
 ))
 ```
 
+Invalid resolver results (booleans, non-numeric values, negatives and non-finite
+numbers) are skipped; a valid zero remains known. If all results are unknown or
+invalid, normal `None`/strict-error behavior applies.
+
 Custom strategies plug in by passing your own chain: `resolve_cost(ctx, [my_fixed_rate, *DEFAULT_RESOLVERS])`. See `examples/cost_tracking.py`.
 
 **Reasoning tokens are provider-aware.** `genai-prices` has no reasoning field;
@@ -575,6 +579,58 @@ run (and the workflow `agent()` call) rather than silently billing `$0`.
 > `BudgetGate` enforces only over models `genai-prices` *can* price. For
 > budget-critical deployments, set `cost_strict=True` to fail closed on any model
 > the price table doesn't know.
+
+## Pre-effect Text-rate Quotes
+
+Use `quote_model_price()` when a host must freeze known input/output rates before
+reserving a durable budget. This API is separate from post-call scalar resolvers:
+provider-reported totals and custom scalar cost functions cannot establish rates.
+
+```python
+from dataclasses import asdict
+from datetime import UTC, datetime
+from pyfly.agentic.observability import ModelPriceQuote, quote_model_price
+
+quote = quote_model_price(
+    "claude-opus-5",
+    provider="anthropic",
+    at=datetime.now(UTC),
+)
+if quote is None:
+    # Choose a host-approved tariff or refuse the reservation.
+    raise ValueError("No approved text-token tariff")
+assert quote.currency == "USD" and quote.basis == "text_token_rates"
+# Decimal USD per million base input/output text tokens.
+rates = quote.input_per_million, quote.output_per_million
+snapshot = asdict(quote)  # Host serialization must encode Decimal and datetime.
+```
+
+Supply an explicit canonical pricing `provider`, or a `provider:model` reference.
+A transport such as `openai-chat` or `openai-compatible` does not establish an
+OpenAI billing identity; local identities and cross-provider fallback rows return
+`None`. Framework table rows apply only to explicit first-party Anthropic pricing.
+Other identities use public `genai-prices` provider/model lookup. The returned
+`provider` and `model` identify the resolved source row.
+
+An aware `at` timestamp (UTC by default) and optional `price_context: Mapping[str,
+str]` select public date/context variants. Both effective rates must be finite,
+non-negative scalar `Decimal` values. Missing rates, unresolved usage tiers,
+unsupported context or unavailable data return `None`; zero is a known rate.
+There are no invented usage probes or linearizations of tiered prices.
+
+`ModelPriceQuote` is frozen and records `input_per_million`, `output_per_million`,
+`currency`, `basis`, `source` (`framework_table` or `genai_prices`), `source_version`,
+`source_digest` and the normalized UTC `at`. The digest identifies the selected
+effective row and source metadata, including the auto-update snapshot timestamp
+when applicable; it does not claim to hash the whole upstream dataset. Context
+values are not retained in the quote or logged by this API. Later source updates
+do not change a returned quote.
+
+These are base text-token rates, not a complete invoice. Cache, tools, images,
+audio and other fees are outside this quote. The host owns override/fallback
+precedence, approval and persistence of the frozen tariff, exact currency rounding,
+durable reservation and reconciliation. This API does not change existing
+`UsageTracker` unknown-to-zero aggregate behavior.
 
 ## Budgets
 

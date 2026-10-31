@@ -52,8 +52,11 @@ turns unresolved costs into :class:`UnknownModelCostError` instead.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from numbers import Real
 from typing import Any
 
 from genai_prices import Usage as _GenAIUsage
@@ -258,7 +261,11 @@ def resolve_cost(
     *,
     strict: bool | None = None,
 ) -> float | None:
-    """Return the first non-None result from the chain, else ``None``.
+    """Return the first finite non-negative numeric result, else ``None``.
+
+    Invalid scalar results, including booleans, negative values and non-finite
+    numbers, are skipped so the next resolver can answer. Resolver exceptions
+    retain their existing propagation behavior.
 
     When ``strict`` is ``True`` (or unset and
     ``PYFLY_AGENTIC_COST_STRICT`` / ``config.cost_strict`` is true),
@@ -271,8 +278,14 @@ def resolve_cost(
     chain = resolvers if resolvers is not None else DEFAULT_RESOLVERS
     for fn in chain:
         result = fn(ctx)
-        if result is not None:
-            return float(result)
+        if result is None or isinstance(result, bool) or not isinstance(result, (Real, Decimal)):
+            continue
+        try:
+            cost = float(result)
+        except (OverflowError, TypeError, ValueError):
+            continue
+        if math.isfinite(cost) and cost >= 0:
+            return cost
     if strict is None:
         strict = _strict_mode_from_config()
     if strict:
