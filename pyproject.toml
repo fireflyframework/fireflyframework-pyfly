@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.10.20"
+version = "26.10.21"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -72,6 +72,7 @@ agentic-script-execution = [
     "pyfly[agentic]",
     "pydantic-monty==0.0.23",
 ]
+agentic-sandbox-kubernetes = ["kubernetes==37.0.1"]
 agentic-embeddings = [
     "pyfly[agentic]",
     "numpy>=2.5.4",
