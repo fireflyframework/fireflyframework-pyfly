@@ -2,6 +2,8 @@
 
 `pyfly.agentic.sandbox` provides a trusted controller for JSON-in/JSON-out Python functions running in an isolated OCI container. Source runs only in the container. The Docker backend requires an explicitly selected daemon and an operator-approved runner image pinned by SHA-256 digest. The image recipe is in `sandbox-image/Dockerfile` and must be built and distributed by the operator.
 
+The supplied runner image targets CPython 3.12 and its standard library. Guest functions must use syntax and library APIs available in Python 3.12, even when the controller runs a newer Python version. The image includes the PyFly license and notice; its Python base image has its own license terms.
+
 Construct `FunctionSandbox(DockerSandboxBackend())`, or use `RoutingSandboxBackend({"docker": DockerSandboxBackend()})` when composing backends. An immutable `SandboxProfile` records the approved image, Docker context and daemon ID; `FunctionInvocation` records the source digest, inputs and resource limits. Invoke with trusted asynchronous `authorize`, `observe` and optional `effects` callbacks. The observer must durably record the exact resource before source is sent. Authorization must enforce current caller and effect permissions, and the effects callback must keep credentials in the trusted controller.
 
 The guest defines `main(inputs)` and may return JSON or an awaitable resolving to JSON. The injected `effect(name, args)` function uses a bounded framed channel to request a trusted callback. All guest frames are untrusted. The callback must enforce its own operation allowlist and durable idempotency. Do not put credentials or capabilities into guest inputs, results, images or environment.
