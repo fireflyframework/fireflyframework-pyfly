@@ -18,7 +18,7 @@ A skill is three things, and the shape matters because each goes to a different 
 
 * **frontmatter** — key, name, description, when to use, version, requirements, a config
   schema, examples, the resource index. Metadata a host stores, versions and shows.
-* **body** — markdown instructions, a Jinja template over the skill's config. This is what
+* **body** — markdown instructions, bounded interpolation over the skill's config. This is what
   reaches the system prompt, once per skill, rendered.
 * **resources** — reference documents and templates the body points at by path. These do NOT
   reach the prompt: they are read on demand through the ``read_skill`` tool
@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import json
 import posixpath
 import re
 from collections.abc import Callable, Iterable, Mapping
@@ -44,22 +43,11 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
-from jinja2 import BaseLoader, Environment, StrictUndefined, TemplateError
+from pyfly.agentic.skills import _schema, _template, _values
 
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 ResourceKind = Literal["reference", "template", "script"]
-
-# The body is a template over the config: an undefined variable is an authoring error, not an
-# empty string in a partner-facing memo. ``default(...)`` remains available for optional values.
-#
-# ``autoescape=False`` is deliberate and load-bearing: what this environment renders is a markdown
-# prompt body destined for a model's context window, never a web response. HTML-escaping it would
-# corrupt every skill that mentions ``&``, ``<`` or a quote — the model would read ``&amp;``. The
-# same reasoning, and the same setting, govern ``prompts.template``. Code scanning flags the pattern
-# (``py/jinja2/autoescape-false``) because it cannot see the sink; a host that renders a skill body
-# into a page owns the escaping at that boundary, where the sink is known.
-_env = Environment(loader=BaseLoader(), autoescape=False, keep_trailing_newline=False, undefined=StrictUndefined)
 
 
 class SkillParseError(ValueError):
@@ -79,7 +67,10 @@ class SkillConfigError(ValueError):
 
 
 def _frozen(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    return MappingProxyType(dict(value or {}))
+    try:
+        return _values.mapping(value)
+    except ValueError as exc:
+        raise SkillParseError(str(exc)) from exc
 
 
 def validate_resource_path(path: str) -> str:
@@ -90,9 +81,13 @@ def validate_resource_path(path: str) -> str:
     """
     if not isinstance(path, str) or not path.strip():
         raise SkillParseError("a resource path must be a non-empty string")
+    if len(path) > 4096:
+        raise SkillParseError("resource paths have at most 4096 characters")
     normalised = posixpath.normpath(path.strip().replace("\\", "/"))
     if normalised.startswith(("/", "../")) or normalised == ".." or normalised == "." or "\x00" in normalised:
         raise SkillParseError(f"resource path {path!r} escapes the skill; paths are relative and stay inside it")
+    if len(normalised.split("/")) > 16:
+        raise SkillParseError("resource paths have at most 16 components")
     return normalised
 
 
@@ -115,6 +110,15 @@ class SkillResource:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", validate_resource_path(self.path))
+        try:
+            _values.text(self.description)
+            _values.text(self.media_type)
+            if self.kind not in ("reference", "template", "script"):
+                raise ValueError("unknown resource kind")
+            if self.content is not None:
+                _values.resource_text(self.content)
+        except ValueError as exc:
+            raise SkillParseError(str(exc)) from exc
 
     def read(self) -> str:
         """The resource text."""
@@ -124,7 +128,10 @@ class SkillResource:
             return self._cache["text"]
         if self.loader is None:
             raise LookupError(f"resource {self.path!r} has no content and no loader")
-        text = self.loader()
+        try:
+            text = _values.resource_text(self.loader())
+        except ValueError as exc:
+            raise SkillParseError(str(exc)) from exc
         self._cache["text"] = text
         return text
 
@@ -140,6 +147,19 @@ class SkillRequirements:
     tools: tuple[str, ...] = ()
     connectors: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("tools", "connectors", "skills"):
+            values = getattr(self, name)
+            if not isinstance(values, (tuple, list)) or len(values) > _values.MAX_COLLECTION:
+                raise SkillParseError(f"requires.{name} must contain at most 128 names")
+            try:
+                for value in values:
+                    if not _values.text(value, 256):
+                        raise ValueError("requirement names must be non-empty")
+            except ValueError as exc:
+                raise SkillParseError(str(exc)) from exc
+            object.__setattr__(self, name, tuple(values))
 
     def any(self) -> bool:
         return bool(self.tools or self.connectors or self.skills)
@@ -158,7 +178,7 @@ class SkillRequirements:
             value = raw.get(field_name) or ()
             if isinstance(value, str):
                 value = [value]
-            if not isinstance(value, Iterable) or any(not isinstance(v, str) or not v for v in value):
+            if not isinstance(value, (list, tuple)) or any(not isinstance(v, str) or not v for v in value):
                 raise SkillParseError(f"requires.{field_name} must be a list of names")
             return tuple(value)
 
@@ -189,15 +209,37 @@ class Skill:
             raise SkillParseError(f"skill {self.key!r} needs a name")
         if not self.description or not isinstance(self.description, str):
             raise SkillParseError(f"skill {self.key!r} needs a description")
+        try:
+            for value in (
+                self.key,
+                self.name,
+                self.description,
+                self.instructions,
+                self.when_to_use,
+                str(self.version),
+            ):
+                _values.text(value)
+            if len(self.examples) > _values.MAX_COLLECTION or len(self.resources) > _values.MAX_COLLECTION:
+                raise ValueError("a skill has at most 128 examples and resources")
+            for value in self.examples:
+                _values.text(value)
+        except ValueError as exc:
+            raise SkillParseError(str(exc)) from exc
         object.__setattr__(self, "examples", tuple(self.examples))
         object.__setattr__(self, "parameters_schema", _frozen(self.parameters_schema))
         object.__setattr__(self, "config", _frozen(self.config))
         object.__setattr__(self, "metadata", _frozen(self.metadata))
+        try:
+            _schema.check_schema(self.parameters_schema)
+        except ValueError as exc:
+            raise SkillParseError(str(exc)) from exc
         resources = {}
         for path, resource in dict(self.resources).items():
             normalised = validate_resource_path(path)
             if resource.path != normalised:
                 raise SkillParseError(f"resource {path!r} is registered under a different path {resource.path!r}")
+            if normalised in resources:
+                raise SkillParseError(f"duplicate resource path {normalised!r}")
             resources[normalised] = resource
         object.__setattr__(self, "resources", MappingProxyType(resources))
         object.__setattr__(self, "version", str(self.version))
@@ -237,6 +279,14 @@ class Skill:
         A host stores it on a published worker to prove later that editing the skill did not
         change what the worker runs with.
         """
+        resources = {}
+        total = 0
+        for path, resource in sorted(self.resources.items()):
+            text = resource.read() if resource.available else None
+            total += len(text.encode("utf-8")) if text is not None else 0
+            if total > 8 * _values.MAX_RESOURCE_BYTES:
+                raise SkillParseError("skill resources exceed 8 MiB in aggregate")
+            resources[path] = {"kind": resource.kind, "description": resource.description, "text": text}
         payload = {
             "key": self.key,
             "name": self.name,
@@ -252,49 +302,31 @@ class Skill:
                 "skills": self.requires.skills,
             },
             "config": dict(self.config),
-            "resources": {
-                path: {"kind": r.kind, "description": r.description, "text": r.read() if r.available else None}
-                for path, r in sorted(self.resources.items())
-            },
+            "resources": resources,
         }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        return hashlib.sha256(_values.canonical(payload).encode("utf-8")).hexdigest()
 
     # -- config --------------------------------------------------------------
 
     def validate_config(self, config: Mapping[str, Any] | None = None) -> list[str]:
         """Every way ``config`` (default: the bound config) fails ``parameters_schema``; empty when valid.
 
-        The admitted schema subset is the one an editor can render as a form: ``type`` (string,
-        number, integer, boolean, array, object), ``required``, ``properties`` with ``enum``,
-        ``minimum`` / ``maximum``, ``minLength`` / ``maxLength``, ``default``, and
-        ``additionalProperties: false``. Anything else in the schema is carried, not enforced.
+        The recursive subset supports JSON types, required/properties, array items, enum,
+        numeric/length/item bounds, defaults and boolean additionalProperties. Unsupported
+        schema keywords are refused when the skill is constructed. At most 128 problems.
         """
-        values = dict(self.config if config is None else config)
-        schema = self.parameters_schema
-        if not schema:
-            return []
-        problems: list[str] = []
-        properties: Mapping[str, Any] = schema.get("properties") or {}
-        for name in schema.get("required") or ():
-            if name not in values:
-                problems.append(f"{name} is required")
-        if schema.get("additionalProperties") is False:
-            for name in values:
-                if name not in properties:
-                    problems.append(f"{name} is unexpected (not in the schema)")
-        for name, rule in properties.items():
-            if name not in values or not isinstance(rule, Mapping):
-                continue
-            problems.extend(f"{name} {p}" for p in _check_value(values[name], rule))
-        return problems
+        try:
+            values = self._config_with_defaults(config)
+        except SkillParseError as exc:
+            return [str(exc)]
+        return _schema.validate(values, self.parameters_schema)
 
-    def _config_with_defaults(self, config: Mapping[str, Any] | None) -> dict[str, Any]:
-        values = dict(self.config if config is None else config)
-        properties: Mapping[str, Any] = self.parameters_schema.get("properties") or {}
-        for name, rule in properties.items():
-            if name not in values and isinstance(rule, Mapping) and "default" in rule:
-                values[name] = rule["default"]
-        return values
+    def _config_with_defaults(self, config: Mapping[str, Any] | None) -> Mapping[str, Any]:
+        values = _frozen(self.config if config is None else config)
+        try:
+            return _frozen(_schema.defaults(values, self.parameters_schema))
+        except ValueError as exc:
+            raise SkillParseError(str(exc)) from exc
 
     # -- requirements --------------------------------------------------------
 
@@ -321,13 +353,16 @@ class Skill:
         Raises :class:`SkillConfigError` when the config fails the schema — a body rendered
         from a wrong config is worse than no body, because the model would follow it.
         """
-        problems = self.validate_config(config)
+        try:
+            values = self._config_with_defaults(config)
+        except SkillParseError as exc:
+            raise SkillConfigError(self.key, [str(exc)]) from exc
+        problems = _schema.validate(values, self.parameters_schema)
         if problems:
             raise SkillConfigError(self.key, problems)
-        values = self._config_with_defaults(config)
         try:
-            return _env.from_string(self.instructions).render(**values).strip()
-        except TemplateError as exc:
+            return _template.render(self.instructions, values)
+        except ValueError as exc:
             raise SkillConfigError(self.key, [f"body could not be rendered: {exc}"]) from exc
 
 
@@ -335,34 +370,13 @@ def _replace(skill: Skill, **changes: Any) -> Skill:
     return dataclasses.replace(skill, **changes)
 
 
-_TYPES: dict[str, tuple[type, ...]] = {
-    "string": (str,),
-    "number": (int, float),
-    "integer": (int,),
-    "boolean": (bool,),
-    "array": (list, tuple),
-    "object": (dict, Mapping),
-}
-
-
-def _check_value(value: Any, rule: Mapping[str, Any]) -> list[str]:
-    problems: list[str] = []
-    expected = rule.get("type")
-    if isinstance(expected, str) and expected in _TYPES:
-        ok = isinstance(value, _TYPES[expected]) and not (expected in ("number", "integer") and isinstance(value, bool))
-        if not ok:
-            problems.append(f"must be a {expected}, got {type(value).__name__}")
-            return problems
-    if "enum" in rule and value not in rule["enum"]:
-        problems.append(f"must be one of {list(rule['enum'])}, got {value!r}")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in rule and value < rule["minimum"]:
-            problems.append(f"must be >= {rule['minimum']}, got {value}")
-        if "maximum" in rule and value > rule["maximum"]:
-            problems.append(f"must be <= {rule['maximum']}, got {value}")
-    if isinstance(value, str):
-        if "minLength" in rule and len(value) < rule["minLength"]:
-            problems.append(f"must be at least {rule['minLength']} characters")
-        if "maxLength" in rule and len(value) > rule["maxLength"]:
-            problems.append(f"must be at most {rule['maxLength']} characters")
-    return problems
+def index_skills(skills: Iterable[Skill]) -> dict[str, Skill]:
+    """One bounded index shared by prompt and tool assembly; ambiguity fails closed."""
+    result: dict[str, Skill] = {}
+    for skill in skills:
+        if skill.key in result:
+            raise SkillParseError(f"duplicate skill key {skill.key!r}")
+        if len(result) >= _values.MAX_COLLECTION:
+            raise SkillParseError("at most 128 skills may be assembled")
+        result[skill.key] = skill
+    return result

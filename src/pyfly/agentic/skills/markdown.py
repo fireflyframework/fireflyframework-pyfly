@@ -29,6 +29,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from pyfly.agentic.skills import _files, _values
 from pyfly.agentic.skills.skill import (
     Skill,
     SkillParseError,
@@ -46,14 +47,39 @@ KNOWN_KEYS = frozenset(
 )
 
 
+class _UniqueLoader(yaml.SafeLoader):  # type: ignore[misc]
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[str, Any]:
+        result = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, str) or key in result:
+                raise SkillParseError("frontmatter keys must be unique strings")
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
 def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """``(frontmatter, body)`` from a SKILL.md text."""
+    try:
+        _values.resource_text(text)
+    except ValueError as exc:
+        raise SkillParseError(str(exc)) from exc
     match = _FRONTMATTER.match(text.lstrip("﻿"))
     if match is None:
         raise SkillParseError("a skill begins with YAML frontmatter between '---' fences")
     try:
-        loaded = yaml.safe_load(match.group(1)) or {}
-    except yaml.YAMLError as exc:
+        depth = 0
+        for count, event in enumerate(yaml.parse(match.group(1))):
+            if isinstance(event, yaml.events.AliasEvent):
+                raise SkillParseError("frontmatter aliases are not supported")
+            if isinstance(event, (yaml.events.SequenceStartEvent, yaml.events.MappingStartEvent)):
+                depth += 1
+            elif isinstance(event, (yaml.events.SequenceEndEvent, yaml.events.MappingEndEvent)):
+                depth -= 1
+            if count >= 8192 or depth > _values.MAX_DEPTH:
+                raise SkillParseError("frontmatter exceeds node or nesting limits")
+        loaded = yaml.load(match.group(1), Loader=_UniqueLoader) or {}
+    except (yaml.YAMLError, RecursionError) as exc:
         raise SkillParseError(f"frontmatter is not valid YAML: {exc}") from exc
     if not isinstance(loaded, Mapping):
         raise SkillParseError("frontmatter must be a mapping")
@@ -69,6 +95,8 @@ def _resources_from(raw: Any) -> dict[str, SkillResource]:
     index: dict[str, SkillResource] = {}
     for path, spec in raw.items():
         normalised = validate_resource_path(str(path))
+        if normalised in index:
+            raise SkillParseError(f"duplicate resource path {normalised!r}")
         if isinstance(spec, str) or spec is None:
             index[normalised] = SkillResource(path=normalised, description=spec or "")
             continue
@@ -121,17 +149,25 @@ def load_skill(directory: Path | str, *, key: str | None = None, filename: str =
     that is not on disk is refused now, because a skill promising a checklist it cannot produce
     would fail on the model's turn instead of the author's.
     """
-    root = Path(directory)
-    text = (root / filename).read_text(encoding="utf-8")
+    root = Path(directory).absolute()
+    filename = validate_resource_path(filename)
+    try:
+        text, identity = _files.read_file(root, filename)
+    except ValueError as exc:
+        raise SkillParseError(str(exc)) from exc
     skill = parse_skill(text, key=key or root.name)
     attached: dict[str, SkillResource] = {}
     for path, resource in skill.resources.items():
-        file = root / path
-        if not file.is_file():
-            raise SkillParseError(f"skill {skill.key!r} declares resource {path!r} but {file} is not a file")
+        try:
+            _files.read_file(root, path, identity=identity, read=False)
+        except ValueError as exc:
+            raise SkillParseError(f"skill {skill.key!r} cannot load resource {path!r}: {exc}") from exc
 
-        def loader(p: Path = file) -> str:
-            return p.read_text(encoding="utf-8")
+        def loader(p: str = path) -> str:
+            try:
+                return _files.read_file(root, p, identity=identity)[0]
+            except ValueError as exc:
+                raise SkillParseError(str(exc)) from exc
 
         attached[path] = SkillResource(
             path=path,

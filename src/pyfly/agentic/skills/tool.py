@@ -28,7 +28,7 @@ from typing import Any
 
 from pydantic_ai import ModelRetry
 
-from pyfly.agentic.skills.skill import Skill, validate_resource_path
+from pyfly.agentic.skills.skill import Skill, index_skills, validate_resource_path
 from pyfly.agentic.tools.base import AgentTool, ParameterSpec, ToolCallListener
 
 DEFAULT_MAX_CHARS = 60_000
@@ -45,7 +45,7 @@ class ReadSkillTool(AgentTool):
         max_chars: int | None = DEFAULT_MAX_CHARS,
         listeners: Sequence[ToolCallListener] = (),
     ) -> None:
-        self._skills: dict[str, Skill] = {s.key: s for s in skills}
+        self._skills: dict[str, Skill] = index_skills(skills)
         self._max_chars = max_chars
         super().__init__(
             name,

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from pyfly.agentic.skills.skill import Skill
+from pyfly.agentic.skills.skill import Skill, SkillParseError, index_skills
 
 
 def render_skills_section(
@@ -36,7 +36,7 @@ def render_skills_section(
     model a body with holes in it. Returns ``""`` for no skills, so a caller can append it
     unconditionally.
     """
-    skills = list(skills)
+    skills = list(index_skills(skills).values())
     if not skills:
         return ""
     parts: list[str] = [heading, ""]
@@ -57,4 +57,7 @@ def render_skills_section(
                 label = f" — {resource.description}" if resource.description else ""
                 parts.append(f'- `{read_tool_name}(key="{skill.key}", path="{path}")` ({resource.kind}){label}')
         parts.append("")
-    return "\n".join(parts).rstrip() + "\n"
+    section = "\n".join(parts).rstrip() + "\n"
+    if len(section) > 65_536:
+        raise SkillParseError("skills prompt section exceeds 65536 characters")
+    return section
