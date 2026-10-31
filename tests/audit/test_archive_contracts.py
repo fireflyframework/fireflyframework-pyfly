@@ -410,3 +410,77 @@ async def test_rejected_archive_identifiers_hide_input_values(tmp_path):
         with pytest.raises(ValueError) as failed:
             await operation
         assert canary not in str(failed.value)
+
+
+async def test_signing_requires_external_trusted_key_history_and_hides_resolver_errors():
+    import traceback
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from pyfly.audit import AuditError
+
+    signer_cls = feature("signing", "Ed25519CheckpointSigner")
+    verifier_cls = feature("signing", "Ed25519CheckpointVerifier")
+    old, new = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    known = {"old": old.public_key(), "new": new.public_key()}
+    verifier = verifier_cls(known.get)
+    first = await signer_cls("old", lambda reference: old).sign(b"stable body")
+    second = await signer_cls("new", lambda reference: new).sign(b"stable body")
+    assert await verifier.verify(b"stable body", first)
+    assert await verifier.verify(b"stable body", second)
+    assert not await verifier_cls(lambda reference: new.public_key()).verify(b"stable body", first)
+    known.pop("old")
+    assert not await verifier.verify(b"stable body", first)
+    for forged in (
+        first.model_copy(update={"algorithm": "other"}),
+        first.model_copy(update={"signature": "not-base64"}),
+    ):
+        assert not await verifier.verify(b"stable body", forged)
+
+    def private_failure(reference):
+        raise RuntimeError("PRIVATE resolver credential")
+
+    with pytest.raises(AuditError) as failed:
+        await signer_cls("approved-key", private_failure).sign(b"stable body")
+    assert "PRIVATE" not in "".join(traceback.format_exception(failed.value))
+    assert set(first.model_dump()) == {"key_ref", "algorithm", "signature"}
+
+
+async def test_cancelled_local_write_finishes_before_descriptor_shutdown_and_retries(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import threading
+
+    cls = feature("local_archive", "LocalArchiveAdapter")
+    root = tmp_path / "archive"
+    sink = cls(root, sink_id="fixture")
+    await sink.start()
+    started, release = threading.Event(), threading.Event()
+    original = os.write
+
+    def blocked_write(descriptor, content):
+        started.set()
+        if not release.wait(3):
+            raise TimeoutError("Fixture write was not released")
+        return original(descriptor, content)
+
+    content = b"cancelled caller, durable immutable bytes"
+    digest = hashlib.sha256(content).hexdigest()
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", blocked_write)
+        pending = asyncio.create_task(sink.put(digest, content))
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        finally:
+            release.set()
+            await sink.stop()
+    reopened = cls(root, sink_id="fixture")
+    await reopened.start()
+    inode = (root / "objects" / digest).stat().st_ino
+    receipt = await reopened.put(digest, content)
+    assert (root / "objects" / digest).stat().st_ino == inode
+    assert await reopened.get(receipt) == content
+    await reopened.stop()
