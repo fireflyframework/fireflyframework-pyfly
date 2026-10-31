@@ -15,7 +15,7 @@ from pyfly.container.scoped_proxy import ScopedProxy
 from pyfly.context import ApplicationContext
 from pyfly.core import Config
 from pyfly.data.relational.auto_configuration import DataSourceAutoConfiguration, RelationalAutoConfiguration
-from pyfly.data.relational.sqlalchemy import SessionProvider
+from pyfly.data.relational.sqlalchemy import SessionProvider, SqlAlchemyTransactionManager
 from pyfly.data.transaction import UnexpectedRollbackError
 
 
@@ -75,6 +75,26 @@ async def test_two_native_contexts_and_proxies_share_only_their_own_infrastructu
         assert not await a.read(scope)
         assert not is_audit_infrastructure(a)
         assert not is_audit_infrastructure(b)
+        from pyfly.audit import AuditContext, AuditOperation, AuditRecorder
+
+        class Resolver:
+            async def resolve(self, operation):
+                return AuditContext(
+                    scope=scope,
+                    actor=AuditActor(kind="service", subject_id="verified-b"),
+                    resource=AuditResource(kind="request", resource_id="application-b"),
+                )
+
+        recorder_b = AuditRecorder(
+            proxy_b,
+            Resolver(),
+            transaction_manager=two.get_bean(SqlAlchemyTransactionManager),
+            modules=frozenset({"web"}),
+        )
+        with audit_infrastructure(proxy_a):
+            await recorder_b.observation(AuditOperation(module="web", action="request.observed"))
+        assert len(await b.read(scope)) == 2
+        assert not await a.read(scope)
     finally:
         await two.stop()
         await one.stop()
