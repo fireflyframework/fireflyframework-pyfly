@@ -170,9 +170,10 @@ class ArchiveSegment(Fact):
     def entries(self) -> tuple[JournalEntry, ...]:
         if not self.payload.endswith(b"\n"):
             raise ValueError("Archive NDJSON is incomplete")
-        lines = self.payload[:-1].split(b"\n")
-        if len(lines) != self.manifest.entry_count:
+        count = self.payload.count(b"\n")
+        if not 1 <= count <= MAX_ARCHIVE_ENTRIES or count != self.manifest.entry_count:
             raise ValueError("Archive NDJSON count does not match its declared range")
+        lines = self.payload[:-1].split(b"\n")
         records = []
         previous = self.manifest.previous_hash
         for sequence, line in enumerate(lines, self.manifest.first_sequence):

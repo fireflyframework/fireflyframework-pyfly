@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 from collections.abc import Awaitable, Callable
@@ -37,6 +38,8 @@ class Ed25519CheckpointSigner:
                 raise TypeError
             signature = base64.urlsafe_b64encode(key.sign(checkpoint_bytes)).decode("ascii")
             return CheckpointSignature(key_ref=self._key_ref, algorithm="Ed25519", signature=signature)
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError from None
         except Exception:
             raise AuditError("Checkpoint signing authority is unavailable") from None
 
@@ -60,5 +63,7 @@ class Ed25519CheckpointVerifier:
                 return False
             key.verify(raw, checkpoint_bytes)
             return True
+        except asyncio.CancelledError:
+            raise asyncio.CancelledError from None
         except Exception:
             return False

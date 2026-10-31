@@ -494,6 +494,43 @@ def test_first_segment_cannot_start_from_a_forged_genesis_hash():
         cls.from_entries((first,))
 
 
+def test_invalid_ndjson_count_is_refused_before_payload_copy_or_split():
+    cls = feature("archive_models", "ArchiveSegment")
+    valid = cls.from_entries(entries(1))
+
+    class Unsplittable(bytes):
+        def __getitem__(self, key):
+            raise AssertionError("Invalid row count must be rejected before copying or splitting the payload")
+
+    forged = cls.model_construct(manifest=valid.manifest, payload=Unsplittable(b"\n" * 1001))
+    with pytest.raises(ValueError, match="count"):
+        forged.entries()
+
+
+@pytest.mark.parametrize("operation", ["sign", "verify"])
+async def test_direct_signing_adapter_cancellation_hides_resolver_details(operation):
+    import asyncio
+    import traceback
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    signer_cls = feature("signing", "Ed25519CheckpointSigner")
+    verifier_cls = feature("signing", "Ed25519CheckpointVerifier")
+    key = Ed25519PrivateKey.generate()
+    signature = await signer_cls("fixture-key", lambda reference: key).sign(b"fixture")
+
+    async def cancelled(reference):
+        raise asyncio.CancelledError("PRIVATE fixture cancellation")
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        if operation == "sign":
+            await signer_cls("fixture-key", cancelled).sign(b"fixture")
+        else:
+            await verifier_cls(cancelled).verify(b"fixture", signature)
+    assert not caught.value.args
+    assert "PRIVATE" not in "".join(traceback.format_exception(caught.value))
+
+
 async def test_cancelled_start_drains_opening_thread_and_closes_owned_descriptors(tmp_path, monkeypatch):
     import asyncio
     import os
