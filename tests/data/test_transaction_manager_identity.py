@@ -266,3 +266,63 @@ async def test_captured_repository_stream_refuses_resumption_inside_foreign_cont
 async def test_session_provider_current_preserves_none_outside_a_unit(apps):
     _, b = apps
     assert b.get_bean(SessionProvider).current("unconfigured-name") is None
+
+
+@pytest.mark.parametrize("participant", ["a", "b"])
+async def test_other_application_rollback_wrapper_never_authorizes_foreign_unit(apps, participant):
+    from pyfly.testing import RollbackTransaction
+
+    a, b = apps
+    async with RollbackTransaction(a) as rollback_a, RollbackTransaction(b) as rollback_b:
+        taking_part = rollback_a if participant == "a" else rollback_b
+        with taking_part.taking_part(), pytest.raises(UnexpectedRollbackError):
+            async with TransactionTemplate(manager(a)).transaction() as unit:
+                await unit.resource.execute(text("INSERT INTO manager_identity_items VALUES ('must-rollback')"))
+                with pytest.raises(IllegalTransactionStateError, match="different transaction manager"):
+                    await wrong_call(b, "repository.read")
+    assert await names(a) == ["a"]
+    assert await names(b) == ["b"]
+
+
+async def test_audit_with_frozen_original_manager_refuses_rollback_slice_participation(apps):
+    from pyfly.audit import (
+        AuditActor,
+        AuditContext,
+        AuditError,
+        AuditOperation,
+        AuditRecorder,
+        AuditResource,
+        AuditScope,
+    )
+    from pyfly.audit.sql import SqlAuditJournal
+    from pyfly.testing import RollbackTransaction
+
+    a, _ = apps
+    original = manager(a)
+    journal = SqlAuditJournal(original)
+    await journal.start()
+    scope = AuditScope(tenant_id="fixture", workspace_id="workspace", project_id="project")
+
+    class Resolver:
+        async def resolve(self, _):
+            return AuditContext(
+                scope=scope,
+                actor=AuditActor(kind="service", subject_id="verified"),
+                resource=AuditResource(kind="item", resource_id="fixture"),
+            )
+
+    recorder = AuditRecorder(journal, Resolver(), transaction_manager=original, modules=frozenset({"data"}))
+    operation = AuditOperation(module="data", action="fixture.changed")
+    async with RollbackTransaction(a):
+        with pytest.raises(UnexpectedRollbackError):
+            async with TransactionTemplate(manager(a)).transaction() as unit:
+                await unit.resource.execute(text("INSERT INTO manager_identity_items VALUES ('must-rollback')"))
+                with pytest.raises(AuditError, match="same active native SQL write unit"):
+                    await recorder.state(operation)
+    assert await names(a) == ["a"]
+    assert not await journal.read(scope)
+    async with TransactionTemplate(original).transaction() as unit:
+        await unit.resource.execute(text("INSERT INTO manager_identity_items VALUES ('manual-native')"))
+        await recorder.state(operation)
+    assert len(await journal.read(scope)) == 1
+    await journal.stop()

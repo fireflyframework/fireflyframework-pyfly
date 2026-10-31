@@ -61,6 +61,25 @@ _adapters_loaded = False
 _adapters_lock = threading.Lock()
 
 
+def _current_manager(manager: TransactionManager) -> TransactionManager:
+    """Select a native wrapper's current owner before units are opened or compared."""
+    seen: set[int] = set()
+    for _ in range(16):
+        if id(manager) in seen:
+            break
+        seen.add(id(manager))
+        select = getattr(manager, "_pyfly_current_manager", None)
+        if not callable(select):
+            return manager
+        selected: object = select()
+        if selected is manager:
+            return manager
+        if not isinstance(selected, TransactionManager):
+            break
+        manager = selected
+    raise IllegalTransactionStateError("A native transaction manager wrapper did not resolve") from None
+
+
 def register_resource_resolver(resolver: ResourceResolver) -> None:
     """Let *resolver* map resource objects to their managers in :func:`resolve_manager` (backend adapters
     call it when they are imported)."""
@@ -173,7 +192,7 @@ class TransactionManagerRegistry:
                 "datasource (pyfly.data.relational.datasources.<name>.url) or name one that exists.",
                 datasource=target,
             )
-        return manager
+        return _current_manager(manager)
 
     @property
     def default(self) -> TransactionManager | None:
@@ -253,14 +272,14 @@ def resolve_manager(target: object = None) -> TransactionManager:
             )
         return registry.get(target)
     if isinstance(target, TransactionManager):
-        return target
+        return _current_manager(target)
     manager = find_manager_for_resource(target)
     if manager is None:
         raise IllegalTransactionStateError(
             f"No transaction manager owns {type(target).__name__} {target!r}; pass a datasource name, a "
             "TransactionManager or a session factory the application built."
         )
-    return manager
+    return _current_manager(manager)
 
 
 def find_manager_for_resource(resource: object) -> TransactionManager | None:

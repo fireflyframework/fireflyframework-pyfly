@@ -304,6 +304,9 @@ class RollbackTransactionManager(SqlAlchemyTransactionManager):
         # Every unit is a savepoint of the test's transaction: none runs on an autocommit connection.
         return dataclasses.replace(self._original.capabilities, fast_autocommit_reads=False)
 
+    def _pyfly_current_manager(self) -> SqlAlchemyTransactionManager:
+        return self if self._serves() else self._original
+
     async def begin(self, definition: TransactionDefinition) -> UnitOfWork:
         if not self._serves():
             return await self._original.begin(definition)
