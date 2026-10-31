@@ -5,7 +5,7 @@
 `pyfly.ecm` proporciona abstracciones hexagonales para la gestión documental
 empresarial: almacenamiento de blobs, metadatos de documentos, jerarquías de
 carpetas y flujos de firma electrónica. El módulo incluye adaptadores
-completamente cableados para almacenamiento local, AWS S3 y Azure Blob Storage,
+completamente cableados para almacenamiento local, AWS S3, Azure Blob Storage y Google Cloud Storage,
 además de adaptadores de firma electrónica para DocuSign, Adobe Sign y Logalty
 — todos seleccionables sin cambiar una sola línea del código de la aplicación,
 puramente mediante YAML.
@@ -13,7 +13,7 @@ puramente mediante YAML.
 !!! note "El módulo en sí no requiere dependencias adicionales"
     El módulo ECM central (`pyfly.ecm`) no tiene dependencias de terceros más
     allá de la biblioteca estándar. Los adaptadores de almacenamiento en la nube
-    (`boto3`, `azure-storage-blob`) y las llamadas a los SDK de firma electrónica
+    (`boto3`, `azure-storage-blob`, `google-cloud-storage`) y las llamadas a los SDK de firma electrónica
     se realizan a través de envoltorios asíncronos ligeros en cada clase de
     adaptador; instala solo lo que necesites.
 
@@ -223,8 +223,9 @@ async def send_for_signature(document_id: str) -> str:
 | `LocalFilesystemStorageAdapter` | `local` (por defecto) | Almacena los blobs como `<base_dir>/<id>/v<n>` |
 | `AwsS3StorageAdapter` | `s3` o `aws` | Requiere `boto3`; asíncrono mediante `run_in_executor` |
 | `AzureBlobStorageAdapter` | `azure` | Requiere `azure-storage-blob` |
+| `GoogleCloudStorageAdapter` | `gcs` o `google-cloud-storage` | Instala `pyfly[ecm-gcs]` |
 
-Los tres implementan `DocumentStoragePort`. `LocalFilesystemStorageAdapter` crea
+Los cuatro implementan `DocumentStoragePort`. `LocalFilesystemStorageAdapter` crea
 el directorio base en el momento de la construcción y almacena cada versión como
 un archivo independiente, lo que lo hace adecuado para desarrollo y pruebas sin
 servicios externos.
@@ -247,7 +248,7 @@ inyéctala en `ESignatureService`.
 ## Autoconfiguración
 
 `EcmAutoConfiguration` se activa cuando se establece `pyfly.ecm.enabled=true` en
-la configuración. Registra cinco beans:
+la configuración. Registra seis beans:
 
 | Bean | Implementación por defecto |
 |---|---|
@@ -301,53 +302,39 @@ pyfly:
 
 ---
 
-## Implementar un adaptador de almacenamiento personalizado
+## Google Cloud Storage nativo
 
-Implementa `DocumentStoragePort` y regístralo como un `@bean`:
+Instala `pyfly[ecm-gcs]` y selecciona el adaptador nativo:
 
-::: listing infra/gcs_storage.py | Listado C.5 — Esqueleto de un adaptador de almacenamiento personalizado
-from pyfly.ecm.models import Document, DocumentVersion
-from pyfly.ecm.ports import DocumentStoragePort
-
-
-class GcsStorageAdapter:
-    """Google Cloud Storage adapter (skeleton)."""
-
-    name = "gcs"
-
-    def __init__(self, bucket: str, key_prefix: str = "") -> None:
-        self._bucket = bucket
-        self._prefix = key_prefix
-
-    async def upload(
-        self, document: Document, content: bytes
-    ) -> DocumentVersion:
-        version_no = (
-            (document.versions[-1].version + 1) if document.versions else 1
-        )
-        key = f"{self._prefix}{document.id}/v{version_no}"
-        # ... upload content to GCS ...
-        return DocumentVersion(
-            version=version_no,
-            content_hash="sha256-placeholder",
-            size_bytes=len(content),
-            storage_uri=f"gs://{self._bucket}/{key}",
-        )
-
-    async def download(
-        self, document: Document, version: int | None = None
-    ) -> bytes:
-        target = version or document.versions[-1].version
-        key = f"{self._prefix}{document.id}/v{target}"
-        # ... download from GCS ...
-        return b""
-
-    async def delete(
-        self, document: Document, version: int | None = None
-    ) -> bool:
-        # ... delete object(s) from GCS ...
-        return True
+::: listing pyfly-gcs.yaml | Listado C.5 — Google Cloud Storage nativo
+pyfly:
+  ecm:
+    enabled: true
+    storage:
+      provider: gcs
+      gcs:
+        bucket: application-documents
+        project: application-project
+        key-prefix: documents/
 :::
+
+`GoogleCloudStorageAdapter` usa Application Default Credentials. Asigna a la
+aplicación una identidad con acceso al bucket o prefijo necesario y conserva las
+credenciales fuera de los metadatos del documento.
+
+Cada carga crea una clave de versión nueva con `if_generation_match=0` y
+`retry=None`. No sobrescribe esa versión ni repite automáticamente una escritura
+con resultado incierto. Un timeout se propaga al llamador, que debe conservar la
+versión prevista y consultar su resultado antes de decidir cómo continuar.
+Las descargas aceptan únicamente versiones conservadas en el documento. Los
+metadatos devueltos incluyen el SHA-256 y el número de bytes del contenido enviado.
+La aplicación sigue siendo responsable de la autorización y de persistir las
+versiones.
+
+El puerto recibe bytes. Divide los archivos grandes en documentos de tamaño
+acotado o usa una capa de streaming de la aplicación. Para otro proveedor,
+implementa `DocumentStoragePort`, regístralo como bean e inyéctalo en
+`DocumentService`.
 
 Archivos fuente:
 - `src/pyfly/ecm/models.py` — dataclasses de dominio

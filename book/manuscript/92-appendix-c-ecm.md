@@ -4,13 +4,13 @@
 
 `pyfly.ecm` provides hexagonal abstractions for enterprise document management:
 blob storage, document metadata, folder hierarchies, and e-signature workflows.
-The module ships fully wired adapters for local storage, AWS S3, and Azure Blob
-Storage, plus e-signature adapters for DocuSign, Adobe Sign, and Logalty — all
+The module ships fully wired adapters for local storage, AWS S3, Azure Blob
+Storage, and Google Cloud Storage, plus e-signature adapters for DocuSign, Adobe Sign, and Logalty — all
 selectable without changing a line of application code, purely via YAML.
 
 !!! note "No extra dependency for the module itself"
     The core ECM module (`pyfly.ecm`) has no third-party dependencies beyond
-    the standard library. Cloud storage adapters (`boto3`, `azure-storage-blob`)
+    the standard library. Cloud storage adapters (`boto3`, `azure-storage-blob`, `google-cloud-storage`)
     and e-signature SDK calls are made through lightweight async wrappers in
     each adapter class; install only what you need.
 
@@ -217,8 +217,9 @@ async def send_for_signature(document_id: str) -> str:
 | `LocalFilesystemStorageAdapter` | `local` (default) | Stores blobs as `<base_dir>/<id>/v<n>` |
 | `AwsS3StorageAdapter` | `s3` or `aws` | Requires `boto3`; async via `run_in_executor` |
 | `AzureBlobStorageAdapter` | `azure` | Requires `azure-storage-blob` |
+| `GoogleCloudStorageAdapter` | `gcs` or `google-cloud-storage` | Install `pyfly[ecm-gcs]` |
 
-All three implement `DocumentStoragePort`. `LocalFilesystemStorageAdapter` creates
+All four implement `DocumentStoragePort`. `LocalFilesystemStorageAdapter` creates
 the base directory on construction and stores each version as a separate file, making
 it suitable for development and testing without external services.
 
@@ -239,7 +240,7 @@ service). Register your implementation as a bean and inject it into `ESignatureS
 ## Auto-configuration
 
 `EcmAutoConfiguration` activates when `pyfly.ecm.enabled=true` is set in config.
-It registers five beans:
+It registers six beans:
 
 | Bean | Default implementation |
 |---|---|
@@ -291,53 +292,36 @@ pyfly:
 
 ---
 
-## Implementing a custom storage adapter
+## Native Google Cloud Storage
 
-Implement `DocumentStoragePort` and register it as a `@bean`:
+Install `pyfly[ecm-gcs]` and select the native adapter:
 
-::: listing infra/gcs_storage.py | Listing C.5 — Custom storage adapter skeleton
-from pyfly.ecm.models import Document, DocumentVersion
-from pyfly.ecm.ports import DocumentStoragePort
-
-
-class GcsStorageAdapter:
-    """Google Cloud Storage adapter (skeleton)."""
-
-    name = "gcs"
-
-    def __init__(self, bucket: str, key_prefix: str = "") -> None:
-        self._bucket = bucket
-        self._prefix = key_prefix
-
-    async def upload(
-        self, document: Document, content: bytes
-    ) -> DocumentVersion:
-        version_no = (
-            (document.versions[-1].version + 1) if document.versions else 1
-        )
-        key = f"{self._prefix}{document.id}/v{version_no}"
-        # ... upload content to GCS ...
-        return DocumentVersion(
-            version=version_no,
-            content_hash="sha256-placeholder",
-            size_bytes=len(content),
-            storage_uri=f"gs://{self._bucket}/{key}",
-        )
-
-    async def download(
-        self, document: Document, version: int | None = None
-    ) -> bytes:
-        target = version or document.versions[-1].version
-        key = f"{self._prefix}{document.id}/v{target}"
-        # ... download from GCS ...
-        return b""
-
-    async def delete(
-        self, document: Document, version: int | None = None
-    ) -> bool:
-        # ... delete object(s) from GCS ...
-        return True
+::: listing pyfly-gcs.yaml | Listing C.5 — Native Google Cloud Storage
+pyfly:
+  ecm:
+    enabled: true
+    storage:
+      provider: gcs
+      gcs:
+        bucket: application-documents
+        project: application-project
+        key-prefix: documents/
 :::
+
+`GoogleCloudStorageAdapter` uses Application Default Credentials. Bind an
+application workload identity to the required bucket or prefix; keep credentials
+out of document metadata.
+
+An upload creates a new version key with `if_generation_match=0` and `retry=None`.
+It cannot overwrite that version or automatically repeat an uncertain write.
+A timeout propagates to the caller, which must retain the intended version and
+perform explicit readback. Downloads accept only versions retained in the document
+record. Returned version metadata contains the submitted content's SHA-256 and byte
+count. The application still owns authorization and durable version metadata.
+
+The port accepts bytes. Split large payloads into bounded chunk documents or use
+an application streaming boundary. To add another storage provider, implement
+`DocumentStoragePort`, register it as a bean and inject it into `DocumentService`.
 
 Source files:
 - `src/pyfly/ecm/models.py` — domain dataclasses
