@@ -21,6 +21,7 @@
 """
 
 from pyfly.agentic.skills.markdown import load_skill, parse_skill, split_frontmatter
+from pyfly.agentic.skills.package import SkillPackage, SkillPin
 from pyfly.agentic.skills.prompt import render_skills_section
 from pyfly.agentic.skills.skill import (
     KEY_PATTERN,
@@ -38,7 +39,9 @@ __all__ = [
     "ReadSkillTool",
     "Skill",
     "SkillConfigError",
+    "SkillPackage",
     "SkillParseError",
+    "SkillPin",
     "SkillRequirements",
     "SkillResource",
     "build_read_skill_tool",
