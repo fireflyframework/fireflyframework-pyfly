@@ -529,7 +529,7 @@ class TransactionBoundary:
         # one that arrives while this boundary runs can have a driver error stand in for it.
         self._since = cancel_requests()
         definition = self._definition
-        manager = self._manager
+        manager = self._manager = resolve_manager(self._manager)
         datasource = manager.datasource
         state = current_state()
         state.check_manager(manager)
@@ -869,6 +869,7 @@ class AutoUnit:
 
     async def __aenter__(self) -> UnitOfWork:
         self._since = cancel_requests()
+        self._manager = resolve_manager(self._manager)
         current_state().check_manager(self._manager)
         unit = await self._manager.open_auto_unit(read_only=self._read_only, autocommit=self._autocommit)
         unit.operations = 0  # opening it (the checkout, BEGIN) ran none of its work
