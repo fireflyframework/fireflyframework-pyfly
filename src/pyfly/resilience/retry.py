@@ -27,6 +27,8 @@ Three more rules keep a retry from doing harm:
 - An exception whose class declares ``retryable = False`` is never retried. The unit of work's
   :class:`~pyfly.data.transaction.errors.CommitOutcomeUnknownError` does: a commit interrupted in flight
   may have committed, and retrying it would apply the writes twice.
+- Inside an admitted audit effect, an automatic retry cannot repeat its function: external I/O may
+  already have occurred even before the outer effect boundary receives the failure.
 - A retry that runs *inside* a unit of work (a retried method called from a transactional caller) stops
   as soon as that unit is rollback-only: no later attempt can commit it.
 - Retry only transient failures: list them in ``exceptions`` (a connection error, a serialization
@@ -50,7 +52,9 @@ _logger = logging.getLogger(__name__)
 def _retryable(error: BaseException) -> bool:
     """Whether *error* may be retried: its class does not declare ``retryable = False``, and it did not
     leave a unit of work the retry runs inside rollback-only."""
-    if getattr(error, "retryable", True) is False:
+    from pyfly.audit._effects import has_admitted_audit_effect
+
+    if has_admitted_audit_effect() or getattr(error, "retryable", True) is False:
         return False
     try:
         from pyfly.data.transaction.context import current_state

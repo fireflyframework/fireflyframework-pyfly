@@ -470,6 +470,12 @@ class Agent(Generic[AgentDepsT, OutputT]):
                     name,
                     native_handlers=tuple(tool.function for tool in resolved_tools if isinstance(tool, PydanticTool)),
                     native_tool_sources=native_tool_sources,
+                    native_tools=tuple(
+                        tool
+                        for item in tools
+                        for tool in (item.tools if isinstance(item, ToolKit) else (item,))
+                        if isinstance(tool, AgentTool)
+                    ),
                 )
             )
 

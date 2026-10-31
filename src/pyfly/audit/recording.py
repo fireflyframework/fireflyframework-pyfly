@@ -251,10 +251,12 @@ class AuditRecorder:
         except Exception:
             raise AuditError("Trusted audit context or committed effect intent is unavailable") from None
         effect = AuditEffect(intent)
+        from pyfly.audit._effects import admitted_audit_effect
         from pyfly.data.transaction.template import run_shielded
 
         try:
-            yield effect
+            with admitted_audit_effect(self.journal):
+                yield effect
         except asyncio.CancelledError:
             await run_shielded(self._outcome(operation, context, effect, "unknown"))
             raise asyncio.CancelledError() from None

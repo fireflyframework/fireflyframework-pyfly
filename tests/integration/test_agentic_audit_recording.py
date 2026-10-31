@@ -469,3 +469,142 @@ async def test_mandatory_agent_audit_refuses_sync_and_foreign_loop_before_io(rel
         assert not await journal.read(SCOPE)
     finally:
         await app.aclose()
+
+
+async def test_generic_retry_inside_native_tool_cannot_repeat_admitted_effect(relational_backend: RelationalBackend):
+    from pyfly.resilience.retry import retry
+
+    _, journal, recorder = await setup(relational_backend)
+    app = runtime(recorder)
+    calls = []
+
+    @agent_tool("inner_native_retry", auto_register=False)
+    @retry(max_attempts=3)
+    async def tool() -> str:
+        calls.append(True)
+        raise ModelRetry("fixture private provider error")
+
+    try:
+        agent = app.agent_factory.create("inner-retry", model=TestModel(), tools=[tool])
+        with pytest.raises(AuditEffectUncertain):
+            await agent.run("fixture private prompt")
+        assert calls == [True]
+        assert any(entry.event.outcome == "unknown" for entry in await journal.read(SCOPE))
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize("positional", [False, True])
+async def test_legacy_checkpoint_resume_requires_reconciliation_for_keyword_and_positional_none(
+    relational_backend: RelationalBackend,
+    tmp_path,
+    positional: bool,
+):
+    from pyfly.agentic.pipeline.checkpoint import FileCheckpointer
+    from pyfly.agentic.pipeline.dag import DAG, DAGEdge, DAGNode
+    from pyfly.agentic.pipeline.engine import PipelineEngine
+    from pyfly.audit import AuditError
+
+    _, journal, recorder = await setup(relational_backend)
+    calls = []
+
+    class First:
+        async def execute(self, context, inputs):
+            return "legacy fixture state"
+
+    class Pending:
+        async def execute(self, context, inputs):
+            calls.append(True)
+            if len(calls) == 1:
+                raise RuntimeError("fixture legacy interruption")
+            return "unapproved replay"
+
+    dag = DAG("legacy-fixture")
+    dag.add_node(DAGNode(node_id="first", step=First()))
+    dag.add_node(DAGNode(node_id="pending", step=Pending()))
+    dag.add_edge(DAGEdge(source="first", target="pending"))
+    pipeline = PipelineEngine(dag, checkpointer=FileCheckpointer(tmp_path / "checkpoints"))
+    legacy = await pipeline.run(inputs="fixture legacy input")
+    assert not legacy.success and calls == [True]
+    pipeline._bind_audit_recorder(lambda: recorder)
+    with pytest.raises(AuditError, match="reconciliation"):
+        if positional:
+            await pipeline.run(None, run_id=legacy.run_id)
+        else:
+            await pipeline.run(context=None, run_id=legacy.run_id)
+    assert calls == [True]
+    assert not await journal.read(SCOPE)
+
+
+@pytest.mark.parametrize(
+    "override",
+    ["execute", "execute_with_ctx", "_guarded_execute", "_execute_with_listeners", "pydantic_handler", "late_instance"],
+)
+async def test_unsupported_native_tool_execution_override_is_refused_before_model_io(
+    relational_backend: RelationalBackend,
+    override: str,
+):
+    from types import MethodType
+
+    from pyfly.agentic.tools.base import AgentTool
+    from pyfly.audit import AuditError
+
+    _, journal, recorder = await setup(relational_backend)
+    app = runtime(recorder)
+    calls = []
+
+    class Custom(AgentTool):
+        async def _execute(self, **kwargs):
+            calls.append("tool")
+            raise ModelRetry("fixture private tool error")
+
+    async def bypass(self, **kwargs):
+        calls.append("tool")
+        raise ModelRetry("fixture private tool error")
+
+    def raw_handler(self):
+        async def call():
+            return await bypass(self)
+
+        return call
+
+    if override != "late_instance":
+        setattr(Custom, override, raw_handler if override == "pydantic_handler" else bypass)
+    tool = Custom("unsupported")
+
+    async def provider(messages, info):
+        calls.append("model")
+        pytest.fail("An unsupported native execution override must fail before model I/O")
+
+    try:
+        agent = app.agent_factory.create("override", model=FunctionModel(provider), tools=[tool])
+        if override == "late_instance":
+            tool.execute = MethodType(bypass, tool)
+        with pytest.raises(AuditError, match="boundary overrides"):
+            await agent.run("fixture private prompt")
+        assert calls == []
+        assert not await journal.read(SCOPE)
+    finally:
+        await app.aclose()
+
+
+async def test_native_tool_execute_extension_remains_supported(relational_backend: RelationalBackend):
+    from pyfly.agentic.tools.base import AgentTool
+
+    _, journal, recorder = await setup(relational_backend)
+    app = runtime(recorder)
+    calls = []
+
+    class Native(AgentTool):
+        async def _execute(self, **kwargs):
+            calls.append(True)
+            return "fixture private result"
+
+    try:
+        await app.agent_factory.create("native-subclass", model=TestModel(), tools=[Native("native")]).run("fixture")
+        assert calls == [True]
+        assert [
+            entry.event.outcome for entry in await journal.read(SCOPE) if entry.event.event_type == "agentic.tool.call"
+        ] == ["intent", "observed"]
+    finally:
+        await app.aclose()

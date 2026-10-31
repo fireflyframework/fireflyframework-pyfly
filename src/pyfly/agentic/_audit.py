@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
@@ -143,10 +144,11 @@ def pipeline_recording[**P, R](function: Callable[P, Awaitable[R]]) -> Callable[
         invocation = _Invocation(recorder if recorder is not None else cast(_Invocation, parent).recorder)
         if self._dag.is_cyclic() or self._routers:
             raise AuditError("Automatic audit does not support cyclic or dynamic pipeline replay identities")
+        context = args[1] if len(args) > 1 else kwargs.get("context")
         if (
             kwargs.get("run_id") is not None
-            and len(args) == 1
-            and all(kwargs.get(field) is None for field in ("context", "inputs", "state"))
+            and context is None
+            and all(kwargs.get(field) is None for field in ("inputs", "state"))
         ):
             raise AuditError("Audited checkpoint resume requires an explicit host reconciliation boundary")
         token = _invocation.set(invocation)
@@ -237,16 +239,44 @@ class AuditAgentCapability(AbstractCapability[Any]):
         *,
         native_handlers: tuple[object, ...],
         native_tool_sources: bool,
+        native_tools: tuple[object, ...],
     ) -> None:
         self.runtime, self.agent_name = runtime, agent_name
         self.native_handlers, self.native_tool_sources = native_handlers, native_tool_sources
+        self.native_tools = native_tools
 
     def _require_tool_adapters(self, ctx: RunContext[Any]) -> None:
         from pydantic_ai.toolsets import FunctionToolset
 
+        from pyfly.agentic.tools.base import AgentTool
+        from pyfly.agentic.tools.decorators import _DecoratedTool
+
         message = "Automatic tool audit requires native AgentTool adapters; raw SDK tools and toolsets are unsupported"
         if not self.native_tool_sources or ctx.agent is None:
             raise AuditError(message)
+        for tool in self.native_tools:
+            methods = (
+                "execute",
+                "execute_with_ctx",
+                "_guarded_execute",
+                "_execute_with_listeners",
+                "_execute_after_guards",
+                "_notify_before",
+                "_notify",
+            )
+            for name in (*methods, "pydantic_handler"):
+                method = getattr(tool, name, None)
+                approved = (
+                    (AgentTool.pydantic_handler, _DecoratedTool.pydantic_handler)
+                    if name == "pydantic_handler"
+                    else (getattr(AgentTool, name),)
+                )
+                if (
+                    not inspect.ismethod(method)
+                    or method.__self__ is not tool
+                    or not any(method.__func__ is candidate for candidate in approved)
+                ):
+                    raise AuditError("Automatic tool audit does not support custom execution boundary overrides")
         for toolset in ctx.agent.toolsets:
             if not isinstance(toolset, FunctionToolset) or any(
                 not any(tool.function is handler for handler in self.native_handlers) for tool in toolset.tools.values()

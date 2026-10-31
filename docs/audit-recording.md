@@ -73,6 +73,10 @@ The automatic Agentic adapter uses the async interface on the host application's
 
 Native PydanticAI run IDs provide stable agent-command admission keys. If a host accepts an explicit run ID, it must authorize its scope and command ownership before passing it to the agent; a client-provided ID is not authority. Repeated admission of the same scoped native run ID is refused, including after an observed run. Invocation-local uncertainty remains fenced through SDK recovery and native resilience wrappers.
 
+After committed intent, the recorder's private execution fence prevents native generic `@retry` from repeating a function inside the effect body, including a decorator inside an `AgentTool` handler. The fence is task-local, inherited by children and reset on exit; it does not suppress another application's state facts. Native terminal exceptions with a `retryable=False` property still refuse retry outside that region. This does not control arbitrary host loops or third-party SDK retries inside a handler: disable those retries or provide a reviewed per-attempt adapter.
+
+The supported custom `AgentTool` extension is `_execute`. Automatic mode validates the current native execution/guarded/listener methods and known handler mapping before any model I/O. Overriding or replacing public execution methods, the guarded chain or the handler adapter is unsupported and refused; some cached/composed wrappers therefore need an explicit host adapter. Native decorated tools and ordinary `_execute` subclasses remain supported. Shared tool objects are not rebound to application-specific recorders.
+
 An acyclic pipeline command identity is fenced conservatively after admission, including after an observed run. Reusing it is not permission to rerun effects. Cyclic/dynamic visit identities and checkpoint reconciliation require a separate reviewed adapter. A direct host can deliberately issue a new authorized command; automatic retry cannot convert an unresolved command into one.
 
 ## Inspect enrollment without overstating it
