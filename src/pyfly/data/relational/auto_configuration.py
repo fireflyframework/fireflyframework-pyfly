@@ -832,13 +832,12 @@ class RelationalAutoConfiguration:
     ) -> AuditingEntityListener:
         """Stamps ``BaseEntity`` audit columns with the ``AuditorAware`` and ``DateTimeProvider`` beans.
 
-        Registered once per process however many contexts start (the hooks are shared), and unregistered
-        when this context stops. An application's own ``AuditingEntityListener`` bean replaces it, and
+        Native lifecycle start registers the handler and stop unregisters it. Construction must not
+        publish a handler before the context owns its lifecycle: later configuration may still fail.
+        The ORM hooks are shared. An application's own ``AuditingEntityListener`` bean replaces it, and
         ``pyfly.data.auditing.enabled=false`` switches it off.
         """
-        listener = AuditingEntityListener(auditor_aware, date_time_provider)
-        listener.register()
-        return listener
+        return AuditingEntityListener(auditor_aware, date_time_provider)
 
     @bean
     def query_metrics(
