@@ -196,6 +196,10 @@ An inline transient credential can be supplied with `Credential.api_key(secret)`
 credential references require the injected resolver. Neither changes environment
 variables.
 
+`Credential` excludes its secret from `repr()` and `str()`, including when nested
+inside a `ModelSpec`. Explicit `.secret` access and dataclass serialization still
+retain the value for intentional credential handling; do not log those values.
+
 `max_retries` controls SDK retries independently of HTTP transport retries and
 Agent output/tool retries. Pydantic AI per-call `model_settings={"max_retries": 0}`
 can override this default; applications requiring one provider attempt must own
