@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.27 (2026-10-31)
+
+### Added
+
+- Add opt-in `pyfly.audit` frozen, bounded reference facts and an injectable native
+  SQL journal sharing the existing business Data unit and transactional outbox.
+- Serialize scoped hash chains, deduplicate stable event IDs, reject conflicting
+  facts and keep mandatory audit failures atomic with business state.
+- Provide cheap scoped high-watermarks, bounded reads, captured-prefix verification
+  and deterministic complete NDJSON export with concurrent/tamper checks.
+- Expose checkpoint signing/verifying ports and safe low-cardinality native
+  observability; leave signing custody, independent anchors and WORM integration
+  to explicitly configured adapters and deployment acceptance.
+
+### Security
+
+- Reject audit entry updates/deletes and PostgreSQL truncation; prevent SQLite
+  replacement inserts from bypassing guards when recursive triggers are disabled.
+- Reject unbounded/content payload fields and redact native append storage errors
+  and caught-failure rollback diagnostics without changing rollback/savepoint state.
+
+### Migration
+
+- Audit is opt-in. Apply native audit/outbox schema and mutation guards through the
+  schema owner before enabling a migration-managed deployment. Keep the application
+  role separate from the migration owner and use the business datasource.
+- Existing operational logs/traces are not automatically converted into a complete
+  journal. Hosts retain responsibility for authenticated scope/actor facts,
+  semantic event coverage, read/export permissions and retention acceptance.
+
 ## v26.10.26 (2026-10-31)
 
 ### Added
