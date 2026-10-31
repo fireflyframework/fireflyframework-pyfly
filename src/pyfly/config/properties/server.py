@@ -75,6 +75,8 @@ class ServerProperties:
     max_requests_per_worker: int | None = None
     granian: GranianProperties = field(default_factory=GranianProperties)
     observability: ServerObservabilityProperties = field(default_factory=ServerObservabilityProperties)
+    ssl_ca_certs: str | None = None
+    ssl_cert_reqs: str = "none"
 
 
 def resolve_app_port(config: Config) -> int:

@@ -44,6 +44,8 @@ class UvicornServerAdapter:
     connection count and total requests from ``Server.server_state``.
     """
 
+    supports_client_auth = True
+
     def __init__(self) -> None:
         self._server: Any = None
         self._info: ServerInfo | None = None
@@ -56,6 +58,9 @@ class UvicornServerAdapter:
         Shared so the async path honors the same SSL / keep-alive / backlog /
         graceful-shutdown / concurrency settings as the blocking path (#226).
         """
+        from pyfly.server.tls import client_verify_mode
+
+        verify_mode = client_verify_mode(config)
         kwargs: dict[str, Any] = {
             "host": host,
             "port": port,
@@ -71,6 +76,9 @@ class UvicornServerAdapter:
             kwargs["ssl_certfile"] = config.ssl_certfile
         if config.ssl_keyfile:
             kwargs["ssl_keyfile"] = config.ssl_keyfile
+        if getattr(config, "ssl_ca_certs", None):
+            kwargs["ssl_ca_certs"] = config.ssl_ca_certs
+            kwargs["ssl_cert_reqs"] = verify_mode
         if config.max_concurrent_connections:
             kwargs["limit_concurrency"] = config.max_concurrent_connections
         if config.max_requests_per_worker:

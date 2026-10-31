@@ -564,9 +564,39 @@ declarative retry and circuit-breaker settings):
 | `pyfly.client.follow-redirects` | `false` | Redirect policy |
 | `pyfly.client.transport-retries` | `0` | Connection retries; positive values require `trust-env=false` |
 | `pyfly.client.headers` | unset | Default header mapping, such as an admitted `Host` override |
+| `pyfly.client.tls.ca-file` | unset | Explicit trusted server CA bundle |
+| `pyfly.client.tls.certfile` | unset | Client certificate chain for mutual TLS |
+| `pyfly.client.tls.keyfile` | unset | Client private key file; requires `certfile` |
 
-These settings configure the shared port. Declarative `@http_client` adapters
-retain their existing timeout and declarative retry configuration.
+These settings configure both the shared port and declarative `@http_client`
+adapters. Declarative retry and circuit-breaker configuration remain separate.
+
+### Verified TLS and client certificates
+
+Use `ClientTlsProperties(ca_file=..., certfile=..., keyfile=...)` with
+`HttpxClientAdapter(tls=..., trust_env=False)`, or configure the same fields
+under `pyfly.client.tls`. Paths must be non-empty strings, and certificate and key must be paired; loading an invalid
+CA/identity fails before any request. The typed configuration always verifies
+the server certificate and hostname, and requires HTTPS for initial requests
+and every redirect. Without an explicit CA it uses HTTPX's
+certifi trust bundle, without environment substitution. When no TLS fields are
+configured, ordinary HTTPX trust/environment behavior is preserved.
+
+For an application-owned `ssl.SSLContext`, load the trusted CA and client
+identity into that context and pass `verify=context`. To share that context
+through native DI, register an `SSLContext` bean named `http_client_ssl_context`.
+Both shared and declarative factories receive this explicitly qualified bean;
+it must enforce certificate and hostname verification. Configured TLS files and
+the named context are mutually exclusive. Typed `tls` and `verify`
+are mutually exclusive, as are typed TLS and a supplied transport/client.
+A supplied transport or client owns its TLS policy. Never use `verify=False`
+to implement client authentication.
+
+The gRPC `secured()` builder currently provides server TLS with default trust,
+without a native client identity configuration. The WebSocket builder similarly
+uses standard `wss` verification and does not expose a client SSLContext. These
+ports do not currently claim native mutual TLS; use an explicitly configured
+application-owned official protocol client if that capability is required.
 
 ### Implementing a Custom Adapter
 

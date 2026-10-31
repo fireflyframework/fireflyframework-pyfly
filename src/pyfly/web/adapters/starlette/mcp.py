@@ -31,6 +31,13 @@ class McpTransport:
     Callbacks receive only the authenticated context, never the bearer token.
     """
 
+    @classmethod
+    def from_server(cls, server: Server[Any], **kwargs: Any) -> Any:
+        """Serve a public SDK registry with portable authenticated legacy JSON metadata."""
+        from pyfly.mcp.transport import PortableMcpTransport
+
+        return PortableMcpTransport(server, **kwargs)
+
     def __init__(
         self,
         name: str,

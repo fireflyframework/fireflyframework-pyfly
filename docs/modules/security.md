@@ -1456,9 +1456,10 @@ python -c "from pyfly.security import BcryptPasswordEncoder; print(BcryptPasswor
 
 Behaviour:
 
-- **No `UserDetailsService`** — certificate presence *is* the credential: the principal authenticates with no authority lookup (`SecurityContext(user_id=<CN>)`).
+- **Trusted ingress required** — pass `trusted_ingress: Callable[[Request], bool]` that validates an authenticated ingress assertion using deployment-controlled provenance. The default rejects every supplied certificate header with `401`. A forwarded header, an unvalidated source address, or a caller-provided verification marker alone is insufficient. The ingress must strip caller certificate/assertion headers before forwarding a verified certificate.
+- **No `UserDetailsService`** — after ingress validation, the asserted certificate subject becomes the principal with no authority lookup (`SecurityContext(user_id=<CN>)`).
 - **With a `UserDetailsService`** — the extracted principal must resolve to an enabled user, whose roles/permissions are applied; an unknown or disabled user fails.
-- On failure, `error_mode="401"` returns `401` `{"error": "invalid_client_certificate"}` with a `WWW-Authenticate: X509` header; `"anonymous"` (default) sets an anonymous context and proceeds. A *missing* certificate header always falls through.
+- Missing/untrusted ingress provenance and repeated certificate headers always return `401`. On certificate/user lookup failure, `error_mode="401"` returns `401` `{"error": "invalid_client_certificate"}` with a `WWW-Authenticate: X509` header; `"anonymous"` (default) sets an anonymous context and proceeds. A *missing* certificate header always falls through.
 
 ```python
 from pyfly.container import configuration, bean
@@ -1474,11 +1475,18 @@ class X509Config:
     def x509_filter(self, users: UserDetailsService) -> WebFilter:
         return X509AuthenticationFilter(
             cert_header="x-client-cert",       # header the proxy forwards (PEM)
+            trusted_ingress=verify_ingress_provenance,  # host implementation, no header-only default
             user_details_service=users,        # omit to authenticate on cert presence alone
             subject_regex=r"CN=([^,]+)",       # optional; default extracts the CN
             error_mode="401",                  # or "anonymous"
         )
 ```
+
+`verify_ingress_provenance` is a deployment-specific function, supplied by the
+host, that validates authenticated proxy provenance. This filter parses an
+ingress assertion; it does not validate a TLS certificate chain or prove native
+mutual TLS. Configure native listener client authentication or a trusted
+authenticated ingress independently.
 
 **Source:** `src/pyfly/web/adapters/starlette/filters/x509_filter.py`
 

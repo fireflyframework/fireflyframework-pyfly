@@ -44,3 +44,11 @@ class ApplicationServerPort(Protocol):
     def server_info(self) -> ServerInfo:
         """Return runtime info (name, version, workers, event loop, protocol)."""
         ...
+
+
+@runtime_checkable
+class ClientAuthServerPort(Protocol):
+    """Optional capability: the adapter enforces required client-certificate TLS."""
+
+    @property
+    def supports_client_auth(self) -> bool: ...

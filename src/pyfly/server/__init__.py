@@ -15,11 +15,12 @@
 
 from pyfly.server.launcher import launch, select_event_loop, select_server, validate_server_properties
 from pyfly.server.ports.event_loop import EventLoopPort
-from pyfly.server.ports.outbound import ApplicationServerPort
+from pyfly.server.ports.outbound import ApplicationServerPort, ClientAuthServerPort
 from pyfly.server.types import ServerInfo
 
 __all__ = [
     "ApplicationServerPort",
+    "ClientAuthServerPort",
     "EventLoopPort",
     "ServerInfo",
     "launch",

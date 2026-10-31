@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from sqlalchemy.pool import ConnectionPoolEntry
 
     from pyfly.data.relational.datasource_registry import DataSource
+    from pyfly.data.transaction.synchronization import TransactionSynchronization
 
 _logger = logging.getLogger(__name__)
 
@@ -320,7 +321,9 @@ class AfterBeginCustomizer(Protocol):
                     )
     """
 
-    async def after_begin(self, connection: AsyncSession | AsyncConnection, datasource: DataSource) -> None:
+    async def after_begin(
+        self, connection: AsyncSession | AsyncConnection, datasource: DataSource
+    ) -> TransactionSynchronization | None:
         """Customize the transaction that just began on *datasource*."""
         ...
 
@@ -338,7 +341,12 @@ def customizer_datasources(customizer: object) -> frozenset[str] | None:
     raise TypeError(f"{type(customizer).__name__}.datasources must be a collection of datasource names")
 
 
-async def run_after_begin(datasource: DataSource, connection: AsyncSession | AsyncConnection) -> None:
+async def run_after_begin(
+    datasource: DataSource,
+    connection: AsyncSession | AsyncConnection,
+    *,
+    register_synchronization: Callable[[TransactionSynchronization], None] | None = None,
+) -> None:
     """Run *datasource*'s after-begin customizers on *connection*, in order.
 
     Call it right after a unit of work begins, after the isolation level is applied and before the first
@@ -346,5 +354,15 @@ async def run_after_begin(datasource: DataSource, connection: AsyncSession | Asy
     transactions and the short auto units repositories open, and code that opens a transaction by hand
     does so itself. It is a no-op when the datasource has no customizer.
     """
+    from pyfly.data.transaction.errors import IllegalTransactionStateError
+    from pyfly.data.transaction.synchronization import TransactionSynchronization
+
     for customizer in datasource.customizers:
-        await customizer.after_begin(connection, datasource)
+        synchronization = await customizer.after_begin(connection, datasource)
+        if synchronization is None:
+            continue
+        if not isinstance(synchronization, TransactionSynchronization):
+            raise TypeError("after_begin must return TransactionSynchronization or None")
+        if register_synchronization is None:
+            raise IllegalTransactionStateError("An after-begin synchronization needs a framework-managed unit of work")
+        register_synchronization(synchronization)

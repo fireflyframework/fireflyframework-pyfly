@@ -35,6 +35,8 @@ class GranianServerAdapter:
     server-metrics middleware supplies them uniformly instead).
     """
 
+    supports_client_auth = False
+
     def __init__(self) -> None:
         self._server: Any = None
         self._info: ServerInfo | None = None
@@ -43,6 +45,12 @@ class GranianServerAdapter:
     def serve(self, app: str | Any, config: Any) -> None:
         """Start Granian (blocking)."""
         import logging
+
+        from pyfly.server.tls import client_verify_mode
+
+        client_verify_mode(config)
+        if getattr(config, "ssl_cert_reqs", "none") != "none":
+            raise ValueError("Granian adapter does not support required TLS client authentication")
 
         from granian import Granian
         from granian.constants import Interfaces

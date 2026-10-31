@@ -857,6 +857,14 @@ failure rolled the caller back.
 
 ## Configuration
 
+Automatic discovery and execution of `@scheduled` methods is enabled by default.
+Set `pyfly.scheduling.enabled: false` (or `PYFLY_SCHEDULING_ENABLED=false`) in an
+API process that shares its service beans with independently deployed workers.
+The worker process leaves this setting enabled. The switch accepts native
+boolean values and the standard true/false, yes/no, on/off and 1/0 forms; an
+invalid value fails context startup. It does not disable explicitly invoked
+`@async_method` calls or an application-owned scheduler started directly.
+
 Scheduling behavior is configured in `pyfly.yaml`. The auto-configured
 `task_scheduler` and `distributed_lock` beans read these keys to pick the
 executor and lock backend:

@@ -60,7 +60,7 @@ async def _call_next(request: Request) -> Response:
 class TestX509Filter:
     @pytest.mark.asyncio
     async def test_cert_without_user_service_authenticates_principal(self) -> None:
-        flt = X509AuthenticationFilter()
+        flt = X509AuthenticationFilter(trusted_ingress=lambda request: True)
         request = _request(_cert("alice"))
         await flt.do_filter(request, _call_next)
         ctx = request.state.security_context
@@ -69,7 +69,7 @@ class TestX509Filter:
     @pytest.mark.asyncio
     async def test_cert_with_user_service_loads_authorities(self) -> None:
         uds = InMemoryUserDetailsService(UserDetails(username="alice", password_hash="x", roles=["ADMIN"]))
-        flt = X509AuthenticationFilter(user_details_service=uds)
+        flt = X509AuthenticationFilter(trusted_ingress=lambda request: True, user_details_service=uds)
         request = _request(_cert("alice"))
         await flt.do_filter(request, _call_next)
         assert request.state.security_context.has_role("ADMIN")
@@ -77,13 +77,13 @@ class TestX509Filter:
     @pytest.mark.asyncio
     async def test_unknown_user_401_mode_rejected(self) -> None:
         uds = InMemoryUserDetailsService()
-        flt = X509AuthenticationFilter(user_details_service=uds, error_mode="401")
+        flt = X509AuthenticationFilter(trusted_ingress=lambda request: True, user_details_service=uds, error_mode="401")
         resp = await flt.do_filter(_request(_cert("ghost")), _call_next)
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_no_cert_is_anonymous(self) -> None:
-        flt = X509AuthenticationFilter(error_mode="401")
+        flt = X509AuthenticationFilter(trusted_ingress=lambda request: True, error_mode="401")
         request = _request(None)
         resp = await flt.do_filter(request, _call_next)
         assert resp.status_code == 200
@@ -91,13 +91,13 @@ class TestX509Filter:
 
     @pytest.mark.asyncio
     async def test_malformed_cert_401_mode_rejected(self) -> None:
-        flt = X509AuthenticationFilter(error_mode="401")
+        flt = X509AuthenticationFilter(trusted_ingress=lambda request: True, error_mode="401")
         resp = await flt.do_filter(_request("not-a-cert"), _call_next)
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_disabled_user_rejected(self) -> None:
         uds = InMemoryUserDetailsService(UserDetails(username="bob", password_hash="x", enabled=False))
-        flt = X509AuthenticationFilter(user_details_service=uds, error_mode="401")
+        flt = X509AuthenticationFilter(trusted_ingress=lambda request: True, user_details_service=uds, error_mode="401")
         resp = await flt.do_filter(_request(_cert("bob")), _call_next)
         assert resp.status_code == 401

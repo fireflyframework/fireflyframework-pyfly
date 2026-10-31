@@ -60,7 +60,10 @@ def validate_server_properties(properties: ServerProperties) -> None:
         raise ValueError("Application listener port must be an integer from 0 to 65535")
     if bool(properties.ssl_certfile) != bool(properties.ssl_keyfile):
         raise ValueError("HTTPS requires both certificate and key paths")
-    for path in (properties.ssl_certfile, properties.ssl_keyfile):
+    from pyfly.server.tls import client_verify_mode
+
+    client_verify_mode(properties)
+    for path in (properties.ssl_certfile, properties.ssl_keyfile, properties.ssl_ca_certs):
         if path is None:
             continue
         try:
@@ -92,6 +95,8 @@ def launch(
     """
     validate_server_properties(properties)
     selected_server = server if server is not None else select_server(properties.type)
+    if properties.ssl_cert_reqs == "required" and getattr(selected_server, "supports_client_auth", False) is not True:
+        raise ValueError("Selected server does not support required TLS client authentication")
     selected_loop = event_loop if event_loop is not None else select_event_loop(properties.event_loop)
     effective_properties = replace(properties, event_loop=selected_loop.name)
     os.environ["_PYFLY_SERVER_HOST"] = properties.host

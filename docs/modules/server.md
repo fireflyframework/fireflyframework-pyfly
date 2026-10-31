@@ -335,6 +335,8 @@ class ServerProperties:
     http: str = "auto"
     ssl_certfile: str | None = None
     ssl_keyfile: str | None = None
+    ssl_ca_certs: str | None = None
+    ssl_cert_reqs: str = "none"
     keep_alive_timeout: int = 5
     max_concurrent_connections: int | None = None
     max_requests_per_worker: int | None = None
@@ -351,6 +353,8 @@ class ServerProperties:
 | `http` | `str` | `"auto"` | HTTP version: `auto`, `1`, `2` |
 | `ssl_certfile` | `str \| None` | `None` | Path to TLS certificate file |
 | `ssl_keyfile` | `str \| None` | `None` | Path to TLS key file |
+| `ssl_ca_certs` | `str \| None` | `None` | Trusted client CA bundle for required client authentication |
+| `ssl_cert_reqs` | `str` | `"none"` | `none` or `required`; required needs server certificate/key and client CA |
 | `keep_alive_timeout` | `int` | `5` | Keep-alive timeout in seconds |
 | `max_concurrent_connections` | `int \| None` | `None` | Maximum concurrent connections (Uvicorn `limit_concurrency`) |
 | `max_requests_per_worker` | `int \| None` | `None` | Maximum requests before worker restart (Uvicorn `limit_max_requests`) |
@@ -552,3 +556,19 @@ PyFly's server abstraction mirrors Spring Boot's embedded server architecture:
 - [Granian Adapter](../adapters/granian.md) -- Setup, configuration reference, and benchmarks for the Granian ASGI server
 - [Starlette Adapter](../adapters/starlette.md) -- Setup, configuration, and adapter-specific features for the Starlette web adapter
 - [FastAPI Adapter](../adapters/fastapi.md) -- Setup, configuration, and adapter-specific features for the FastAPI web adapter
+
+### Required TLS client authentication
+
+Set `pyfly.server.type=uvicorn` or `hypercorn`, the server `ssl-certfile` and
+`ssl-keyfile`, `ssl-ca-certs` with the trusted client CA bundle, and
+`ssl-cert-reqs=required`. Both native adapters require a valid client certificate
+at the TLS handshake. Missing CA/identity, unknown modes, and a client CA without
+required verification fail before serving. Granian currently rejects required
+client authentication explicitly; `auto` does not silently downgrade that policy.
+Custom server ports must advertise `ClientAuthServerPort.supports_client_auth=True`
+and enforce the required settings; the launcher rejects unadvertised adapters
+before changing event-loop policy.
+
+This authenticates the channel peer. Mapping a peer to application permissions
+still requires the application's current authority checks. Forwarded certificate
+headers are separate trusted-ingress assertions, described in the security guide.

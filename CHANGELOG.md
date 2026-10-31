@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.26 (2026-10-31)
+
+### Added
+
+- Provide portable authenticated MCP tools, resources and prompts through public SDK
+  registries, with bounded SQL session metadata and admission for independent API replicas.
+- Honor `pyfly.scheduling.enabled` without changing the default scheduling behavior;
+  disabled applications discover and start no scheduled jobs.
+- Add a bounded, copied JSON consumer context with scoped asynchronous lifetimes and
+  recursive private-envelope redaction for composing applications.
+- Allow native after-begin customizers to return transaction synchronizations, registering
+  them before binding a new unit and preserving completion and cleanup on every outcome.
+- Configure verified outbound HTTP TLS and optional client certificates through native
+  HTTP clients, and serve native TLS and mutual TLS through supported server adapters.
+
+### Fixed
+
+- Preserve every managed datasource's parameter-hiding policy, including replicas,
+  migrations and named compatibility factories, to keep bound values out of diagnostics.
+- Restrict certificate-header trust to explicitly configured ingress policy and redact
+  sensitive HTTP headers and span attributes from default diagnostics.
+
+### Migration
+
+- Multi-instance MCP hosts must provision the framework session and admission tables;
+  production schema validation does not create them automatically. Keep inbound credential
+  authorization in the host application and never forward its bearer token to a provider.
+- Customizers returning `None` remain compatible. Hand-opened transactions using a returned
+  synchronization must supply a registration callback; dropping it fails closed.
+
 ## v26.10.25 (2026-10-31)
 
 ### Fixed
