@@ -420,6 +420,7 @@ class SqlAuditJournal:
         through_sequence: int,
         limit: int = 100,
     ) -> bytes:
+        self._ready()
         self._bounds(after_sequence, limit)
         if type(through_sequence) is not int or not after_sequence <= through_sequence <= after_sequence + limit:
             raise ValueError("Audit export must declare a bounded complete range")

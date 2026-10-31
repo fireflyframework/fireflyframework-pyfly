@@ -427,6 +427,8 @@ class Repository(Generic[T, ID]):
         if self._manual_session is not None:
             return self._manual_session
         state = current_state()
+        if self._transaction_managers is not None:
+            state.check_manager(self._transaction_manager())
         unit = state.scope(self._datasource) or state.unit(self._datasource)
         if unit is None:
             raise IllegalTransactionStateError(
@@ -477,6 +479,8 @@ class Repository(Generic[T, ID]):
             return await function(self, *args, **kwargs)
         datasource = self._datasource
         state = current_state()
+        if self._transaction_managers is not None:
+            state.check_manager(self._transaction_manager())
         scoped = state.scope(datasource)
         if scoped is not None:
             return await _run_on(scoped, function, self, args, kwargs, atomic)
@@ -519,6 +523,8 @@ class Repository(Generic[T, ID]):
                 return
             datasource = self._datasource
             state = current_state()
+            if self._transaction_managers is not None:
+                state.check_manager(self._transaction_manager())
             unit = state.scope(datasource) or state.unit(datasource)
             owned = unit is None
             since = cancel_requests()
@@ -536,6 +542,7 @@ class Repository(Generic[T, ID]):
                 while True:
                     # Rows come from a fetched batch without touching the unit: a stream iterated after the unit
                     # it captured completed still fails loudly.
+                    current_state().check_manager(unit.manager)
                     unit.check_usable()
                     token = bind_state(scoped)
                     try:

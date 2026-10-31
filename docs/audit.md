@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from pyfly.audit import AuditActor, AuditCorrelation, AuditEvent, AuditResource, AuditScope
 from pyfly.data.transaction import infrastructure_unit
 
-scope = AuditScope(tenant_id="local", workspace_id="studio", project_id="default")
+scope = AuditScope(tenant_id="tenant-example", workspace_id="workspace-example", project_id="project-example")
 
 # In a service, an existing @transactional boundary or SessionProvider.unit() is preferred.
 async with infrastructure_unit(business_datasource) as session:

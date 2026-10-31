@@ -532,6 +532,7 @@ class TransactionBoundary:
         manager = self._manager
         datasource = manager.datasource
         state = current_state()
+        state.check_manager(manager)
         bound = state.binding(datasource)
         existing = bound if isinstance(bound, UnitOfWork) else None
         if existing is None:
@@ -868,6 +869,7 @@ class AutoUnit:
 
     async def __aenter__(self) -> UnitOfWork:
         self._since = cancel_requests()
+        current_state().check_manager(self._manager)
         unit = await self._manager.open_auto_unit(read_only=self._read_only, autocommit=self._autocommit)
         unit.operations = 0  # opening it (the checkout, BEGIN) ran none of its work
         observe(unit)
@@ -973,6 +975,7 @@ async def infrastructure_unit(
     """
     manager = resolve_manager(datasource)
     state = current_state()
+    state.check_manager(manager)
     joined = state.scope(manager.datasource) or state.unit(manager.datasource)
     if joined is not None:
         joined.check_usable()
