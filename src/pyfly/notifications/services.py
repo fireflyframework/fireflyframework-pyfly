@@ -65,12 +65,12 @@ async def _send_safely(provider: Any, message: Any) -> NotificationResult:
     """
     try:
         return cast(NotificationResult, await provider.send(message))
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return NotificationResult(
             id=message.id,
             provider=getattr(provider, "name", "unknown"),
-            status=EmailStatus.FAILED,
-            error=str(exc),
+            status=EmailStatus.UNKNOWN if isinstance(message, EmailMessage) else EmailStatus.FAILED,
+            error="EMAIL_SEND_OUTCOME_UNKNOWN" if isinstance(message, EmailMessage) else "NOTIFICATION_PROVIDER_ERROR",
         )
 
 
@@ -126,6 +126,28 @@ class DefaultEmailService:
             self._suppressed = None
 
     async def send(self, message: EmailMessage) -> NotificationResult:
+        try:
+            result = await self._prepare(message)
+        except Exception:
+            result = NotificationResult(
+                message.id,
+                getattr(self._provider, "name", "unknown"),
+                EmailStatus.FAILED,
+                error="EMAIL_PREPARATION_FAILED",
+            )
+        if result is None:
+            result = await _send_safely(self._provider, message)
+        try:
+            if result.status == EmailStatus.SENT and self._sent is not None:
+                self._sent.labels(channel="email", provider=result.provider).inc()
+            elif result.status == EmailStatus.FAILED and self._failed is not None:
+                self._failed.labels(channel="email", provider=result.provider).inc()
+        except Exception:
+            # Diagnostic failure cannot change known provider acceptance into a retryable failure.
+            pass
+        return result
+
+    async def _prepare(self, message: EmailMessage) -> NotificationResult | None:
         # ------------------------------------------------------------------
         # 1. Per-recipient opt-out filtering (to + cc + bcc — NOT just the first)
         # ------------------------------------------------------------------
@@ -152,20 +174,7 @@ class DefaultEmailService:
             message.template_id = None
             message.template_data = {}
 
-        # ------------------------------------------------------------------
-        # 3. Send via provider
-        # ------------------------------------------------------------------
-        result = await _send_safely(self._provider, message)
-
-        # ------------------------------------------------------------------
-        # 4. Metrics
-        # ------------------------------------------------------------------
-        if result.status == EmailStatus.SENT and self._sent is not None:
-            self._sent.labels(channel="email", provider=result.provider).inc()
-        elif result.status == EmailStatus.FAILED and self._failed is not None:
-            self._failed.labels(channel="email", provider=result.provider).inc()
-
-        return result
+        return None
 
 
 class DefaultSmsService:

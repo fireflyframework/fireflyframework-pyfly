@@ -48,3 +48,10 @@ class SmsService(Protocol):
 @runtime_checkable
 class PushService(Protocol):
     async def send(self, message: PushMessage) -> NotificationResult: ...
+
+
+@runtime_checkable
+class EmailOperationProvider(Protocol):
+    """Optional status reconciliation; looking up an operation never resends it."""
+
+    async def get_status(self, message_id: str, operation_id: str | None = None) -> NotificationResult: ...

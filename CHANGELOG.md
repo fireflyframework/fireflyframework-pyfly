@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.28 (2026-10-31)
+
+### Added
+
+- Add inline CID attachments across native SMTP, SendGrid, Resend and optional
+  Azure Communication Email, preserving existing positional message constructors.
+- Add explicit email transport capabilities and an optional operation-status port.
+  Azure email uses the official async SDK, explicitly selected managed identity or
+  injected credentials, stable operation correlation and bounded same-origin status
+  lookup. It does not automatically replay POSTs, follow operation URLs to another
+  host or infer mailbox delivery. Azure Email retires September 30, 2028; retain
+  replaceable configuration and review current Microsoft lifecycle guidance.
+
+### Fixed
+
+- Verify SMTP certificate chains and hostnames for STARTTLS and implicit TLS;
+  reject plaintext authentication and unverified injected contexts. Native CA and
+  client-certificate files or a qualified SSLContext can configure trusted endpoints.
+- Fail closed on explicitly unknown email provider names while retaining custom
+  provider overrides and explicit dummy/local compatibility.
+- Keep message payloads, headers, attachments and provider bodies out of default
+  diagnostics. Native error results expose stable codes, with uncertain DATA or
+  SDK outcomes reported as UNKNOWN rather than retryable guaranteed failures.
+
+### Migration
+
+- Treat SENT as provider acceptance. UNKNOWN requires reconciliation or explicit
+  review; a stable message/operation ID is not an exactly-once guarantee. Dummy
+  capabilities do not declare real delivery or observed network readiness.
+- Consumers relying on raw provider error strings must use the safe native codes.
+
 ## v26.10.27 (2026-10-31)
 
 ### Added
