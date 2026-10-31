@@ -67,7 +67,7 @@ pyfly:
   ecm:
     enabled: true
     storage:
-      provider: s3            # local (default) | s3 / aws | azure
+      provider: s3            # local (default) | s3 / aws | azure | gcs
       local:
         base-dir: /var/ecm    # default: a fresh temp directory
       s3:
@@ -100,6 +100,7 @@ pyfly:
 | `local` (default) | `LocalFilesystemStorageAdapter` (uses `storage.local.base-dir`, or a fresh temp directory) |
 | `s3` / `aws` | `AwsS3StorageAdapter` (`s3.bucket`, `s3.region`, `s3.key-prefix`) |
 | `azure` | `AzureBlobStorageAdapter` (`azure.container`, `azure.connection-string`, `azure.account-url`, `azure.key-prefix`) |
+| `gcs` / `google-cloud-storage` | `GoogleCloudStorageAdapter` (`gcs.bucket`, optional `gcs.project`, `gcs.key-prefix`) |
 
 **E-signature provider** (`pyfly.ecm.esignature.provider`):
 
@@ -112,3 +113,39 @@ pyfly:
 
 Metadata and folder repositories default to the in-memory implementations
 (`InMemoryMetadataStorage` / `InMemoryFolderRepository`).
+
+### Google Cloud Storage
+
+Install `pyfly[ecm-gcs]` and select a bucket explicitly:
+
+```yaml
+pyfly:
+  ecm:
+    enabled: true
+    storage:
+      provider: gcs
+      gcs:
+        bucket: application-documents
+        project: application-project
+        key-prefix: documents/
+```
+
+The adapter uses the official `google-cloud-storage` client and Application
+Default Credentials. In production, bind a workload identity with access to the
+required bucket or prefix. Credentials do not belong in document metadata.
+`client=` accepts an existing client for an application-owned connection or a
+controlled test.
+
+Each document version has its own object key. Upload uses the
+[generation precondition](https://docs.cloud.google.com/python/docs/reference/storage/latest/google.cloud.storage.blob.Blob)
+`if_generation_match=0` and disables SDK retries, so it cannot overwrite an
+existing version or automatically repeat an uncertain write. A timeout propagates
+to the caller for explicit readback. Returned versions contain the SHA-256 and
+byte count of the submitted content, not an ETag. Downloads select only a retained
+document version. Delete reports a missing object as false and propagates other
+provider failures.
+
+The document port accepts and returns bytes. Applications storing large files
+must supply bounded chunk documents or use a streaming application boundary.
+Object storage does not provide PostgreSQL metadata durability or tenant ACLs:
+the application must persist its version manifest and authorize each operation.

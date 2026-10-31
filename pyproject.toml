@@ -257,6 +257,9 @@ ecm-aws = [
 ecm-azure = [
     "azure-storage-blob>=12.31.0",
 ]
+ecm-gcs = [
+    "google-cloud-storage>=3.0,<4",
+]
 observability = [
     "prometheus-client>=0.26.0",
     "opentelemetry-api>=1.45.1",
@@ -294,7 +297,7 @@ web-fastapi = [
     "uvloop>=0.23.0; sys_platform != 'win32'",
 ]
 full = [
-    "pyfly[web,templates,data-relational,data-document,postgresql,mysql,eda,cache,client,grpc,websocket,ecm-aws,ecm-azure,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito,notifications,config-server-git,feature-flags]",
+    "pyfly[web,templates,data-relational,data-document,postgresql,mysql,eda,cache,client,grpc,websocket,ecm-aws,ecm-azure,ecm-gcs,observability,security,scheduling,cli,shell,kafka,rabbitmq,redis,granian,fastapi,hypercorn,idp-azure,idp-keycloak,idp-cognito,notifications,config-server-git,feature-flags]",
 ]
 
 [dependency-groups]
