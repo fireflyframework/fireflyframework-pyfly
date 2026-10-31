@@ -97,3 +97,18 @@ async def test_explicit_native_di_borrows_key_ports_and_stops_worker_before_loca
     assert await verifier.verify(b"still borrowed", await signer.sign(b"still borrowed"))
     with pytest.raises(RuntimeError, match="Start"):
         await sink.lookup(identifier)
+
+
+async def test_host_delivery_override_does_not_create_default_paths_or_require_default_ports(tmp_path):
+    archive = feature("archive_auto_configuration", "AuditArchiveAutoConfiguration")
+    delivery_type = feature("archive", "AuditArchiveDelivery")
+    context = ApplicationContext(configuration(tmp_path), auto_configurations=[archive])
+    existing = object()
+    context.container.register_instance(delivery_type, existing)
+    await context.start()
+    try:
+        assert context.get_bean(delivery_type) is existing
+        assert not (tmp_path / "archive").exists()
+        assert not context.container.contains_type(feature("archive_ports", "ArchiveSink"))
+    finally:
+        await context.stop()
