@@ -64,7 +64,8 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
-| `26.10.23` | 2026-10-31 | Primary-authoritative read-only transactions and explicit replica participant rejection. |
+| `26.10.24` | 2026-10-31 | Primary-authoritative read-only transactions and explicit replica participant rejection. |
+| `26.10.23` | 2026-10-31 | Immutable authorization policies, approval constraints and monotonic execution ceilings. |
 | `26.10.22` | 2026-10-30 | Bounded native skill interpolation, immutable JSON/defaults and safe resource loading. |
 | `26.10.21` | 2026-10-30 | Bounded Docker and Kubernetes function sandboxes. |
 | `26.10.20` | 2026-10-30 | Native Google Cloud Storage document versions and create-only uploads. |

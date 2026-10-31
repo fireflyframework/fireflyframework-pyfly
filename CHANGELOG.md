@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## v26.10.23 (2026-10-31)
+## v26.10.24 (2026-10-31)
 
 ### Added
 
@@ -24,6 +24,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   outer writing unit is suspended, avoiding the write-lock cycle of a writing workaround.
 - Refuse explicit primary authority on a custom session factory bound directly to a
   known replica engine, and report that replica route accurately for transactional and auto units.
+
+## v26.10.23 (2026-10-31)
+
+### Added
+
+- Add native `pyfly.security` policy specifications, contexts, decisions and a pure
+  evaluator with strict version-one schemas and deeply immutable value fields.
+- Intersect principal/action/target permissions and execution ceilings across policy
+  layers; deny overrides approval, approval thresholds increase and approval TTLs shorten.
+- Preserve explicit zero limits, reject malformed numbers and unknown fields, and
+  fail closed when the required policy set is missing. Applications retain ownership
+  of durable revisions, trusted approval evidence, reservations and effect enforcement.
 
 ## v26.10.22 (2026-10-30)
 

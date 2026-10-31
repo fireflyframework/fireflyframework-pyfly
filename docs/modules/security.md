@@ -17,6 +17,7 @@ The PyFly security module is a full Spring-Security-style stack for async Python
   - [Anonymous Context](#anonymous-context)
   - [Full API Reference](#securitycontext-api-reference)
   - [SecurityContextHolder](#securitycontextholder)
+- [Authorization Policies](#authorization-policies)
 - [JWT Authentication](#jwt-authentication)
   - [JWTService](#jwtservice)
   - [Encoding Tokens](#encoding-tokens)
@@ -263,6 +264,16 @@ with SecurityContextHolder.using(SecurityContext(user_id="system:reindex")):
 filters do, so `@pre_authorize` sees a session-authenticated user.
 
 ---
+
+## Authorization Policies
+
+`pyfly.security.PolicyEvaluator` composes closed version-one policies into immutable
+`allow`, `deny`, or `approval_required` decisions. It intersects principal/action/target
+allow sets and integer execution ceilings, including explicit zero limits. Applications
+own policy revision selection, durable approval evidence and effect reservations.
+
+See the [authorization policy API and native DI guide](policy.md) for the complete schema,
+composition rules and enforcement responsibilities.
 
 ## JWT Authentication
 
