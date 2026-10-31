@@ -11,13 +11,14 @@ from pyfly.audit.local_archive import LocalArchiveAdapter
 from pyfly.audit.ports import AuditJournal, CheckpointSigner, CheckpointVerifier
 from pyfly.container.bean import bean
 from pyfly.container.container import Container
-from pyfly.context.conditions import auto_configuration, conditional_on_missing_bean, conditional_on_property
+from pyfly.container.stereotypes import configuration
+from pyfly.context.conditions import conditional_on_missing_bean, conditional_on_property
 from pyfly.core.config import Config
 from pyfly.data.relational.framework_schema import context_datasource_registry, creates_tables, module_datasource
 from pyfly.eda.outbox import SqlOutboxStore
 
 
-@auto_configuration
+@configuration
 @conditional_on_property("pyfly.audit.archive.enabled", having_value="true")
 @conditional_on_missing_bean(AuditArchiveDelivery)
 class NativeAuditArchiveAutoConfiguration:
