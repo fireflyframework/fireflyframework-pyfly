@@ -526,3 +526,83 @@ async def test_same_named_managers_cannot_cross_join_journal_storage(
             assert await conn.scalar(select(func.count()).select_from(table)) == 0
     async with infrastructure_unit(b):
         assert (await instance.append(event())).sequence == 1
+
+
+async def admit_once(instance, fact):
+    method = getattr(instance, "admit_once", None)
+    assert callable(method), "The native journal must provide explicit atomic admission"
+    return await method(fact)
+
+
+async def test_once_admission_rejects_identical_frozen_facts_and_rolls_back_caught_failure(
+    relational_backend: RelationalBackend,
+) -> None:
+    from pyfly.audit import AuditAdmissionJournal
+    from pyfly.data.transaction import UnexpectedRollbackError
+
+    instance = await journal(relational_backend)
+    assert isinstance(instance, AuditAdmissionJournal)
+    fact = event().model_copy(update={"outcome": "intent"})
+    async with instance.engine.begin() as conn:
+        await conn.run_sync(orders.create)
+    async with infrastructure_unit(instance.engine):
+        first = await admit_once(instance, fact)
+    with pytest.raises(UnexpectedRollbackError):
+        async with infrastructure_unit(instance.engine) as session:
+            await session.execute(insert(orders).values(id="must-rollback"))
+            with pytest.raises(AuditError, match="already admitted") as denied:
+                await admit_once(instance, fact)
+            assert denied.value.retryable is False
+    async with instance.engine.connect() as conn:
+        assert await conn.scalar(select(func.count()).select_from(orders)) == 0
+    assert await instance.read(SCOPE) == (first,)
+    assert len(await instance.outbox.pending("pyfly.audit.export")) == 1
+
+
+async def test_once_admission_survives_restart_and_refuses_ordinary_prior_append(
+    relational_backend: RelationalBackend,
+) -> None:
+    instance = await journal(relational_backend)
+    fact = event().model_copy(update={"outcome": "intent"})
+    async with infrastructure_unit(instance.engine):
+        await instance.append(fact)
+    await instance.stop()
+    reopened = await journal(relational_backend)
+    for candidate in (fact, fact.model_copy(update={"reason_codes": ("different-facts",)})):
+        with pytest.raises(AuditError, match="already admitted") as denied:
+            async with infrastructure_unit(reopened.engine):
+                await admit_once(reopened, candidate)
+        assert denied.value.retryable is False
+    assert (await reopened.verify(SCOPE)).head.sequence == 1
+
+
+async def test_concurrent_once_admission_allows_exactly_one_permission(
+    relational_backend: RelationalBackend,
+) -> None:
+    one, two = await journal(relational_backend), await journal(relational_backend)
+    fact = event().model_copy(update={"outcome": "intent"})
+
+    async def attempt(instance):
+        try:
+            async with infrastructure_unit(instance.engine):
+                return await admit_once(instance, fact)
+        except AuditError as error:
+            assert error.retryable is False
+            return None
+
+    results = await asyncio.gather(*(attempt(one if index % 2 else two) for index in range(8)))
+    assert sum(value is not None for value in results) == 1
+    assert len(await one.read(SCOPE)) == 1
+    assert len(await one.outbox.pending("pyfly.audit.export")) == 1
+
+
+async def test_once_admission_requires_active_write_unit_and_intent_facts(
+    relational_backend: RelationalBackend,
+) -> None:
+    instance = await journal(relational_backend)
+    with pytest.raises(AuditError, match="active"):
+        await admit_once(instance, event().model_copy(update={"outcome": "intent"}))
+    with pytest.raises(AuditError, match="intent"):
+        async with infrastructure_unit(instance.engine):
+            await admit_once(instance, event())
+    assert not await instance.read(SCOPE)

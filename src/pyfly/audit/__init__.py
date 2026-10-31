@@ -17,6 +17,8 @@ from pyfly.audit.models import (
     canonical_bytes,
 )
 from pyfly.audit.ports import (
+    AuditAdmissionJournal,
+    AuditAdmissionRefused,
     AuditConflict,
     AuditError,
     AuditIntegrityError,
@@ -27,6 +29,8 @@ from pyfly.audit.ports import (
 
 __all__ = [
     "AuditActor",
+    "AuditAdmissionJournal",
+    "AuditAdmissionRefused",
     "AuditCheckpoint",
     "AuditConflict",
     "AuditCorrelation",
