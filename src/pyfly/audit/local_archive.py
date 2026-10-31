@@ -107,8 +107,14 @@ class LocalArchiveAdapter:
     def _stop(self) -> None:
         with self._guard:
             descriptors, self._fds = self._fds, {}
+            failed = False
             for descriptor in descriptors.values():
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    failed = True
+            if failed:
+                raise AuditError("Local archive descriptor closure failed") from None
 
     def _directory(self, name: str) -> int:
         if not self._fds:

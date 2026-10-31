@@ -595,3 +595,50 @@ async def test_cancelled_stop_drains_descriptor_closure_before_returning(tmp_pat
     finally:
         release.set()
         await sink.stop()
+
+
+async def test_stop_closes_all_owned_descriptors_once_and_hides_close_failures(tmp_path, monkeypatch):
+    import os
+
+    from pyfly.audit import AuditError
+
+    cls = feature("local_archive", "LocalArchiveAdapter")
+    sink = cls(tmp_path / "archive", sink_id="fixture")
+    await sink.start()
+    descriptors = {descriptor: os.fstat(descriptor).st_ino for descriptor in sink._fds.values()}
+    first = next(iter(descriptors))
+    original_close = os.close
+    attempted, reused = [], []
+
+    def close_then_fail(descriptor):
+        attempted.append(descriptor)
+        original_close(descriptor)
+        if descriptor == first:
+            replacement = os.open(tmp_path / "unrelated", os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            reused.append(replacement)
+            assert replacement == descriptor
+            raise OSError("fixture-private-close-detail")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "close", close_then_fail)
+            with pytest.raises(AuditError, match="closure failed") as caught:
+                await sink.stop()
+        assert "fixture-private-close-detail" not in str(caught.value)
+        assert attempted == list(descriptors)
+        assert not sink._fds
+        assert os.fstat(reused[0]).st_ino == (tmp_path / "unrelated").stat().st_ino
+        for descriptor in list(descriptors)[1:]:
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+        await sink.stop()
+        assert os.fstat(reused[0]).st_ino == (tmp_path / "unrelated").stat().st_ino
+    finally:
+        for descriptor, inode in descriptors.items():
+            try:
+                if os.fstat(descriptor).st_ino == inode:
+                    original_close(descriptor)
+            except OSError:
+                pass
+        for descriptor in reused:
+            original_close(descriptor)
