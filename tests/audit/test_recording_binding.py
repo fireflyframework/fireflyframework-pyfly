@@ -42,3 +42,30 @@ async def test_binding_failure_poisoning_is_safe_across_two_native_contexts(tmp_
     finally:
         await two.stop()
         await one.stop()
+
+
+def test_coverage_is_frozen_and_reports_only_configured_actual_di_bindings():
+    from pydantic import ValidationError
+
+    from pyfly.container.scoped_proxy import ScopedProxy
+
+    class Adapter(AuditRecordingSupport):
+        __pyfly_audit_module__ = "data"
+
+    processor = AuditModulePostProcessor(lambda: object(), modules=frozenset({"data", "web"}))
+    assert processor.coverage().di_bound_adapters == ()
+    assert processor.coverage().configured_modules == ("data", "web")
+    processor.before_init(Adapter(), "fixture")
+    snapshot = processor.coverage()
+    assert len(snapshot.di_bound_adapters) == 1
+    assert snapshot.di_bound_adapters[0].module == "data"
+    assert snapshot.di_bound_adapters[0].adapter.endswith(".Adapter")
+    with pytest.raises(ValidationError):
+        snapshot.configured_modules = ()
+
+    def not_active():
+        pytest.fail("A request proxy must not be materialized at singleton startup")
+
+    proxy = ScopedProxy(not_active, Adapter)
+    assert processor.before_init(proxy, "scoped") is proxy
+    assert processor.coverage() == snapshot
