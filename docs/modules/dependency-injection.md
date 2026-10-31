@@ -213,8 +213,15 @@ Resolves an instance of the given type. The resolution order is:
    the bean registered **last** answered silently. Resolve one of them by name or `Qualifier`, or
    all of them with `list[T]`.
 2. **Interface binding** -- if `cls` has exactly one bound implementation, resolve it.
-3. **Multiple bindings** -- pick the implementation marked `@primary`.
-4. **Error** -- `NoSuchBeanError` if nothing matches; `NoUniqueBeanError` if multiple candidates exist without a `@primary`.
+3. **Multiple bindings** -- select exactly one `@primary` candidate across the bound factories.
+4. **Error** -- `NoSuchBeanError` if nothing matches; `NoUniqueBeanError` if several candidates have zero or multiple primaries.
+
+An interface-typed `@bean` creates a declared-port alias for its concrete product. That synthetic
+alias does not override other factories for the port: all distinct candidates participate in
+selection, even when several factories return the same concrete class. Aliases sharing one
+instance or factory count once. `resolve_all()` retains every distinct product, and qualifiers
+still select a named factory. An explicit `register_instance(Port, instance)` retains direct
+registration precedence.
 
 Once `ApplicationContext.stop()` starts destroying beans, resolving a singleton that does not
 exist yet raises `BeanCreationNotAllowedError` (Spring's `BeanCreationNotAllowedException`): a bean
@@ -1207,8 +1214,8 @@ Multiple implementations can be bound to the same interface. Resolution follows 
 rules:
 
 1. If exactly one implementation is bound, it is used.
-2. If multiple are bound, the one marked `@primary` is used.
-3. If multiple are bound and none is `@primary`, a `KeyError` is raised.
+2. If multiple are bound, exactly one marked `@primary` is used.
+3. If multiple are bound and zero or several are `@primary`, `NoUniqueBeanError` is raised.
 4. Use `resolve_all()` to retrieve all implementations as a list.
 
 ---

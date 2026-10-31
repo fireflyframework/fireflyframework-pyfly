@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- Reject ambiguous declared-port bean aliases instead of silently selecting one;
+  honor exactly one primary across every bound factory and retain all list candidates.
 - Reject audit entry updates/deletes and PostgreSQL truncation; prevent SQLite
   replacement inserts from bypassing guards when recursive triggers are disabled.
 - Reject unbounded/content payload fields and redact native append storage errors
