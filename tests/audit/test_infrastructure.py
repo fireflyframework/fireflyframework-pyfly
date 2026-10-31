@@ -13,7 +13,8 @@ def marker():
     assert importlib.util.find_spec("pyfly.audit._infrastructure") is not None
     from pyfly.audit._infrastructure import audit_infrastructure, is_audit_infrastructure
 
-    return audit_infrastructure, is_audit_infrastructure
+    owner = object()
+    return lambda: audit_infrastructure(owner), lambda: is_audit_infrastructure(owner)
 
 
 def test_infrastructure_marker_is_nested_and_restores_after_failure():
@@ -68,21 +69,39 @@ async def test_marker_is_reset_after_cancelled_scope():
 async def test_async_infrastructure_decorator_stays_active_until_await_and_preserves_signature():
     import inspect
 
-    from pyfly.audit._infrastructure import audit_infrastructure_call
+    from pyfly.audit._infrastructure import audit_infrastructure_call, is_audit_infrastructure
 
-    _, active = marker()
+    class Owned:
+        @audit_infrastructure_call
+        async def operation(self, value: int, *, fail: bool = False) -> int:
+            await asyncio.sleep(0)
+            assert is_audit_infrastructure(self)
+            if fail:
+                raise RuntimeError("fixture failure")
+            return value
 
-    @audit_infrastructure_call
-    async def operation(value: int, *, fail: bool = False) -> int:
-        await asyncio.sleep(0)
-        assert active()
-        if fail:
-            raise RuntimeError("fixture failure")
-        return value
-
-    assert "value" in inspect.signature(operation).parameters
-    assert await operation(3) == 3
-    assert not active()
+    owned = Owned()
+    assert "value" in inspect.signature(owned.operation).parameters
+    assert await owned.operation(3) == 3
+    assert not is_audit_infrastructure(owned)
     with pytest.raises(RuntimeError):
-        await operation(3, fail=True)
-    assert not active()
+        await owned.operation(3, fail=True)
+    assert not is_audit_infrastructure(owned)
+
+
+async def test_composed_owner_decorator_targets_its_journal_instead_of_adapter():
+    from pyfly.audit._infrastructure import audit_infrastructure_call, is_audit_infrastructure
+
+    class Delivery:
+        def __init__(self):
+            self.journal = object()
+
+        @audit_infrastructure_call(owner=lambda self: self.journal)
+        async def deliver(self):
+            await asyncio.sleep(0)
+            assert is_audit_infrastructure(self.journal)
+            assert not is_audit_infrastructure(self)
+
+    delivery = Delivery()
+    await delivery.deliver()
+    assert not is_audit_infrastructure(delivery.journal)
