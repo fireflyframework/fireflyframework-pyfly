@@ -34,6 +34,8 @@ from pyfly.security.expression import (
 from pyfly.security.http_security import AccessRule, AccessRuleType, HttpSecurity, SecurityRule
 from pyfly.security.method_security import post_authorize, post_filter, pre_authorize, pre_filter
 from pyfly.security.permission import PermissionEvaluator
+from pyfly.security.policy import PolicyContext, PolicyDecision, PolicyLimits, PolicyOutcome, PolicySpec
+from pyfly.security.policy_evaluator import PolicyEvaluator
 from pyfly.security.role_hierarchy import RoleHierarchy
 
 __all__ = [
@@ -41,6 +43,12 @@ __all__ = [
     "AccessRuleType",
     "HttpSecurity",
     "PermissionEvaluator",
+    "PolicyContext",
+    "PolicyDecision",
+    "PolicyEvaluator",
+    "PolicyLimits",
+    "PolicyOutcome",
+    "PolicySpec",
     "RoleHierarchy",
     "SecurityContext",
     "SecurityContextHolder",
