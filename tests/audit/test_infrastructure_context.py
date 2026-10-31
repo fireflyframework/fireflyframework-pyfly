@@ -100,7 +100,7 @@ async def test_two_native_contexts_and_proxies_share_only_their_own_infrastructu
         await one.stop()
 
 
-@pytest.mark.parametrize("operation", ["append", "head", "read", "verify", "export"])
+@pytest.mark.parametrize("operation", ["append", "admit_once", "head", "read", "verify", "export"])
 async def test_journal_refuses_same_named_unit_from_another_native_context(tmp_path, operation):
     one, two = application(tmp_path / "one.db"), application(tmp_path / "two.db")
     await one.start()
@@ -122,17 +122,19 @@ async def test_journal_refuses_same_named_unit_from_another_native_context(tmp_p
 
         async def wrong_context():
             async with one.get_bean(SessionProvider).unit():
-                if operation == "append":
+                if operation in {"append", "admit_once"}:
                     await a.append(fact.model_copy(update={"event_id": "must-rollback"}))
                 with pytest.raises(AuditError, match="different native Data manager"):
                     if operation == "append":
                         await b.append(fact)
+                    elif operation == "admit_once":
+                        await b.admit_once(fact.model_copy(update={"outcome": "intent"}))
                     elif operation == "export":
                         await b.export(scope, through_sequence=1)
                     else:
                         await getattr(b, operation)(scope)
 
-        if operation == "append":
+        if operation in {"append", "admit_once"}:
             with pytest.raises(UnexpectedRollbackError):
                 await wrong_context()
         else:

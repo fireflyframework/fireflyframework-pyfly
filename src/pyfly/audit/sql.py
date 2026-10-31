@@ -29,7 +29,7 @@ from pyfly.audit.models import (
     genesis_hash,
     utc_now,
 )
-from pyfly.audit.ports import AuditConflict, AuditError, AuditIntegrityError
+from pyfly.audit.ports import AuditAdmissionRefused, AuditConflict, AuditError, AuditIntegrityError
 from pyfly.audit.schema import ensure_mutation_guards
 from pyfly.data.relational.dialect_customizers import is_file_database
 from pyfly.data.relational.framework_schema import audit_entries, audit_heads, ensure_tables
@@ -129,27 +129,37 @@ class SqlAuditJournal:
 
     @audit_infrastructure_call
     async def append(self, event: AuditEvent) -> JournalEntry:
+        return await self._write(event)
+
+    @audit_infrastructure_call
+    async def admit_once(self, event: AuditEvent) -> JournalEntry:
+        return await self._write(event, require_new=True)
+
+    async def _write(self, event: AuditEvent, *, require_new: bool = False) -> JournalEntry:
         manager = resolve_manager(self._target)
         unit = current_unit_of_work(manager.datasource)
+        operation = "admit_once" if require_new else "append"
         try:
             if unit is not None and unit.autocommit:
                 raise AuditError("Audit append requires an atomic native Data write unit")
-            result = await self._append(event)
+            result = await self._append(event, require_new=require_new)
         except BaseException as error:
             if unit is not None:
                 unit.set_rollback_only("Audit append failed")
                 unit.redact_rollback_reason("Audit append failed")
-            self._observe("append", "failed")
+            self._observe(operation, "failed")
             if isinstance(error, SQLAlchemyError):
                 raise AuditError("Audit journal append failed") from None
             raise
-        self._observe("append", "provisional")
+        self._observe(operation, "provisional")
         return result
 
-    async def _append(self, event: AuditEvent) -> JournalEntry:
+    async def _append(self, event: AuditEvent, *, require_new: bool = False) -> JournalEntry:
         self._ready()
         # Revalidate untrusted model_copy/model_construct instances before touching the transaction.
         event = AuditEvent.model_validate(event)
+        if require_new and event.outcome != "intent":
+            raise AuditError("Audit admission requires intent facts")
         manager = resolve_manager(self._target)
         unit = current_unit_of_work(manager.datasource)
         if unit is None:
@@ -186,6 +196,10 @@ class SqlAuditJournal:
                 .first()
             )
             if prior is not None:
+                if require_new:
+                    raise AuditAdmissionRefused(
+                        "An effect intent was already admitted; explicit reconciliation is required"
+                    ) from None
                 existing = self._decode(prior, event.scope)
                 if canonical_bytes(existing.event.model_dump(mode="json")) != canonical_bytes(
                     event.model_dump(mode="json")

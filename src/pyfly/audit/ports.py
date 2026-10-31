@@ -21,6 +21,19 @@ class AuditIntegrityError(AuditError):
     pass
 
 
+class AuditAdmissionRefused(AuditError):
+    """An existing intent permits no further automatic external effect."""
+
+    retryable = False
+
+
+@runtime_checkable
+class AuditAdmissionJournal(Protocol):
+    """Optional atomic create-only intent capability; identical existing facts are refused."""
+
+    async def admit_once(self, event: AuditEvent) -> JournalEntry: ...
+
+
 @runtime_checkable
 class AuditJournal(Protocol):
     async def start(self) -> None: ...
