@@ -469,3 +469,34 @@ async def test_sqlite_replace_cannot_bypass_append_only_guards(
                 )
             )
     assert (await instance.verify(SCOPE)).head.sequence == 1
+
+
+async def test_journal_queries_are_infrastructure_and_marker_resets(
+    relational_backend: RelationalBackend,
+) -> None:
+    from sqlalchemy import event as sqlalchemy_event
+
+    from pyfly.audit._infrastructure import is_audit_infrastructure
+
+    instance = SqlAuditJournal(relational_backend.create_engine())
+    captured = []
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        if "pyfly_audit" in statement or "pyfly_outbox" in statement:
+            captured.append(is_audit_infrastructure(instance))
+
+    sqlalchemy_event.listen(instance.engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        await instance.start()
+        async with infrastructure_unit(instance.engine):
+            await instance.append(event())
+            assert not is_audit_infrastructure(instance)
+        await instance.head(SCOPE)
+        await instance.read(SCOPE)
+        await instance.verify(SCOPE)
+        await instance.export(SCOPE, through_sequence=1)
+        assert captured and all(captured)
+        assert not is_audit_infrastructure(instance)
+    finally:
+        sqlalchemy_event.remove(instance.engine.sync_engine, "before_cursor_execute", observe)
+        await instance.stop()
