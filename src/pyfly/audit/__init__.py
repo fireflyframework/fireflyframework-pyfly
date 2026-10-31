@@ -2,6 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Safe typed append-only audit facts; SQL adapter is imported only when requested."""
 
+from pyfly.audit.archive_models import (
+    ArchiveCapabilities,
+    ArchiveChainVerification,
+    ArchiveCheckpoint,
+    ArchiveDeliveryReceipt,
+    ArchiveManifest,
+    ArchiveReceipt,
+    ArchiveSegment,
+    ArchiveVerification,
+    AuditArchiveNotice,
+    SignedArchiveCheckpoint,
+)
+from pyfly.audit.archive_ports import ArchiveError, ArchiveReceiptStore, ArchiveSink
 from pyfly.audit.models import (
     AuditActor,
     AuditCheckpoint,
@@ -28,6 +41,19 @@ from pyfly.audit.recording import AuditEffect, AuditEffectUncertain, AuditRecord
 from pyfly.audit.recording_context import AuditContext, AuditContextResolver, AuditOperation
 
 __all__ = [
+    "ArchiveCapabilities",
+    "ArchiveChainVerification",
+    "ArchiveCheckpoint",
+    "ArchiveDeliveryReceipt",
+    "ArchiveError",
+    "ArchiveManifest",
+    "ArchiveReceipt",
+    "ArchiveReceiptStore",
+    "ArchiveSegment",
+    "ArchiveSink",
+    "ArchiveVerification",
+    "AuditArchiveNotice",
+    "SignedArchiveCheckpoint",
     "AuditActor",
     "AuditCheckpoint",
     "AuditConflict",

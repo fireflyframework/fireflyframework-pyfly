@@ -5,6 +5,11 @@
 from typing import Protocol, runtime_checkable
 
 from pyfly.audit.archive_models import ArchiveCapabilities, ArchiveDeliveryReceipt, ArchiveReceipt
+from pyfly.audit.ports import AuditError
+
+
+class ArchiveError(AuditError):
+    """Safe delivery failures contain no third-party adapter errors or credential material."""
 
 
 @runtime_checkable

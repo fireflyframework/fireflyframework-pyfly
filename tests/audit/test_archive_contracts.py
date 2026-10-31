@@ -484,3 +484,114 @@ async def test_cancelled_local_write_finishes_before_descriptor_shutdown_and_ret
     assert (root / "objects" / digest).stat().st_ino == inode
     assert await reopened.get(receipt) == content
     await reopened.stop()
+
+
+def test_first_segment_cannot_start_from_a_forged_genesis_hash():
+    cls = feature("archive_models", "ArchiveSegment")
+    first = entries(1)[0].model_copy(update={"previous_hash": "a" * 64})
+    first = first.model_copy(update={"entry_hash": entry_digest(first)})
+    with pytest.raises(ValueError):
+        cls.from_entries((first,))
+
+
+async def test_cancelled_start_drains_opening_thread_and_closes_owned_descriptors(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import threading
+
+    from pyfly.audit import AuditError
+
+    cls = feature("local_archive", "LocalArchiveAdapter")
+    root = tmp_path / "archive"
+    sink = cls(root, sink_id="fixture")
+    opening, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original_sync, original_open, original_start = os.fsync, os.open, sink._start
+    descriptors = []
+
+    def record_open(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        descriptors.append((descriptor, os.fstat(descriptor).st_ino))
+        return descriptor
+
+    def blocked_sync(descriptor):
+        if not opening.is_set():
+            opening.set()
+            if not release.wait(3):
+                raise TimeoutError("Fixture startup was not released")
+        original_sync(descriptor)
+
+    def tracked_start():
+        try:
+            original_start()
+        finally:
+            finished.set()
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "open", record_open)
+            patch.setattr(os, "fsync", blocked_sync)
+            patch.setattr(sink, "_start", tracked_start)
+            pending = asyncio.create_task(sink.start())
+            assert await asyncio.to_thread(opening.wait, 2)
+            pending.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            returned_before_owned_thread = pending.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            assert await asyncio.to_thread(finished.wait, 2)
+        assert not returned_before_owned_thread
+        with pytest.raises(AuditError, match="Start"):
+            await sink.put(hashlib.sha256(b"fixture").hexdigest(), b"fixture")
+        for descriptor, inode in descriptors:
+            try:
+                current = os.fstat(descriptor)
+            except OSError:
+                continue
+            assert current.st_ino != inode, "Cancelled startup left an owned descriptor open"
+    finally:
+        release.set()
+        await sink.stop()
+
+
+async def test_cancelled_stop_drains_descriptor_closure_before_returning(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from pyfly.audit import AuditError
+
+    cls = feature("local_archive", "LocalArchiveAdapter")
+    sink = cls(tmp_path / "archive", sink_id="fixture")
+    await sink.start()
+    closing, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original_stop = sink._stop
+
+    def blocked_stop():
+        closing.set()
+        if not release.wait(3):
+            raise TimeoutError("Fixture stop was not released")
+        try:
+            original_stop()
+        finally:
+            finished.set()
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(sink, "_stop", blocked_stop)
+            pending = asyncio.create_task(sink.stop())
+            assert await asyncio.to_thread(closing.wait, 2)
+            pending.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            returned_before_owned_thread = pending.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            assert await asyncio.to_thread(finished.wait, 2)
+        assert not returned_before_owned_thread
+        with pytest.raises(AuditError, match="Start"):
+            await sink.lookup("a" * 64)
+    finally:
+        release.set()
+        await sink.stop()

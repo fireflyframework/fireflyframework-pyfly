@@ -23,6 +23,7 @@ from pyfly.audit.models import (
     canonical_bytes,
     chain_id,
     entry_digest,
+    genesis_hash,
 )
 
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
@@ -96,6 +97,8 @@ class ArchiveManifest(Fact):
             raise ValueError("Archive manifest scope does not match its chain")
         if self.last_sequence - self.first_sequence + 1 != self.entry_count:
             raise ValueError("Archive manifest must describe an exact contiguous range")
+        if self.first_sequence == 1 and self.previous_hash != genesis_hash(self.chain_id):
+            raise ValueError("Archive first entry does not follow its deterministic genesis")
         return self
 
     @property
@@ -273,3 +276,29 @@ class ArchiveVerification(Fact):
     entries: tuple[JournalEntry, ...] = Field(min_length=1, max_length=MAX_ARCHIVE_ENTRIES)
     signature_verified: Literal[True] = True
     trusted_head_matched: Annotated[bool, Field(strict=True)] = False
+
+
+class ArchiveChainVerification(Fact):
+    entries: tuple[JournalEntry, ...] = Field(min_length=1, max_length=MAX_ARCHIVE_ENTRIES)
+    segment_count: Annotated[int, Field(strict=True, ge=1, le=MAX_ARCHIVE_ENTRIES)]
+    starts_at_genesis: Annotated[bool, Field(strict=True)]
+    signature_verified: Literal[True] = True
+    trusted_head_matched: Annotated[bool, Field(strict=True)] = False
+
+    @property
+    def head(self) -> AuditHead:
+        return self.entries[-1].head
+
+
+class AuditArchiveNotice(Fact):
+    journal_id: Identifier
+    scope: AuditScope
+    chain_id: Digest
+    sequence: Revision
+    entry_hash: Digest
+
+    @model_validator(mode="after")
+    def bind_scope(self) -> Self:
+        if self.chain_id != chain_id(self.journal_id, self.scope):
+            raise ValueError("Archive notice scope does not identify its journal chain")
+        return self

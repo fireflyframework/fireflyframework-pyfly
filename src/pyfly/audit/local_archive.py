@@ -10,6 +10,7 @@ import os
 import stat
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import ConfigDict, TypeAdapter
@@ -49,7 +50,25 @@ class LocalArchiveAdapter:
         )
 
     async def start(self) -> None:
-        await asyncio.to_thread(self._start)
+        await self._lifecycle(self._start, close_on_cancel=True)
+
+    @staticmethod
+    async def _drain(worker: asyncio.Task[None]) -> None:
+        while not worker.done():
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(worker)
+        if not worker.cancelled():
+            worker.exception()
+
+    async def _lifecycle(self, operation: Callable[[], None], *, close_on_cancel: bool) -> None:
+        worker = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await self._drain(worker)
+            if close_on_cancel:
+                await self._drain(asyncio.create_task(asyncio.to_thread(self._stop)))
+            raise asyncio.CancelledError from None
 
     def _start(self) -> None:
         with self._guard:
@@ -83,7 +102,7 @@ class LocalArchiveAdapter:
             self._fds = opened
 
     async def stop(self) -> None:
-        await asyncio.to_thread(self._stop)
+        await self._lifecycle(self._stop, close_on_cancel=False)
 
     def _stop(self) -> None:
         with self._guard:
