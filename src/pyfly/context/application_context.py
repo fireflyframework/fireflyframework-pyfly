@@ -1321,6 +1321,7 @@ class ApplicationContext:
             # the product is of a subclass: the claim is completed, so resolving the class hands out this
             # product instead of running the factory a second time.
             self._container.bind(claim.impl_type, impl_type)
+            claim.declared_alias = True
             claim.destroy_method = self._declared_destroy_method(method)
             if getattr(method, "__pyfly_bean_primary__", False):
                 claim.primary = True
@@ -1337,6 +1338,7 @@ class ApplicationContext:
         if declared is not None and declared not in self._container._registrations:
             self._container.register(declared, scope=bean_scope)
             return_reg = self._container._registrations[declared]
+            return_reg.declared_alias = True
             return_reg.factory = factory
             return_reg.destroy_method = self._declared_destroy_method(method)
             if bean_scope == Scope.SINGLETON:
