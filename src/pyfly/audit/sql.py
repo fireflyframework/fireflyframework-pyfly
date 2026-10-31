@@ -104,6 +104,10 @@ class SqlAuditJournal:
     def _ready(self) -> None:
         if not self._started:
             raise AuditError("Start the audit journal before use")
+        manager = resolve_manager(self._target)
+        unit = current_unit_of_work(manager.datasource)
+        if unit is not None and unit.manager is not manager:
+            raise AuditError("Audit journal cannot join a different native Data manager")
 
     def _identity(self, scope: AuditScope) -> str:
         return chain_id(self.journal_id, AuditScope.model_validate(scope))
@@ -416,6 +420,7 @@ class SqlAuditJournal:
         through_sequence: int,
         limit: int = 100,
     ) -> bytes:
+        self._ready()
         self._bounds(after_sequence, limit)
         if type(through_sequence) is not int or not after_sequence <= through_sequence <= after_sequence + limit:
             raise ValueError("Audit export must declare a bounded complete range")

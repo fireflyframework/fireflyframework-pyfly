@@ -500,3 +500,29 @@ async def test_journal_queries_are_infrastructure_and_marker_resets(
     finally:
         sqlalchemy_event.remove(instance.engine.sync_engine, "before_cursor_execute", observe)
         await instance.stop()
+
+
+async def test_same_named_managers_cannot_cross_join_journal_storage(
+    relational_backend: RelationalBackend,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from pyfly.data.relational.sqlalchemy.transaction_manager import SqlAlchemyTransactionManager
+    from pyfly.data.transaction import UnexpectedRollbackError
+
+    engine = relational_backend.create_engine()
+    a, b = (SqlAlchemyTransactionManager(sessionmaker=async_sessionmaker(engine), name="primary") for _ in range(2))
+    instance = SqlAuditJournal(b)
+    await instance.start()
+    async with engine.begin() as conn:
+        await conn.run_sync(orders.create)
+    with pytest.raises(UnexpectedRollbackError):
+        async with infrastructure_unit(a) as session:
+            await session.execute(insert(orders).values(id="must-rollback"))
+            with pytest.raises(AuditError, match="different native Data manager"):
+                await instance.append(event())
+    async with engine.connect() as conn:
+        for table in (orders, audit_entries, audit_heads, instance.outbox.tables.events):
+            assert await conn.scalar(select(func.count()).select_from(table)) == 0
+    async with infrastructure_unit(b):
+        assert (await instance.append(event())).sequence == 1

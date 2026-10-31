@@ -236,6 +236,15 @@ The `TransactionTemplate` (behind `@transactional`) drives it: propagation, roll
 synchronizations and cancellation are implemented once, for every backend. See
 [Transaction Management](data-relational.md#transaction-management).
 
+Datasource names belong to an application's manager registry. A native transaction boundary,
+infrastructure unit or auto unit refuses a held same-named unit owned by a different manager, including
+an operation scope or suspended unit. Managed repositories, their streams, `SessionProvider` and
+injected scoped relational sessions apply the same identity check before using a session. The static
+`IllegalTransactionStateError` marks the foreign held unit rollback-only even when caught; native
+savepoint rollback semantics still apply. Independent managers with distinct datasource names remain
+independent transactions: this check does not provide atomic commits across datasources. Explicit
+manually supplied sessions retain the caller's selected resource and transaction ownership.
+
 A backend with savepoints opens each one under the unit's operation guard (`async with
 unit.operation():`), records it there with `unit.savepoint_opened(handle)` and reports its end with
 `unit.savepoint_closed(handle)`, including a savepoint that ends along with an enclosing one. The unit then

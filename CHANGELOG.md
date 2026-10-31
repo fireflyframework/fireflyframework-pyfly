@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   replacement inserts from bypassing guards when recursive triggers are disabled.
 - Reject unbounded/content payload fields and redact native append storage errors
   and caught-failure rollback diagnostics without changing rollback/savepoint state.
+- Refuse another manager's same-named native Data unit in transaction boundaries,
+  auto/infrastructure units and managed repository/session/stream access; caught
+  refusals mark the held unit rollback-only instead of crossing application contexts.
 
 ### Migration
 
