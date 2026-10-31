@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from pyfly.notifications.providers.azure_email import AzureCommunicationEmailProvider
 from pyfly.notifications.providers.dummy import (
     DummyEmailProvider,
     DummyPushProvider,
@@ -17,6 +18,7 @@ from pyfly.notifications.providers.twilio import TwilioSmsProvider
 
 __all__ = [
     "DummyEmailProvider",
+    "AzureCommunicationEmailProvider",
     "DummyPushProvider",
     "DummySmsProvider",
     "FirebasePushProvider",

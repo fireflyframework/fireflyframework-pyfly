@@ -131,9 +131,10 @@ async def test_send_maps_non_2xx_to_failed_result() -> None:
 
     # request was still attempted
     assert fake.calls[0][1] == "https://api.resend.com/emails"
-    # error path: FAILED, no provider_id, error carries status + body
+    # Error exposes a stable status code without the private provider body.
     assert result.status == EmailStatus.FAILED
     assert result.provider == "resend"
     assert result.id == msg.id
     assert result.provider_id is None
-    assert result.error == "http 422: invalid recipient"
+    assert result.error == "EMAIL_HTTP_422"
+    assert "invalid recipient" not in (result.error or "")

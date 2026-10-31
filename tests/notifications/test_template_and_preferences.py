@@ -295,13 +295,13 @@ async def test_metrics_sent_counter_increments_on_success() -> None:
 
 @pytest.mark.asyncio
 async def test_metrics_failed_counter_increments_on_failure() -> None:
-    """Use a provider that always raises to trigger the FAILED path."""
+    """A confirmed rejection increments FAILED; untyped send errors are UNKNOWN."""
 
     class BrokenProvider:
         name = "broken"
 
         async def send(self, message: EmailMessage) -> NotificationResult:
-            raise RuntimeError("boom")
+            return NotificationResult(message.id, self.name, EmailStatus.FAILED, error="EMAIL_SEND_REJECTED")
 
     recorder = FakeMetricsRecorder()
     service = DefaultEmailService(provider=BrokenProvider(), metrics=recorder)  # type: ignore[arg-type]

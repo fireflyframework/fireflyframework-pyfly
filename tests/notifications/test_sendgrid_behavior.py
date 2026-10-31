@@ -188,10 +188,11 @@ async def test_send_maps_non_2xx_to_failed_result() -> None:
 
     # request was still attempted
     assert fake.calls[0][1] == "https://api.sendgrid.com/v3/mail/send"
-    # error path: FAILED, no provider_id, error carries status + body
+    # Error exposes a stable status code without the private provider body.
     assert result.status == EmailStatus.FAILED
     assert result.provider == "sendgrid"
     assert result.id == msg.id
     assert result.provider_id is None
     assert "400" in (result.error or "")
-    assert "bad request" in (result.error or "")
+    assert result.error == "EMAIL_HTTP_400"
+    assert "bad request" not in (result.error or "")
