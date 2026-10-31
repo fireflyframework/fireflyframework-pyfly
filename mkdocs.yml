@@ -172,6 +172,7 @@ nav:
           - Feature Flags Contract: modules/feature-flags-contract.md
       - Security & Identity:
           - Security: modules/security.md
+          - Authorization policies: modules/policy.md
           - Standalone OAuth client: modules/oauth2-client.md
           - OAuth 2.1 & OIDC: modules/oauth2.md
           - Identity Provider (IDP): modules/idp.md

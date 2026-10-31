@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.23 (2026-10-31)
+
+### Added
+
+- Add native `pyfly.security` policy specifications, contexts, decisions and a pure
+  evaluator with strict version-one schemas and deeply immutable value fields.
+- Intersect principal/action/target permissions and execution ceilings across policy
+  layers; deny overrides approval, approval thresholds increase and approval TTLs shorten.
+- Preserve explicit zero limits, reject malformed numbers and unknown fields, and
+  fail closed when the required policy set is missing. Applications retain ownership
+  of durable revisions, trusted approval evidence, reservations and effect enforcement.
+
 ## v26.10.22 (2026-10-30)
 
 ### Fixed
