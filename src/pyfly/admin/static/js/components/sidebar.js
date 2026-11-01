@@ -55,6 +55,7 @@ export const NAV_ITEMS = [
 export const AGENTIC_ITEMS = [{ id: 'agentic', label: 'Agentic', icon: 'shuffle', section: 'Intelligence' }];
 
 export const DATA_ITEMS = [{ id: 'datasources', label: 'Datasources', icon: 'database', section: 'Data' }];
+export const AUDIT_ITEMS = [{ id: 'audit', label: 'Audit journal', icon: 'fileText', section: 'Accountability' }];
 
 export const SERVER_ITEMS = [
     { id: 'instances', label: 'Instances',  icon: 'server', section: 'Fleet' },
@@ -99,7 +100,7 @@ export function createSvgIcon(pathData) {
  * @param {function}    [options.onNavigate]  Called when a nav item is clicked.
  */
 export function renderSidebar(container, currentRoute, options = {}) {
-    const { serverMode = false, dataEnabled = false, agenticEnabled = false, onNavigate = null } = options;
+    const { serverMode = false, dataEnabled = false, agenticEnabled = false, auditEnabled = false, onNavigate = null } = options;
 
     // Clear previous content
     container.textContent = '';
@@ -121,7 +122,7 @@ export function renderSidebar(container, currentRoute, options = {}) {
 
     const applicationItems = NAV_ITEMS.flatMap(item =>
         item.id === 'metrics' && agenticEnabled ? [...AGENTIC_ITEMS, item] : [item]);
-    const items = [...applicationItems, ...(dataEnabled ? DATA_ITEMS : []), ...(serverMode ? SERVER_ITEMS : [])];
+    const items = [...applicationItems, ...(dataEnabled ? DATA_ITEMS : []), ...(auditEnabled ? AUDIT_ITEMS : []), ...(serverMode ? SERVER_ITEMS : [])];
 
     for (const item of items) {
         // Section header

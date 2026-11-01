@@ -20,7 +20,7 @@ token usage, latency, cost estimates, and error rates.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from opentelemetry import metrics
 
@@ -58,6 +58,11 @@ class AgentMetrics:
             description="Estimated cost in USD",
             unit="usd",
         )
+        self.cost_observation_counter = meter.create_counter(
+            "pyfly.agentic.cost.observations",
+            description="Usage observations with known or unknown estimated cost",
+            unit="{observation}",
+        )
         self.prompt_token_counter = meter.create_counter(
             "pyfly.agentic.tokens.prompt",
             description="Input/prompt tokens consumed",
@@ -89,6 +94,11 @@ class AgentMetrics:
     def record_cost(self, usd: float, *, agent: str = "", model: str = "") -> None:
         """Record estimated cost."""
         self.cost_counter.add(usd, {"agent": agent, "model": model})
+
+    def record_cost_observation(self, status: Literal["known", "unknown"]) -> None:
+        if status not in {"known", "unknown"}:
+            raise ValueError("Unsupported cost coverage status")
+        self.cost_observation_counter.add(1, {"status": status})
 
     def record_prompt_tokens(self, count: int, *, agent: str = "", model: str = "") -> None:
         """Record input/prompt token usage."""

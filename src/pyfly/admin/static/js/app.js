@@ -15,6 +15,7 @@ import { showToast } from './components/toast.js';
 /* ── Route Registry ───────────────────────────────────────────── */
 
 const routes = {
+    'audit':      () => import('./views/audit.js'),
     'datasources': () => import('./views/datasources.js'),
     '':           () => import('./views/overview.js'),
     'beans':      () => import('./views/beans.js'),
@@ -359,6 +360,7 @@ async function init() {
         serverMode: settings.serverMode,
         dataEnabled: settings.dataEnabled,
         agenticEnabled: settings.agenticEnabled,
+        auditEnabled: settings.auditEnabled,
         onNavigate: (route) => navigateTo(route),
     });
 
@@ -371,6 +373,7 @@ async function init() {
         serverMode: settings.serverMode,
         dataEnabled: settings.dataEnabled,
         agenticEnabled: settings.agenticEnabled,
+        auditEnabled: settings.auditEnabled,
         onToggleTheme: toggleTheme,
     });
 

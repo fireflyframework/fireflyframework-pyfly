@@ -64,6 +64,7 @@ class OTelMetricsSink:
             default_metrics.record_cost(record.cost_usd, agent=record.agent, model=record.model)
         if record.latency_ms > 0:
             default_metrics.record_latency(record.latency_ms, operation="agent.run", agent=record.agent)
+        default_metrics.record_cost_observation("known" if record.has_known_cost else "unknown")
 
     def flush(self) -> None:
         """Records are forwarded immediately; exporter flushing belongs to its owner."""
@@ -88,6 +89,7 @@ class EventBusSink:
             latency_ms=record.latency_ms,
             model=record.model,
             cost_usd=record.cost_usd,
+            cost_status="known" if record.has_known_cost else "unknown",
             input_tokens=record.input_tokens,
             output_tokens=record.output_tokens,
         )

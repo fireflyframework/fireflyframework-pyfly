@@ -81,17 +81,18 @@ async def traces_stream(
     collector: TraceCollectorFilter | None,
     interval: float = 2.0,
 ) -> AsyncGenerator[str, None]:
-    last_count = 0
+    last_id = 0
     try:
         while True:
             if collector is not None:
                 traces = collector.get_traces()
-                current_count = len(traces)
-                if current_count > last_count:
-                    new_traces = list(traces)[last_count:]
-                    for trace in new_traces:
+                if traces and traces[0]["id"] > last_id + 1:
+                    yield _sse_event({"missing_count": traces[0]["id"] - last_id - 1}, event="trace-gap")
+                    last_id = traces[0]["id"] - 1
+                for trace in traces:
+                    if trace["id"] > last_id:
                         yield _sse_event(trace, event="trace")
-                    last_count = current_count
+                        last_id = trace["id"]
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         _logger.debug("sse_stream_closed", extra={"stream": "traces"})
