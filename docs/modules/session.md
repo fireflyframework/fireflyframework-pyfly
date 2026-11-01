@@ -181,6 +181,57 @@ expires; a write purges a batch of expired sessions at most once per `purge_inte
 and `purge_expired()` deletes them all. Each operation joins the unit of work bound for the store's
 datasource, and outside one is a single statement.
 
+### Observe the actual store deadline
+
+The optional `SessionExpiryStore` port is exported from `pyfly.session` and
+`pyfly.session.ports`. It adds one read-only operation:
+
+```python
+from pyfly.session import SessionExpiryStore, SessionStore
+
+async def deadline(store: SessionStore, session_id: str):
+    if isinstance(store, SessionExpiryStore):
+        return await store.expires_at(session_id)
+    return None
+```
+
+All three shipped stores implement it. SQL reads the stored UTC `expires_at`
+on the primary in a fresh read-only unit, even when a caller has a replica
+snapshot. Memory observes its remaining monotonic TTL and expresses it in
+UTC at the observation time. Redis compatibility reads server time and
+`PTTL` atomically without reading session attributes. Missing, expired or
+non-expiring entries return `None`. A custom store without this optional
+port remains supported; an application must show no countdown when the
+deadline is unknown.
+
+This observation never saves, renews, rotates or recreates a session. It is
+not a liveness or authorization guarantee: logout, concurrency eviction or
+another session write may change the result immediately. An application
+exposing a deadline should authenticate the request, return only the current
+session's expiry and server time with `Cache-Control: no-store`, and never
+return its session ID, attributes, credentials or token claims. Every later
+business request must still pass its normal authentication and authorization.
+
+`pyfly.session.ttl` applies when the session is saved, conditionally replaced
+or renamed. The filter saves a new or explicitly modified session; ordinary
+attribute reads and expiry observations do not extend the store's deadline.
+The cookie's `Max-Age` is reissued on access, so cookie lifetime alone is not
+the remaining server session lifetime. `HttpSession.last_accessed` describes
+the current load, not a persisted idle timeout. There is no separate hard or
+sliding-idle policy introduced by this port. SSO renewal uses the existing
+authorization-code flow and session rotation; it does not change token,
+membership, concurrency or identity-provider policies.
+
+`HttpSession.authenticated_at` observes the server time of its last
+`rotate_id(on_login=True)` call, or `None` for a session with no recorded
+fresh-login rotation. It survives persistence and ordinary privilege
+rotations. This is session metadata, not the identity provider's signed
+`auth_time` claim, and it grants no authority. Starting OAuth may itself
+save state and extend the existing store deadline before the callback;
+a new expiry alone must never be presented as completed authentication.
+An application confirming renewal can observe a changed login timestamp
+and then revalidate the current canonical principal and permissions.
+
 ### `SessionFilter`
 
 ```python

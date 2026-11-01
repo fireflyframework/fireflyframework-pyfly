@@ -19,6 +19,7 @@ import dataclasses
 import importlib
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 _logger = logging.getLogger(__name__)
@@ -35,6 +36,15 @@ end
 redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
 redis.call('DEL', KEYS[1])
 return 1
+"""
+
+_EXPIRY = """
+local now = redis.call('TIME')
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl <= 0 then
+  return nil
+end
+return {now[1], now[2], ttl}
 """
 
 # Tagged dataclass types allowed to be reconstructed from session JSON on read.
@@ -101,6 +111,7 @@ class RedisSessionStore:
     def __init__(self, client: Any) -> None:
         self._client = client
         self._rename: Any = None
+        self._expiry: Any = None
 
     def _key(self, session_id: str) -> str:
         return f"{_KEY_PREFIX}{session_id}"
@@ -120,6 +131,17 @@ class RedisSessionStore:
         """Serialize and store session data with a TTL in seconds."""
         raw = json.dumps(data, default=_json_default)
         await self._client.set(self._key(session_id), raw.encode(), ex=ttl)
+
+    async def expires_at(self, session_id: str) -> datetime | None:
+        """Observe server time and remaining TTL atomically; never read attributes or touch the key."""
+        if self._expiry is None:
+            self._expiry = self._client.register_script(_EXPIRY)
+        result = await self._expiry(keys=[self._key(session_id)])
+        if not result or len(result) != 3 or int(result[2]) <= 0:
+            return None
+        return datetime.fromtimestamp(int(result[0]), UTC) + timedelta(
+            microseconds=int(result[1]), milliseconds=int(result[2])
+        )
 
     async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
         """Serialize and store the session data with a TTL in seconds only if the key exists (``SET ... XX``,

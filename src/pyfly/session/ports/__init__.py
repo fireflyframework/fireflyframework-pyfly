@@ -14,6 +14,6 @@
 """Session ports — abstract interfaces for the session module."""
 
 from pyfly.session.concurrency import SessionRegistry
-from pyfly.session.ports.outbound import SessionStore
+from pyfly.session.ports.outbound import SessionExpiryStore, SessionStore
 
-__all__ = ["SessionRegistry", "SessionStore"]
+__all__ = ["SessionExpiryStore", "SessionRegistry", "SessionStore"]
