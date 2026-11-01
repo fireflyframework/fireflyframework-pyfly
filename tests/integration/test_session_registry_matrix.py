@@ -452,6 +452,22 @@ async def test_replace_changes_only_a_session_the_store_holds(relational_backend
         assert await store.get("sid") is None
 
 
+async def test_expiry_is_shared_read_only_and_revocation_stays_final(relational_backend: RelationalBackend) -> None:
+    now = [datetime.now(UTC)]
+    async with repository_datasources(relational_backend) as datasources:
+        first = SqlSessionStore(datasources.registry.primary, clock=lambda: now[0], purge_interval=None)
+        second = SqlSessionStore(datasources.registry.primary, clock=lambda: now[0], purge_interval=None)
+        await first.save("expiry", {"private": "unchanged"}, ttl=60)
+        deadline = now[0] + timedelta(seconds=60)
+        assert await second.expires_at("expiry") == deadline
+        now[0] += timedelta(seconds=30)
+        assert await second.expires_at("expiry") == deadline
+        assert await first.get("expiry") == {"private": "unchanged"}
+        await first.delete("expiry")
+        assert await second.expires_at("expiry") is None
+        assert not await second.replace("expiry", {}, ttl=60)
+
+
 async def test_rename_moves_only_a_session_the_store_holds(relational_backend: RelationalBackend) -> None:
     now = [datetime.now(UTC)]
     async with repository_datasources(relational_backend) as datasources:

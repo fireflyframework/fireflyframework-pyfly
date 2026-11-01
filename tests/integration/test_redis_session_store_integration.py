@@ -131,6 +131,35 @@ async def test_session_store_get_missing_returns_none(redis_url: str) -> None:
 
 @requires_docker
 @pytest.mark.asyncio
+async def test_expiry_reads_server_deadline_without_renewing_or_recreating(redis_url: str) -> None:
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    import redis.asyncio as aioredis
+
+    from pyfly.session.adapters.redis import RedisSessionStore
+
+    client = aioredis.from_url(redis_url)
+    try:
+        store = RedisSessionStore(client)
+        sid = "expiry-" + uuid.uuid4().hex
+        assert await store.expires_at(sid) is None
+        await store.save(sid, {"private": "not returned by expiry"}, ttl=60)
+        before = datetime.now(UTC)
+        deadline = await store.expires_at(sid)
+        assert deadline is not None and before < deadline <= datetime.now(UTC) + timedelta(seconds=60)
+        ttl_before = await client.pttl("pyfly:session:" + sid)
+        assert await store.expires_at(sid) == deadline
+        assert await client.pttl("pyfly:session:" + sid) <= ttl_before
+        await store.delete(sid)
+        assert await store.expires_at(sid) is None
+        assert not await store.exists(sid)
+    finally:
+        await client.aclose()
+
+
+@requires_docker
+@pytest.mark.asyncio
 async def test_session_store_replace_changes_only_a_session_redis_holds(redis_url: str) -> None:
     """replace() writes only over a session Redis still holds (``SET ... XX``) and moves its expiry on: a session
     deleted (logged out, evicted) or expired is not brought back."""
