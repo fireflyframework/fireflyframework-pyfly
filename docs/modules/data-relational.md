@@ -1752,6 +1752,53 @@ such as `event-store` in YAML, where the environment can still override its keys
 | `pyfly.data.relational.datasources.<name>.*` | inherited | A named datasource. It takes `url`, `echo`, `pool.*`, `connect-args.*`, `sqlite.*` and `read-replica.url`. |
 | `pyfly.data.relational.health.timeout` | `2` | Seconds each `db` health check may take. |
 
+### PostgreSQL TLS by driver
+
+The URL selects the driver, and `connect-args` passes directly to it. TLS fields are not portable
+between drivers. First mount the trusted CA bundle read-only and use the database DNS name covered
+by its certificate. Then choose the matching profile.
+
+For `asyncpg`, set `SSL_CERT_FILE` to the readable PEM trust bundle before starting Python and use:
+
+```yaml
+pyfly:
+  data:
+    relational:
+      url: postgresql+asyncpg://ROLE:PASSWORD@DATABASE_HOST:5432/DATABASE
+      connect-args:
+        ssl: true
+```
+
+The URL contains placeholders, not usable credentials; keep completed URLs in protected configuration.
+Asyncpg's boolean `ssl: true` creates Python's default SSL context, which requires a trusted certificate
+and verifies the hostname. `SSL_CERT_FILE` also affects other Python default-context clients in that
+process; provide the trust roots they need. Alternatively, an SQLAlchemy/asyncpg URL can use
+`?ssl=verify-full` with `PGSSLROOTCERT` pointing to its CA file. That named-mode path reads
+`PGSSLROOTCERT`; the boolean path uses Python's default trust. See the
+[asyncpg connection reference](https://magicstack.github.io/asyncpg/current/api/index.html#asyncpg.connection.connect).
+
+With psycopg 3 installed, use its own libpq options instead:
+
+```yaml
+pyfly:
+  data:
+    relational:
+      url: postgresql+psycopg://ROLE:PASSWORD@DATABASE_HOST:5432/DATABASE
+      connect-args:
+        sslmode: verify-full
+        sslrootcert: /etc/app/certs/database-ca.pem
+```
+
+The equivalent psycopg URL query is `?sslmode=verify-full&sslrootcert=/etc/app/certs/database-ca.pem`.
+Never pass asyncpg's `ssl` keyword to psycopg. See the
+[libpq connection parameters](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS).
+Named datasources inherit connect arguments only from a parent with the same driver; configure
+verification explicitly when selecting another driver. Operator application contexts can change
+credentials while retaining the runtime driver and TLS profile. Switching only the URL's driver
+while retaining its old connect arguments produces an incompatible profile.
+
+### Pool liveness and connection lifetime
+
 Why pre-ping is off by default: it adds a round trip to every checkout (+0.675 ms on asyncpg, which
 nearly doubles a short unit of work). These cover the same failures without that cost:
 
@@ -1778,11 +1825,14 @@ and 4 minutes by default on an Azure NAT Gateway and on an Azure Load Balancer, 
 the 1800 s default. A connection idle for longer than that timeout is then always older than
 `pool.recycle`, so the checkout replaces it instead of using it, with no reset for a pre-ping to
 absorb and no dropped packets to wait on; on asyncpg the replacement waits up to 2 s for the old
-connection to close. Or keep the flows alive with TCP keepalives more frequent than that timeout: on
-PostgreSQL, `connect-args.server_settings.tcp_keepalives_idle` (seconds) makes the server send them.
+connection to close. Or keep the flows alive with TCP keepalives more frequent than that timeout.
+With PostgreSQL/asyncpg, `connect-args.server_settings.tcp_keepalives_idle` (seconds) configures the
+server's keepalives. Psycopg accepts libpq connection fields such as `keepalives_idle` instead of
+asyncpg's `server_settings` mapping.
 
 On PostgreSQL, every connection carries `pyfly.app.name` as its `application_name`, which makes it
-visible in `pg_stat_activity`. Set `connect-args.server_settings.application_name` to override it.
+visible in `pg_stat_activity`. With asyncpg, set `connect-args.server_settings.application_name` to
+override it. With psycopg, use `connect-args.application_name` or the URL's `application_name` query.
 
 The keys `pyfly.data.url`, `pyfly.data.echo` and `pyfly.data.pool-size` used to be documented, but
 nothing read them. They are now **deprecated aliases** of `url`, `echo` and `pool.size`: they are
