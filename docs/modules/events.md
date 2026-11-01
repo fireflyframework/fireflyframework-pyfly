@@ -580,6 +580,27 @@ off for good (on MongoDB, `await MongoOutboxStore("document", database="shop").u
 with the database of `pyfly.data.document.database`: without `database=` the store takes the one the client's URI
 names, else `pyfly`).
 
+With native [audit recording](../audit.md) enabled for `eda`, the SQL outbox and journal must use the same native
+manager. The database/postgres buses and transactional publisher enroll their owned stores/relays through DI.
+Enqueue records `eda.outbox.enqueued` atomically with the event. Delivery renews the exact native claim and
+commits `eda.delivery.dispatched` intent before invoking a handler or broker. Only generated outbox IDs and
+digests of server-owned table/group/subscription identity reach audit facts; payloads, headers and envelope IDs
+are not copied into them.
+
+Strict delivery uses optional `AuditAdmissionJournal.admit_once`: an admitted command is never automatically
+admitted again after a lost acknowledgement, failed settlement, expired lease or process death. A provider error
+records an unknown outcome; all error strategies, including `RETRY` and `IGNORE`, preserve that terminal
+uncertainty for reconciliation instead of invoking the effect again. A committed intent without an observed
+result remains unresolved, even when the process died before the provider call. This conservative fence is not
+exactly-once delivery or proof of remote execution. Preserve subscription identity across restarts; changing
+table/group/handler identity requires deliberate reconciliation of prior unresolved commands.
+
+Strict mode rejects held Data units before claims, unsupported/nonmatching outbox stores, external dead-letter
+stores and a transactional publisher's non-forwarded destinations. It does not silently fall back to an
+unaudited external send. Direct plain broker adapters and Mongo enqueue are outside this automatic SQL slice.
+Archive infrastructure marked for the same journal skips these business hooks so its idempotent export retries
+remain independent. Without recording enabled for `eda`, the existing at-least-once behavior remains unchanged.
+
 The broker's bus builds the envelope it sends when the forwarder publishes: its `timestamp` is the instant of the
 forward, not of the publish in the unit (the event's id is kept, in `x-pyfly-event-id`). With the in-process bus
 (`provider: memory`) a forward is the whole fan-out to the `@event_listener` methods: when one of them raises, the

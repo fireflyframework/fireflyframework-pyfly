@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.29` | 2026-10-31 | Native audit journal, trusted module recording, signed archive delivery and conservative effect admission. |
 | `26.10.28` | 2026-10-31 | Verified email TLS, private diagnostics, explicit uncertain outcomes and optional Azure email. |
 | `26.10.27` | 2026-10-31 | Portable MCP sessions, scheduling control, transactional consumer fences and TLS/privacy policy. |
 | `26.10.26` | 2026-10-31 | Protect credential representations and expose frozen native text-rate quotes. |
@@ -126,20 +127,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.28"
+print(pyfly.__version__)  # → "26.10.29"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.28
+pyfly --version            # → pyfly, version 26.10.29
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.28) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.29) (Python 3.13.9)
 ```
 
 ---

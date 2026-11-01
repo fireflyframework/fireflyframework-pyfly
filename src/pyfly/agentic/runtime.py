@@ -37,6 +37,7 @@ from pyfly.agentic.reasoning.registry import ReasoningPatternRegistry
 from pyfly.agentic.tools.registry import ToolRegistry
 from pyfly.agentic.workflows.registry import WorkflowRegistry
 from pyfly.agentic.workflows.runner import ManagedAgentRunner
+from pyfly.audit.recording_binding import AuditRecordingSupport
 from pyfly.client.ports.outbound import HttpClientPort
 from pyfly.container.container import Container
 from pyfly.context.events import ApplicationEventPublisher
@@ -45,7 +46,9 @@ from pyfly.core.config import Config
 T = TypeVar("T")
 
 
-class AgenticRuntime:
+class AgenticRuntime(AuditRecordingSupport):
+    __pyfly_audit_module__ = "agentic"
+
     def __init__(
         self,
         config: AgenticConfig,

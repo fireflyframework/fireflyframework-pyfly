@@ -38,6 +38,8 @@ Table                             Used by
 ``pyfly_users``                   ``SqlUserDetailsService``
 ``pyfly_event_store``             ``SqlAlchemyEventStore`` (the event log, paged by global position)
 ``pyfly_event_store_head``        ``SqlAlchemyEventStore`` (the last global position given out)
+``pyfly_audit_entries``            ``SqlAuditJournal`` (immutable reference facts)
+``pyfly_audit_heads``              ``SqlAuditJournal`` (transaction-serialized chain heads)
 ``pyfly_snapshots``               ``SqlAlchemySnapshotStore``
 ``pyfly_projection_checkpoints``  ``SqlAlchemyCheckpointStore`` (the position of each projection)
 ``pyfly_outbox_events``           The transactional outbox (``pyfly.eda.outbox``): the event bus of the
@@ -113,6 +115,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AGENTIC_MEMORY",
+    "AUDIT_ENTRIES",
+    "AUDIT_HEADS",
     "CACHE_ENTRIES",
     "CREATE_ATTEMPTS",
     "EVENT_STORE",
@@ -143,6 +147,10 @@ __all__ = [
     "ZonelessUtcTimestamp",
     "agentic_memory",
     "agentic_memory_table",
+    "audit_entries",
+    "audit_entries_table",
+    "audit_heads",
+    "audit_heads_table",
     "cache_entries",
     "cache_entries_table",
     "context_datasource_registry",
@@ -224,6 +232,8 @@ LOCKS = "pyfly_locks"
 USERS = "pyfly_users"
 EVENT_STORE = "pyfly_event_store"
 EVENT_STORE_HEAD = "pyfly_event_store_head"
+AUDIT_ENTRIES = "pyfly_audit_entries"
+AUDIT_HEADS = "pyfly_audit_heads"
 SNAPSHOTS = "pyfly_snapshots"
 PROJECTION_CHECKPOINTS = "pyfly_projection_checkpoints"
 OUTBOX_EVENTS = "pyfly_outbox_events"
@@ -556,6 +566,39 @@ def event_store_head_table(name: str = EVENT_STORE_HEAD) -> Table:
     return _declare("event_store_head", name, build)
 
 
+def audit_entries_table(name: str = AUDIT_ENTRIES) -> Table:
+    """Immutable audit envelopes; mutation protection is installed by the audit schema adapter."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("chain_id", key_string(64), primary_key=True),
+            Column("sequence", BigInteger(), primary_key=True),
+            Column("event_id", key_string(128), nullable=False),
+            Column("entry_hash", key_string(64), nullable=False),
+            Column("payload", long_text(), nullable=False),
+            UniqueConstraint("chain_id", "event_id"),
+        )
+
+    return _declare("audit_entries", name, build)
+
+
+def audit_heads_table(name: str = AUDIT_HEADS) -> Table:
+    """One mutable serialization row per audit scope, updated in the business transaction."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("chain_id", key_string(64), primary_key=True),
+            Column("sequence", BigInteger(), nullable=False),
+            Column("entry_hash", key_string(64), nullable=False),
+        )
+
+    return _declare("audit_heads", name, build)
+
+
 def snapshots_table(name: str = SNAPSHOTS) -> Table:
     """The latest snapshot of each aggregate: its state (``payload``, JSON) as of event ``sequence``."""
 
@@ -874,6 +917,9 @@ event_store = event_store_table()
 
 event_store_head = event_store_head_table()
 """``pyfly_event_store_head`` (:func:`event_store_head_table`)."""
+
+audit_entries = audit_entries_table()
+audit_heads = audit_heads_table()
 
 snapshots = snapshots_table()
 """``pyfly_snapshots`` (:func:`snapshots_table`)."""

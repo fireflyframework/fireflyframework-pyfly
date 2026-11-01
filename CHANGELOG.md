@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.29 (2026-10-31)
+
+### Added
+
+- Add opt-in `pyfly.audit` frozen, bounded reference facts and an injectable native
+  SQL journal sharing the existing business Data unit and transactional outbox.
+- Serialize scoped hash chains, deduplicate stable event IDs, reject conflicting
+  facts and keep mandatory audit failures atomic with business state.
+- Provide cheap scoped high-watermarks, bounded reads, captured-prefix verification
+  and deterministic complete NDJSON export with concurrent/tamper checks.
+- Expose checkpoint signing/verifying ports and safe low-cardinality native
+  observability, provider-neutral archive/receipt ports, bounded signed segments
+  and native outbox delivery. Supply a create-only local filesystem adapter with
+  explicit unlocked storage limits and injected Ed25519 key resolvers.
+- Add opt-in trusted-context recording and native SQL repository, SQL outbox,
+  Agentic, HTTP dispatch and authentication/authorization hooks. Commit mandatory
+  external-effect intent before dispatch and retain observed/unknown outcomes
+  without copying model content, entity state, envelopes or HTTP credentials.
+- Add optional atomic once-only intent admission for stable native command IDs;
+  fence uncertain EDA deliveries and Agentic effects against automatic replay.
+  Expose configured modules and actual DI-bound adapters as a bounded coverage
+  report rather than claiming exhaustive application event capture.
+
+### Security
+
+- Reject ambiguous declared-port bean aliases instead of silently selecting one;
+  honor exactly one primary across every bound factory and retain all list candidates.
+- Reject audit entry updates/deletes and PostgreSQL truncation; prevent SQLite
+  replacement inserts from bypassing guards when recursive triggers are disabled.
+- Reject unbounded/content payload fields and redact native append storage errors
+  and caught-failure rollback diagnostics without changing rollback/savepoint state.
+- Refuse another manager's same-named native Data unit in transaction boundaries,
+  auto/infrastructure units and managed repository/session/stream access; caught
+  refusals mark the held unit rollback-only instead of crossing application contexts.
+- Fail startup when enabled native audit requires missing SQL extras; preserve
+  lightweight disabled discovery and explicitly supplied journal/archive adapters.
+- Preserve native rollback-test manager ownership without weakening application
+  isolation; refuse unsupported audited checkpoint resumes and tool boundary
+  overrides before provider dispatch.
+
+### Migration
+
+- Audit is opt-in. Apply native audit/outbox schema and mutation guards through the
+  schema owner before enabling a migration-managed deployment. Keep the application
+  role separate from the migration owner and use the business datasource.
+- Existing operational logs/traces are not automatically converted into a complete
+  journal. Hosts retain responsibility for authenticated scope/actor facts,
+  semantic event coverage, read/export permissions and retention acceptance.
+- Enroll recording modules explicitly and provide a trusted context resolver.
+  Review supported adapters and reconciliation requirements before enabling
+  strict delivery. Local archive readback is not business-table restoration,
+  independent signing custody, WORM retention or remote exactly-once execution.
+
 ## v26.10.28 (2026-10-31)
 
 ### Added

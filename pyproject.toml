@@ -7,7 +7,7 @@ name = "pyfly"
 # CalVer YY.MM.PATCH — package metadata uses PEP 440 normalized form (26.5.4);
 # git tag, GitHub release and human-readable display use leading-zero form
 # (v26.05.04) to match the Java/.NET/Go siblings.
-version = "26.10.28"
+version = "26.10.29"
 description = "The official Python implementation of the Firefly Framework — DI, CQRS, EDA, hexagonal architecture, and more."
 readme = "README.md"
 license = "Apache-2.0"
@@ -363,6 +363,9 @@ cqrs = "pyfly.cqrs.config.auto_configuration:CqrsAutoConfiguration"
 admin = "pyfly.admin.auto_configuration:AdminAutoConfiguration"
 transactional = "pyfly.transactional.auto_configuration:TransactionalEngineAutoConfiguration"
 eventsourcing = "pyfly.eventsourcing.auto_configuration:EventSourcingAutoConfiguration"
+audit = "pyfly.audit.auto_configuration:AuditAutoConfiguration"
+audit-recording = "pyfly.audit.recording_auto_configuration:AuditRecordingAutoConfiguration"
+audit-archive = "pyfly.audit.archive_auto_configuration:AuditArchiveAutoConfiguration"
 callbacks = "pyfly.callbacks.auto_configuration:CallbacksAutoConfiguration"
 webhooks = "pyfly.webhooks.auto_configuration:WebhooksAutoConfiguration"
 notifications = "pyfly.notifications.auto_configuration:NotificationsAutoConfiguration"
