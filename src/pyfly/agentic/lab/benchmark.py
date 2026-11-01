@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from copy import deepcopy
 
 from pydantic import BaseModel
 
+from pyfly.agentic.lab._inputs import LabInput, snapshot_input
 from pyfly.agentic.types import AgentLike
 
 
@@ -42,17 +44,19 @@ class Benchmark:
         inputs: Test prompts to run through each agent.
     """
 
-    def __init__(self, inputs: Sequence[str]) -> None:
-        self._inputs = list(inputs)
+    def __init__(self, inputs: Sequence[LabInput]) -> None:
+        self._inputs = [snapshot_input(value) for value in inputs]
 
     async def run(self, agent: AgentLike, agent_name: str = "") -> BenchmarkResult:
         """Benchmark *agent* against the configured inputs."""
         name = agent_name or getattr(agent, "name", "unknown")
         latencies: list[float] = []
+        inputs = [snapshot_input(value) for value in self._inputs]
 
-        for prompt in self._inputs:
+        for prompt in inputs:
+            invocation_input = deepcopy(prompt)
             start = time.perf_counter()
-            await agent.run(prompt)
+            await agent.run(invocation_input)
             elapsed = (time.perf_counter() - start) * 1000
             latencies.append(elapsed)
 
