@@ -124,6 +124,57 @@ approved resource bytes as inline `SkillResource(content=...)`, store a digest a
 exact skill value for execution. These primitives do not provide approval storage or a publication
 transaction.
 
+## Compose an immutable package
+
+`SkillPackage` groups native skills and fixes their transitive dependencies before agent
+assembly. The package freezes every member's resource text and records its exact key, version
+and content digest. A dependency names another member's internal skill key; it does not fetch a
+skill from a registry or authorize its tools.
+Entrypoints are default selections, not an access-control list: a trusted caller may explicitly
+select any member. The host must enforce resource access before admitting the package.
+
+```python
+from pyfly.agentic.skills import Skill, SkillPackage, SkillRequirements, SkillResource
+
+review = Skill(
+    key="review", name="Review", description="Review the close checklist.",
+    instructions='Read the approved memo with read_skill(key="review", path="memo.md").',
+    resources={"memo.md": SkillResource(path="memo.md", content="Check the close totals.")},
+)
+close = Skill(
+    key="close", name="Close", description="Close the books after review.",
+    instructions="Complete the Review skill before preparing the close.",
+    requires=SkillRequirements(skills=("review",)),
+)
+package = SkillPackage(
+    name="finance-close", version="1", skills=(close, review), entrypoints=("close",),
+)
+skills = package.resolve()  # Review, then Close; only the selected dependency closure.
+package.pins               # Immutable key/version/digest values for every package member.
+package.digest()           # Package identity also includes its name, version and entrypoints.
+```
+
+Pass this same `skills` tuple to `render_skills_section` and `build_read_skill_tool`, as in
+the agent example below. For a skill requiring an approved tool or connector, supply the already
+authorized names to `package.resolve(tools=(...), connectors=(...))`. Missing capabilities fail
+before assembly. This requirement check does not itself enforce the host's authorization policy.
+
+Duplicate keys, missing dependencies, cycles (including unused members), invalid entrypoints,
+unavailable resources and more than 128 members fail at package creation. Resources are limited to
+8 MiB across the complete package; the existing per-resource and assembled-prompt limits still
+apply. Member order does not change the package identity. Changing resource bytes, member
+configuration, dependencies, version or entrypoints does. Skill bodies are still rendered into
+the prompt; only resource retrieval is on demand.
+
+Member pins retain the existing native `Skill.digest()` contract. The package digest additionally
+binds member metadata and resource media types, which the legacy native digest omits. Comparing
+only member pins is insufficient to establish the complete package identity.
+
+This API is an in-memory composition primitive. It does not implement archive import/export,
+publisher signatures, automatic installation, catalog permissions or script execution. The
+package identity is a PyFly extension; it does not change the portable Agent Skills specification
+or silently migrate existing internal skill keys and display names.
+
 ## Put it on an agent
 
 ```python
