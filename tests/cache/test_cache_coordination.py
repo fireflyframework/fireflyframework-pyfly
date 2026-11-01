@@ -378,3 +378,53 @@ async def test_database_ttl_is_elapsed_seconds_across_session_timezone_dst(
             )
         ).scalar_one()
     assert expiry == instant + timedelta(seconds=86400)
+
+
+@pytest.mark.parametrize("month, day", [(3, 8), (11, 1)])
+@pytest.mark.parametrize("operation", ["compare_and_set", "consume_window"])
+async def test_psycopg_coordination_uses_utc_elapsed_time(
+    relational_backend: RelationalBackend,
+    month: int,
+    day: int,
+    operation: str,
+) -> None:
+    from datetime import UTC, datetime
+
+    from sqlalchemy import event
+
+    from pyfly.data.relational.framework_schema import cache_entries, cache_windows
+
+    pytest.importorskip("psycopg")
+    engine = relational_backend.with_driver("psycopg").create_engine(
+        connect_args={"options": "-c timezone=America/Los_Angeles"}
+    )
+    instant = datetime(2026, month, day, 4, tzinfo=UTC)
+    current = instant
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute", retval=True)
+    def fixed_database_clock(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT clock_timestamp()"):
+            return f"SELECT TIMESTAMPTZ '{current.isoformat()}'", parameters
+        return statement, parameters
+
+    cache = PostgresCacheAdapter(engine, purge_interval=None)
+    await cache.start()
+    if operation == "compare_and_set":
+        await cache.put("dst-owner", "a")
+        assert await cache.compare_and_set("dst-owner", "a", "b", timedelta(days=1))
+        table = cache_entries
+    else:
+        assert await cache.consume_window("dst-owner", 1, timedelta(days=1))
+        table = cache_windows
+    async with engine.connect() as connection:
+        expiry = (
+            await connection.execute(
+                select(table.c.expires_at).where(table.c.cache_key == cache.namespace + "dst-owner")
+            )
+        ).scalar_one()
+    assert expiry == instant + timedelta(seconds=86400)
+    if operation == "consume_window":
+        current = instant + timedelta(seconds=86399)
+        assert not await cache.consume_window("dst-owner", 1, timedelta(days=1))
+        current = instant + timedelta(seconds=86400)
+        assert await cache.consume_window("dst-owner", 1, timedelta(days=1))

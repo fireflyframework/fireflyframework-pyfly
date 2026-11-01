@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, func, select, update
@@ -63,7 +63,7 @@ async def _locked_match(cache: PostgresCacheAdapter, session: Any, key: str, exp
         return None
     # A predicate in UPDATE/DELETE may be evaluated before waiting on an unchanged row lock. The
     # explicit lock must precede the clock read, or an owner could act after its lease expired.
-    now: datetime = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+    now = await _database_clock(session)
     if bytes(row.value) != expected or (row.expires_at is not None and row.expires_at <= now):
         return None
     return now
@@ -92,7 +92,7 @@ async def consume_window(cache: PostgresCacheAdapter, key: str, limit: int, wind
     async with cache._coordination_unit() as session:
         row = (await session.execute(locked_statement)).one()
         # Read after acquiring the row lock: time spent waiting is not charged to the caller's window.
-        now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+        now = await _database_clock(session)
         if row.expires_at > now and row.window_microseconds != micros:
             raise ValueError("Changing a live cache window requires a policy-versioned key")
         events = [datetime.fromisoformat(value) for value in row.events] if row.expires_at > now else []
@@ -119,6 +119,14 @@ async def clear_window(cache: PostgresCacheAdapter, key: str) -> bool:
     statement = delete(table).where(table.c.cache_key == _key(cache, key)).returning(table.c.cache_key)
     async with cache._coordination_unit() as session:
         return (await session.execute(statement)).scalar_one_or_none() is not None
+
+
+async def _database_clock(session: Any) -> datetime:
+    value = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("PostgreSQL cache coordination requires a timezone-aware database clock")
+    # Drivers may return a session-local ZoneInfo. Do duration arithmetic on UTC instants, not wall time.
+    return value.astimezone(UTC)
 
 
 async def purge_expired_windows(cache: PostgresCacheAdapter) -> int:
