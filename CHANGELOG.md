@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.11.02 (2026-11-01)
+
+### Added
+
+- Add optional `SessionExpiryStore.expires_at()` observations to the SQL, in-memory
+  and explicit Redis session stores without reading attributes, renewing TTL or
+  changing custom-store compatibility. SQL observations use a fresh primary read.
+- Record `HttpSession.authenticated_at` only on a fresh-login rotation, allowing
+  applications to distinguish completed authentication from OAuth state persistence.
+  This observation is not an identity-provider claim or an authority grant.
+
 ## v26.11.01 (2026-11-01)
 
 ### Added
