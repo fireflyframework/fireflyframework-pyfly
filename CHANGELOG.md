@@ -21,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   mutates its argument. Reject non-JSON values, nonfinite numbers and cyclic inputs.
 - Preserve custom evaluation-case fields during dataset export, and exclude input-copy
   overhead from measured benchmark latency.
+- Encode Unicode SMTP text and HTML bodies for seven-bit servers while preserving
+  message content, attachments and blind-recipient privacy.
 
 ## v26.10.32 (2026-10-31)
 
