@@ -347,3 +347,33 @@ async def test_explicit_cache_clock_remains_an_opt_in_override(relational_backen
     instant += timedelta(seconds=31)
     assert await child.get("key") is None
     assert await child.purge_expired() == 1
+
+
+@pytest.mark.parametrize("month, day", [(3, 8), (11, 1)])
+@pytest.mark.parametrize("operation", ["put", "put_if_absent"])
+async def test_database_ttl_is_elapsed_seconds_across_session_timezone_dst(
+    relational_backend: RelationalBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    month: int,
+    day: int,
+    operation: str,
+) -> None:
+    from datetime import UTC, datetime
+
+    from sqlalchemy import DateTime, literal
+
+    from pyfly.data.relational.framework_schema import cache_entries
+
+    engine = relational_backend.create_engine(connect_args={"server_settings": {"timezone": "America/Los_Angeles"}})
+    cache = PostgresCacheAdapter(engine, purge_interval=None)
+    await cache.start()
+    instant = datetime(2026, month, day, 4, tzinfo=UTC)
+    monkeypatch.setattr(cache, "_now", lambda: literal(instant, type_=DateTime(timezone=True)))
+    await getattr(cache, operation)("dst", "value", timedelta(days=1))
+    async with engine.connect() as connection:
+        expiry = (
+            await connection.execute(
+                select(cache_entries.c.expires_at).where(cache_entries.c.cache_key == cache.namespace + "dst")
+            )
+        ).scalar_one()
+    assert expiry == instant + timedelta(seconds=86400)

@@ -380,6 +380,17 @@ class PostgresCacheAdapter:
             return func.clock_timestamp()
         return datetime.now(UTC)
 
+    def _expiry(self, ttl: timedelta | None, *, now: Any = None) -> Any:
+        if ttl is None:
+            return None
+        now = self._now() if now is None else now
+        if self._clock is None and self._backend == "postgresql":
+            from sqlalchemy import func
+
+            # PostgreSQL interval days follow session-local DST; a TTL is elapsed seconds.
+            return now + func.make_interval(0, 0, 0, 0, 0, 0, ttl.total_seconds())
+        return now + ttl
+
     def _live(self, now: Any) -> ColumnElement[bool]:
         from sqlalchemy import or_
 
@@ -423,7 +434,7 @@ class PostgresCacheAdapter:
         values = {
             "cache_key": stored_key,
             "value": cache_dumps(value),
-            "expires_at": self._now() + ttl if ttl is not None else None,
+            "expires_at": self._expiry(ttl),
         }
         async with self._writing(single_statement=native_upsert(self._backend)) as session:
             await upsert(session, self._table, values, key=["cache_key"])
@@ -469,7 +480,7 @@ class PostgresCacheAdapter:
         values = {
             "cache_key": stored_key,
             "value": cache_dumps(value),
-            "expires_at": now + ttl if ttl is not None else None,
+            "expires_at": self._expiry(ttl, now=now),
         }
         expired = table.c.expires_at <= now
         if native_conditional_insert(self._backend):
