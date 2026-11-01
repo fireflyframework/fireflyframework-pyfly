@@ -1,4 +1,5 @@
 # Copyright 2026 Firefly Software Foundation. Licensed under the Apache License, Version 2.0.
+# SPDX-License-Identifier: Apache-2.0
 """The shared native cache is an explicit infrastructure dependency when enabled."""
 
 from datetime import timedelta

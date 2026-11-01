@@ -1,4 +1,5 @@
 # Copyright 2026 Firefly Software Foundation. Licensed under the Apache License, Version 2.0.
+# SPDX-License-Identifier: Apache-2.0
 """PostgreSQL cache adapter's atomic operations over primary units and database time."""
 
 from __future__ import annotations
