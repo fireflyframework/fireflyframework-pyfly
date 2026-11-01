@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.32 (2026-10-31)
+
+### Fixed
+
+- Consume Azure email request logging options through an explicitly disabled logging policy before
+  the aiohttp transport. Sending and same-operation status lookup no longer fail locally with an
+  unexpected `logging_enable` argument. Keep logging disabled, retries and redirects blocked, and
+  ambiguous provider outcomes unchanged; this correction does not replay prior unknown submissions.
+
 ## v26.10.31 (2026-10-31)
 
 ### Added

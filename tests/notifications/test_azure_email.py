@@ -145,6 +145,38 @@ async def test_real_sdk_maps_cid_stable_operation_and_bounded_same_endpoint_stat
     assert transport.closed == 1 and credential.closed == 0
 
 
+@pytest.mark.parametrize("operation,method", [("send", "POST"), ("status", "GET")])
+async def test_real_aiohttp_transport_consumes_logging_option_before_request(monkeypatch, caplog, operation, method):
+    import socket
+
+    import aiohttp
+    from azure.core.pipeline.transport import AioHttpTransport
+
+    calls = []
+
+    async def deny_connection(self, request, *args, **kwargs):
+        calls.append(request.method)
+        raise aiohttp.ClientConnectionError("synthetic-private-inert-connection")
+
+    def deny_socket(*args, **kwargs):
+        raise AssertionError("This transport contract must never open a socket")
+
+    monkeypatch.setattr(aiohttp.TCPConnector, "connect", deny_connection)
+    monkeypatch.setattr(socket.socket, "connect", deny_socket)
+    transport, credential = AioHttpTransport(), Credential()
+    provider = native(monkeypatch, transport, credential)
+    try:
+        result = await provider.send(message()) if operation == "send" else await provider.get_status(message().id)
+        assert result.status == EmailStatus.UNKNOWN
+        assert result.provider_id == provider.operation_id(message().id)
+        assert calls == [method], "Actual aiohttp must accept request options before the inert connection guard"
+        assert "synthetic-private" not in caplog.text
+        assert "recipient@example.test" not in caplog.text
+    finally:
+        await provider.stop()
+    assert transport.session is None and credential.closed == 0
+
+
 async def test_pending_sdk_operation_times_out_unknown_without_post_replay(monkeypatch):
     transport = Transport(terminal="Running")
     provider = native(monkeypatch, transport, poll_timeout=0.025, poll_interval=0.005)

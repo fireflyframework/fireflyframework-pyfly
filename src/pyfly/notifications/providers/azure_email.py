@@ -103,6 +103,7 @@ class AzureCommunicationEmailProvider:
                     ContentDecodePolicy,
                     CustomHookPolicy,
                     HeadersPolicy,
+                    NetworkTraceLoggingPolicy,
                     RequestIdPolicy,
                     UserAgentPolicy,
                 )
@@ -128,6 +129,7 @@ class AzureCommunicationEmailProvider:
                     AsyncRedirectPolicy(permit_redirects=False),
                     AsyncRetryPolicy(retry_total=0),
                     NoReplayBearerPolicy(self._credential, "https://communication.azure.com//.default"),
+                    NetworkTraceLoggingPolicy(logging_enable=False),
                     CustomHookPolicy(),
                 ]
                 self._client = EmailClient(
