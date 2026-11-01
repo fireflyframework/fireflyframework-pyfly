@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   independent primary transactions, bounded event history and bounded expired-bucket cleanup.
 - Declare `pyfly_cache_windows` on framework metadata for operator-owned migrations.
   Native DI exposes coordination and the cache on the same adapter and datasource.
+- Bind the owning application's transaction registry outside the complete native HTTP/WebSocket
+  middleware stack, including management and streaming responses. Expose `bind_registry` for explicit
+  headless ownership, with nested/error/cancellation restoration and explicit no-registry masking.
 
 ### Changed
 
@@ -30,6 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Recheck conditional-value expiry after acquiring the row lock, so an expired owner cannot act after
   waiting. Skip locked expiry candidates and recheck their expiry during deletion, preserving owners
   renewed concurrently with cache cleanup.
+- Keep PostgreSQL TTLs and coordination windows in UTC elapsed seconds across session-local DST,
+  and prevent another started application context redirecting a request's plain transaction calls.
 
 ## v26.10.30 (2026-10-31)
 

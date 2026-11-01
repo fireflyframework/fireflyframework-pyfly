@@ -30,6 +30,7 @@ from starlette.middleware import Middleware
 from starlette.routing import BaseRoute, Mount
 
 from pyfly.container.ordering import get_order
+from pyfly.web.adapters.starlette.context_bound import ContextBoundStarlette
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
 from pyfly.web.adapters.starlette.filters import (
     CorrelationFilter,
@@ -166,5 +167,5 @@ def create_management_app(
     if base_path:
         # Mount everything under the configured base path (Spring base-path).
         inner = Starlette(routes=routes)
-        return Starlette(middleware=middleware, routes=[Mount(base_path, app=inner)])
-    return Starlette(middleware=middleware, routes=routes)
+        return ContextBoundStarlette(pyfly_context=context, middleware=middleware, routes=[Mount(base_path, app=inner)])
+    return ContextBoundStarlette(pyfly_context=context, middleware=middleware, routes=routes)
