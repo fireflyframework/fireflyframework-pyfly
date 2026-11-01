@@ -240,6 +240,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           persistent-wheel/bin/python - <<'PY'
+          import ast
           import hashlib
           import importlib.metadata
           import json
@@ -252,10 +253,19 @@ jobs:
           import pyfly
           from pyfly.agentic.execution import MontyEnvironment
           assert "site-packages" in pyfly.__file__, pyfly.__file__
-          assert pyfly.__version__ == importlib.metadata.version("pyfly")
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          project = tomllib.loads((workspace / "pyproject.toml").read_text())
+          assert importlib.metadata.version("pyfly") == project["project"]["version"]
+          source = ast.parse((workspace / "src/pyfly/__init__.py").read_text())
+          display_versions = [
+              node.value.value for node in source.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+              and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+          ]
+          assert display_versions == [pyfly.__version__]
           with MontyEnvironment().create_session() as session:
               assert session.feed("40 + 2").result.output == 42
-          workspace = Path(os.environ["GITHUB_WORKSPACE"])
           lock = tomllib.loads((workspace / "uv.lock").read_text())
           locked = {item["name"]: item for item in lock["package"]}
           native = {}

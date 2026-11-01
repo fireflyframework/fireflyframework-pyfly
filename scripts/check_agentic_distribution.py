@@ -7,6 +7,7 @@ creates new environments outside the checkout and retains all command logs.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -36,6 +37,8 @@ import logging
 import sys
 import threading
 from pathlib import Path
+
+import pyfly
 
 MODE = sys.argv[1]
 CHECKOUT = Path(sys.argv[2]).resolve()
@@ -296,6 +299,7 @@ result.update(
         "mode": MODE,
         "python": sys.version.split()[0],
         "pyfly_version": importlib.metadata.version("pyfly"),
+        "pyfly_display_version": pyfly.__version__,
         "installed_prefix": sys.prefix,
         "working_directory": str(Path.cwd()),
     }
@@ -465,7 +469,18 @@ def installed_lane(artifact: Path, mode: str, python: str, work: Path, root: Pat
         next(line.removeprefix("RESULT_JSON=") for line in output if line.startswith("RESULT_JSON="))
     )
     expected_version = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-    if smoke["pyfly_version"] != expected_version:
+    version_source = ast.parse((root / "src/pyfly/__init__.py").read_text(encoding="utf-8"))
+    display_versions = [
+        node.value.value
+        for node in version_source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    ]
+    if len(display_versions) != 1:
+        raise ValueError("Native source must declare one literal display version")
+    if smoke.get("pyfly_version") != expected_version or smoke.get("pyfly_display_version") != display_versions[0]:
         return {"lane": label, "passed": False, "error": "Installed version differs from native project", "logs": logs}
     return smoke | {"lane": label, "passed": True, "logs": logs}
 
