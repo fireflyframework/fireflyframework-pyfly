@@ -151,3 +151,50 @@ def test_native_extra_composes_reviewed_framework_data_dependencies(checker: Any
         "supporting_extras": {"data-relational": ["sqlalchemy[asyncio]>=2.0.50"]},
     }
     assert checker.check_dependency_metadata(content, manifest) == 1
+
+
+@pytest.mark.parametrize(
+    ("metadata_version", "display_version", "passed"),
+    [
+        ("26.11.1", "26.11.01", True),
+        ("26.10.32", "26.11.01", False),
+        ("26.11.01", "26.11.01", False),
+        ("26.11.1", "26.11.1", False),
+        ("26.11.1", "26.10.32", False),
+    ],
+)
+def test_installed_lane_checks_exact_normalized_metadata_and_display_versions(
+    checker: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_version: str,
+    display_version: str,
+    passed: bool,
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    source = tmp_path / "source"
+    (source / "src/pyfly").mkdir(parents=True)
+    (source / "pyproject.toml").write_text('[project]\nversion = "26.11.1"\n')
+    (source / "src/pyfly/__init__.py").write_text('__version__ = "26.11.01"\n')
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def run(command: list[str], **kwargs: Any) -> Any:
+        if "-c" in command:
+            kwargs["stdout"].write(
+                "RESULT_JSON="
+                + json.dumps(
+                    {
+                        "pyfly_version": metadata_version,
+                        "pyfly_display_version": display_version,
+                    }
+                )
+                + "\n"
+            )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(checker.subprocess, "run", run)
+    result = checker.installed_lane(tmp_path / "candidate.whl", "base", "python", work, source)
+    assert result["passed"] is passed

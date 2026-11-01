@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.11.01 (2026-11-01)
+
+### Added
+
+- Expose native `LabInput` for text or finite JSON objects across datasets, evaluations,
+  benchmarks, comparisons and sessions. Mapping-aware runners receive actual objects;
+  existing text input, output strings and scorer semantics remain compatible.
+
+### Fixed
+
+- Validate complete Lab input batches before invoking runners and give each invocation
+  an independent snapshot, preserving authored inputs and recorded results when a runner
+  mutates its argument. Reject non-JSON values, nonfinite numbers and cyclic inputs.
+- Preserve custom evaluation-case fields during dataset export, and exclude input-copy
+  overhead from measured benchmark latency.
+
 ## v26.10.32 (2026-10-31)
 
 ### Fixed
