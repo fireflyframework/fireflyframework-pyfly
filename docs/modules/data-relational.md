@@ -2418,6 +2418,31 @@ Resolved per call, in this order:
 A unit on one datasource never satisfies a join on another: a `REQUIRED` call on `reporting` inside a
 unit on `primary` begins `reporting`'s own unit (there is no two-phase commit between them).
 
+Native Starlette/FastAPI applications created with `context=...` bind that application's transaction
+registry for the complete HTTP/WebSocket call, including middleware added later, SSE/MCP streaming,
+and separate management listeners. Starting another context in the same process cannot redirect a
+plain `@transactional` call or `TransactionTemplate("primary")` to its database. A context without Data
+cannot borrow another application's managers. Errors, cancellation and nested calls restore the prior
+binding. The manager-identity fence remains enforced; binding a different registry does not let a
+transaction join a unit owned by another manager.
+
+Headless embedding can select ownership explicitly without carrying a request, authentication or unit
+of work into an isolated task:
+
+```python
+from pyfly.data.transaction import TransactionManagerRegistry, bind_registry
+
+registry = context.get_bean(TransactionManagerRegistry)
+with bind_registry(registry):
+    await service.perform_operation()
+```
+
+`bind_registry(None)` explicitly masks the process fallback. Unbound calls and contextless web apps
+retain the legacy process-installed registry. Native lifespan startup/shutdown retain their existing
+context lifecycle. A deliberately fresh `contextvars.Context()` inherits no registry; bind only the
+trusted application's registry inside it when that task needs Data. Registry binding grants no caller
+authority and does not copy authentication or an existing transaction.
+
 #### Propagation Types
 
 | Propagation | A unit is bound for the datasource | None is bound |

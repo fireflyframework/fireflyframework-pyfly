@@ -6239,7 +6239,7 @@ wheels = [
 
 [[package]]
 name = "pyfly"
-version = "26.10.30"
+version = "26.10.31"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -6647,7 +6647,11 @@ argon2 = [
     { name = "argon2-cffi" },
 ]
 cache = [
+    { name = "aiosqlite" },
+    { name = "alembic" },
+    { name = "asyncpg" },
     { name = "redis", extra = ["hiredis"] },
+    { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 cli = [
     { name = "click" },
@@ -6975,6 +6979,7 @@ requires-dist = [
     { name = "pyfly", extras = ["agentic", "data-relational"], marker = "extra == 'agentic-relational'" },
     { name = "pyfly", extras = ["agentic", "data-relational", "postgresql"], marker = "extra == 'agentic-postgres'" },
     { name = "pyfly", extras = ["agentic", "data-relational", "postgresql"], marker = "extra == 'agentic-vectorstores-pgvector'" },
+    { name = "pyfly", extras = ["data-relational", "postgresql"], marker = "extra == 'cache'" },
     { name = "pyfly", extras = ["fastapi", "granian"], marker = "extra == 'web-fastapi'" },
     { name = "pyfly", extras = ["notifications"], marker = "extra == 'notifications-azure'" },
     { name = "pyfly", extras = ["web", "granian"], marker = "extra == 'web-fast'" },

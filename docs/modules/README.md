@@ -100,7 +100,7 @@ Make your services resilient with circuit breakers, rate limiters, and intellige
 |-------|-------------------|
 | [Resilience](resilience.md) | `@rate_limiter`, `@bulkhead`, `@time_limiter`, `@fallback`, sliding window algorithms, concurrent execution limiting |
 | [HTTP Client](client.md) | `HttpClientPort`, `@service_client`, `@http_client`, `CircuitBreaker`, `RetryPolicy`, HTTPX adapter, timeout configuration |
-| [Caching](caching.md) | `CacheAdapter`, `CacheManager`, `@cacheable`, `@cache_evict`, `@cache_put`, Redis adapter, in-memory adapter, TTL configuration |
+| [Caching](caching.md) | PostgreSQL default, `CacheAdapter`, optional `CacheCoordination`, typed decorators, namespaces, TTL and rolling-window admission; explicit Redis/in-memory alternatives |
 
 ---
 
@@ -207,7 +207,7 @@ pyfly/
 ├── messaging/       Kafka, RabbitMQ, in-memory broker
 ├── eda/             Event-driven architecture, event bus
 ├── cqrs/            Command/Query segregation, CommandBus/QueryBus
-├── cache/           Redis, in-memory caching
+├── cache/           PostgreSQL default, optional Redis/in-memory caching
 ├── client/          HTTP client, circuit breaker, retry
 ├── scheduling/      Cron jobs, task scheduler
 ├── resilience/      Rate limiter, bulkhead, timeout

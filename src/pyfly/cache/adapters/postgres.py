@@ -66,6 +66,7 @@ from pyfly.data.transaction import (
     after_commit,
     current_unit_of_work,
     infrastructure_unit,
+    outside_transaction,
     resolve_manager,
 )
 
@@ -160,7 +161,8 @@ class PostgresCacheAdapter:
         create_table: create the table at :meth:`start` when it is missing (otherwise only check it).
         purge_interval: how often a write purges expired rows (``None``: only :meth:`purge_expired` does).
         table_name: the table (declared on the framework metadata under that name).
-        clock: the current UTC instant (tests pass their own).
+        window_table_name: the separate rolling-window table, also declared on framework metadata.
+        clock: explicit UTC clock override; PostgreSQL defaults to database time, other backends to UTC.
         namespace: the key prefix of this cache's entries in the table (``pyfly:cache:``); a ``:`` is
             appended when it does not end with one, so :meth:`clear` never reaches a namespace that merely
             starts with it. An empty namespace declares that the cache owns the whole table: :meth:`clear`
@@ -179,6 +181,7 @@ class PostgresCacheAdapter:
         table_name: str = "pyfly_cache_entries",
         clock: Callable[[], datetime] | None = None,
         namespace: str = DEFAULT_NAMESPACE,
+        window_table_name: str = "pyfly_cache_windows",
     ) -> None:
         self._target = engine
         self._namespace = namespace if not namespace or namespace.endswith(":") else f"{namespace}:"
@@ -186,10 +189,12 @@ class PostgresCacheAdapter:
         self._create_table = create_table
         self._purge_interval = purge_interval.total_seconds() if purge_interval is not None else None
         self._table_name = table_name
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._window_table_name = window_table_name
+        self._clock = clock
         self._table_object: Table | None = None
         self._dialect: str | None = None
         self._last_purge = time.monotonic()
+        self._last_window_purge = time.monotonic()
         self._hits = 0
         self._misses = 0
         self._evictions = 0
@@ -203,7 +208,7 @@ class PostgresCacheAdapter:
         """Create the cache table when allowed and check it (idempotent)."""
         from pyfly.data.relational.framework_schema import ensure_tables
 
-        await ensure_tables(self._target, self._table, create=self._create_table)
+        await ensure_tables(self._target, self._table, self._window_table, create=self._create_table)
         self._started = True
 
     async def stop(self) -> None:
@@ -242,6 +247,7 @@ class PostgresCacheAdapter:
             table_name=self._table_name,
             clock=self._clock,
             namespace=f"{base}.{name}:" if base else f"{name}:",
+            window_table_name=self._window_table_name,
         )
         dedicated._started = self._started
         return dedicated
@@ -273,6 +279,72 @@ class PostgresCacheAdapter:
             self._dialect = backend_name(self.engine)
         return self._dialect
 
+    @property
+    def _window_table(self) -> Table:
+        from pyfly.data.relational.framework_schema import cache_windows_table
+
+        return cache_windows_table(self._window_table_name)
+
+    @contextlib.asynccontextmanager
+    async def _coordination_unit(self) -> AsyncIterator[Any]:
+        """Coordination commits before returning and never joins a caller's replica or business unit."""
+        from pyfly.data.relational.datasource_registry import datasource_of
+        from pyfly.data.transaction import Isolation
+
+        if self._backend != "postgresql":
+            raise ValueError("CacheCoordination requires a PostgreSQL primary datasource")
+        source = datasource_of(self.engine)
+        if source is not None and source.is_replica:
+            raise ValueError("CacheCoordination cannot use a replica datasource")
+        await self._ensure_started()
+        with outside_transaction():
+            async with TransactionTemplate(
+                self._target, isolation=Isolation.READ_COMMITTED, read_from_primary=True, timeout=5
+            ).transaction() as unit:
+                assert unit is not None
+                yield unit.resource
+
+    async def compare_and_set(self, key: str, expected: Any, value: Any, ttl: timedelta | None = None) -> bool:
+        """Replace an existing unexpired serialized value, including an actual cached ``None``."""
+        from pyfly.cache.adapters.postgres_coordination import compare_and_set
+
+        return await compare_and_set(self, key, expected, value, ttl)
+
+    async def evict_if_value(self, key: str, expected: Any) -> bool:
+        """Release only the unexpired serialized value the caller still owns."""
+        from pyfly.cache.adapters.postgres_coordination import evict_if_value
+
+        return await evict_if_value(self, key, expected)
+
+    async def consume_window(self, key: str, limit: int, window: timedelta) -> bool:
+        """Admit at most *limit* events per rolling *window* across all instances, using database time."""
+        from pyfly.cache.adapters.postgres_coordination import consume_window
+
+        admitted = await consume_window(self, key, limit, window)
+        interval = self._purge_interval
+        if interval is not None and time.monotonic() - self._last_window_purge >= interval:
+            self._last_window_purge = time.monotonic()
+            # A failed cleanup must not turn an already committed admission into an apparent refusal.
+            try:
+                purged = await self.purge_expired_windows()
+                if purged >= self.PURGE_BATCH:
+                    self._last_window_purge = float("-inf")
+            except Exception:  # noqa: BLE001
+                _logger.warning("cache_window_purge_failed", extra={"table": self._window_table_name})
+        return admitted
+
+    async def clear_window(self, key: str) -> bool:
+        """Clear exactly one namespaced rolling bucket, serialized against concurrent admissions."""
+        from pyfly.cache.adapters.postgres_coordination import clear_window
+
+        return await clear_window(self, key)
+
+    async def purge_expired_windows(self) -> int:
+        """Remove at most ``PURGE_BATCH`` expired rolling buckets, skipping rows in use."""
+        from pyfly.cache.adapters.postgres_coordination import purge_expired_windows
+
+        return await purge_expired_windows(self)
+
     def _check_key(self, stored: str) -> None:
         """Refuse a stored key (namespace included) longer than the key column takes, before any write."""
         if len(stored) > MAX_KEY_LENGTH and self._backend not in _UNBOUNDED_KEY_DIALECTS:
@@ -299,7 +371,27 @@ class PostgresCacheAdapter:
         """This cache's rows (``None``: the whole table, for an empty namespace)."""
         return self._key_matches("", prefix=True) if self._namespace else None
 
-    def _live(self, now: datetime) -> ColumnElement[bool]:
+    def _now(self) -> Any:
+        if self._clock is not None:
+            return self._clock()
+        if self._backend == "postgresql":
+            from sqlalchemy import func
+
+            return func.clock_timestamp()
+        return datetime.now(UTC)
+
+    def _expiry(self, ttl: timedelta | None, *, now: Any = None) -> Any:
+        if ttl is None:
+            return None
+        now = self._now() if now is None else now
+        if self._clock is None and self._backend == "postgresql":
+            from sqlalchemy import func
+
+            # PostgreSQL interval days follow session-local DST; a TTL is elapsed seconds.
+            return now + func.make_interval(0, 0, 0, 0, 0, 0, ttl.total_seconds())
+        return now + ttl
+
+    def _live(self, now: Any) -> ColumnElement[bool]:
         from sqlalchemy import or_
 
         expires_at = self._table.c.expires_at
@@ -342,7 +434,7 @@ class PostgresCacheAdapter:
         values = {
             "cache_key": stored_key,
             "value": cache_dumps(value),
-            "expires_at": self._clock() + ttl if ttl is not None else None,
+            "expires_at": self._expiry(ttl),
         }
         async with self._writing(single_statement=native_upsert(self._backend)) as session:
             await upsert(session, self._table, values, key=["cache_key"])
@@ -354,7 +446,7 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         table = self._table
-        statement = select(table.c.value).where(table.c.cache_key == self._key(key), self._live(self._clock()))
+        statement = select(table.c.value).where(table.c.cache_key == self._key(key), self._live(self._now()))
         async with self._reading() as session:
             raw = (await session.execute(statement)).scalar_one_or_none()
 
@@ -383,12 +475,12 @@ class PostgresCacheAdapter:
         await self._ensure_started()
         stored_key = self._key(key)
         self._check_key(stored_key)
-        now = self._clock()
+        now = self._now()
         table = self._table
         values = {
             "cache_key": stored_key,
             "value": cache_dumps(value),
-            "expires_at": now + ttl if ttl is not None else None,
+            "expires_at": self._expiry(ttl, now=now),
         }
         expired = table.c.expires_at <= now
         if native_conditional_insert(self._backend):
@@ -435,7 +527,7 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         table = self._table
-        statement = select(literal(1)).where(table.c.cache_key == self._key(key), self._live(self._clock()))
+        statement = select(literal(1)).where(table.c.cache_key == self._key(key), self._live(self._now()))
         async with self._reading() as session:
             return (await session.execute(statement)).first() is not None
 
@@ -474,14 +566,17 @@ class PostgresCacheAdapter:
         from sqlalchemy import delete, select
 
         table = self._table
-        expired = table.c.expires_at <= self._clock()
+        expired = table.c.expires_at <= self._now()
         if self._backend in ("mysql", "mariadb"):
             # Both spellings: a mariadb:// URL's dialect reads only mariadb_limit, a mysql:// one mysql_limit.
             limit = {"mysql_limit": self.PURGE_BATCH, "mariadb_limit": self.PURGE_BATCH}
             statement: Any = delete(table).where(expired).with_dialect_options(**limit)
         elif self._backend in _UNBOUNDED_KEY_DIALECTS:
             batch = select(table.c.cache_key).where(expired).limit(self.PURGE_BATCH)
-            statement = delete(table).where(table.c.cache_key.in_(batch))
+            if self._backend == "postgresql":
+                batch = batch.with_for_update(skip_locked=True)
+            # A selected expired key may be renewed concurrently. Never delete its newer live owner.
+            statement = delete(table).where(table.c.cache_key.in_(batch), expired)
         else:
             statement = delete(table).where(expired)
         async with self._writing(single_statement=True) as session:
@@ -520,7 +615,7 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         table = self._table
-        statement = select(table.c.cache_key).where(self._key_matches(pattern), self._live(self._clock())).limit(limit)
+        statement = select(table.c.cache_key).where(self._key_matches(pattern), self._live(self._now())).limit(limit)
         async with self._reading() as session:
             keys = (await session.execute(statement)).scalars().all()
         return [str(key)[len(self._namespace) :] for key in keys]
@@ -531,7 +626,7 @@ class PostgresCacheAdapter:
 
         await self._ensure_started()
         own = self._own()
-        statement = select(func.count()).select_from(self._table).where(self._live(self._clock()))
+        statement = select(func.count()).select_from(self._table).where(self._live(self._now()))
         if own is not None:
             statement = statement.where(own)
         async with self._reading() as session:

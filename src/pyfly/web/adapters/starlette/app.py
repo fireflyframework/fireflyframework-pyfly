@@ -24,6 +24,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 
 from pyfly.container.ordering import get_order
+from pyfly.web.adapters.starlette.context_bound import ContextBoundStarlette
 from pyfly.web.adapters.starlette.controller import ControllerRegistrar
 from pyfly.web.adapters.starlette.docs import (
     make_openapi_endpoint,
@@ -542,11 +543,12 @@ def create_app(
 
         effective_lifespan = _lifespan_with_dynamic_wiring
 
-    app = Starlette(
+    app = ContextBoundStarlette(
+        pyfly_context=context,
         debug=debug,
         middleware=middleware,
         routes=routes,
-        lifespan=effective_lifespan,  # type: ignore[arg-type]
+        lifespan=effective_lifespan,
     )
 
     # Store metadata for startup logging

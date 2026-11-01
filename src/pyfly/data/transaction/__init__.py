@@ -59,6 +59,7 @@ from pyfly.data.transaction.manager import TransactionCapabilities, TransactionM
 from pyfly.data.transaction.observation import CommitTracker, track_commits, untracked
 from pyfly.data.transaction.registry import (
     TransactionManagerRegistry,
+    bind_registry,
     install_registry,
     installed_registry,
     resolve_manager,
@@ -108,6 +109,7 @@ __all__ = [
     "UnitStatus",
     "after_commit",
     "auto_unit",
+    "bind_registry",
     "current_unit_of_work",
     "detached",
     "execute_in_transaction",

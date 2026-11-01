@@ -13,7 +13,7 @@
   <a href="https://github.com/fireflyframework"><img src="https://img.shields.io/badge/Firefly_Framework-official-ff6600?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyeiIvPjwvc3ZnPg==" alt="Firefly Framework"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" alt="Python 3.12+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.10.30-brightgreen" alt="Version: 26.10.30"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-26.10.31-brightgreen" alt="Version: 26.10.31"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/type--checked-mypy%20strict-blue?logo=python&logoColor=white" alt="Type Checked: mypy strict"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/code%20style-ruff-purple?logo=ruff&logoColor=white" alt="Code Style: Ruff"></a>
   <a href="#philosophy"><img src="https://img.shields.io/badge/async-first-brightgreen" alt="Async First"></a>
@@ -313,7 +313,7 @@ This bean is created only when (1) no user-provided `CacheAdapter` exists and (2
 | `relational` | `RelationalAutoConfiguration` | `sqlalchemy` | `Repository[T, ID]` | none |
 | `document` | `DocumentAutoConfiguration` | `beanie` (+ `pyfly.data.document.enabled`) | PyMongo `AsyncMongoClient`, `MongoRepository[T, ID]`, `MongoTransactionManager` | none |
 | `messaging` | `MessagingAutoConfiguration` | `aiokafka` / `aio-pika` | `KafkaAdapter` / `RabbitMQAdapter` | `InMemoryMessageBroker` |
-| `cache` | `CacheAutoConfiguration` | `redis.asyncio` | `RedisCacheAdapter` | `InMemoryCache` |
+| `cache` | `CacheAutoConfiguration` | SQLAlchemy + configured datasource | `PostgresCacheAdapter` | Explicit memory/Redis only |
 | `client` | `ClientAutoConfiguration` | `httpx` | `HttpxClientAdapter` | none |
 | `shell` | `ShellAutoConfiguration` | `click` | `ClickShellAdapter` | none |
 | `cqrs` | `CqrsAutoConfiguration` | — | CQRS handlers | none |
@@ -881,13 +881,13 @@ hotfix baseline and the migration from the removed Presidio backend.
 
 ```bash
 # Install the latest release (uv)
-uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.30-py3-none-any.whl"
+uv add "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.31-py3-none-any.whl"
 
 # Install with specific extras
-uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.30-py3-none-any.whl"
+uv add "pyfly[web,data-relational,cache] @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.31-py3-none-any.whl"
 
 # Or with pip
-pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.30-py3-none-any.whl"
+pip install "pyfly @ https://github.com/fireflyframework/fireflyframework-pyfly/releases/latest/download/pyfly-26.10.31-py3-none-any.whl"
 ```
 
 ### One-Line Install (CLI + Framework)
@@ -1220,6 +1220,7 @@ The git tag and human-readable display use the leading-zero form (`v26.05.01`); 
 
 The full release history lives in **[CHANGELOG.md](CHANGELOG.md)** ([Keep a Changelog](https://keepachangelog.com/) format). Recent highlights:
 
+- **`v26.10.31`** (2026-10-31) — default to native PostgreSQL caching, fail closed on provider errors, and add shared atomic ownership and rolling-window coordination.
 - **`v26.10.30`** (2026-10-31) — add scoped read-only Admin audit, honest process-local cost coverage, telemetry privacy and frozen native skill packages.
 - **`v26.10.29`** (2026-10-31) — add native transactional audit, trusted module recording, signed archive delivery and conservative effect admission.
 - **`v26.10.28`** (2026-10-31) — verified email TLS, private diagnostics, explicit unknown send outcomes and optional managed-identity Azure email.

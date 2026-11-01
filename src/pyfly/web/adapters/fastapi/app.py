@@ -24,6 +24,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 
 from pyfly.container.ordering import get_order
+from pyfly.web.adapters.fastapi.context_bound import ContextBoundFastAPI
 from pyfly.web.adapters.fastapi.controller import FastAPIControllerRegistrar
 from pyfly.web.adapters.fastapi.errors import register_exception_handlers
 from pyfly.web.adapters.starlette.filter_chain import WebFilterChainMiddleware
@@ -268,7 +269,8 @@ def create_app(
     redoc_url = "/redoc" if docs_enabled else None
     openapi_url = "/openapi.json" if docs_enabled else None
 
-    app = FastAPI(
+    app = ContextBoundFastAPI(
+        pyfly_context=context,
         title=title,
         version=version,
         description=description,
@@ -277,7 +279,7 @@ def create_app(
         docs_url=docs_url,
         redoc_url=redoc_url,
         openapi_url=openapi_url,
-        lifespan=lifespan,  # type: ignore[arg-type]
+        lifespan=lifespan,
     )
 
     # Auto-discover and register controller routes from ApplicationContext.

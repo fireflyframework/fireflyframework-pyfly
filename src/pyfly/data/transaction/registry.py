@@ -34,7 +34,9 @@ from __future__ import annotations
 import importlib
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from pyfly.data.transaction.errors import IllegalTransactionStateError
@@ -227,6 +229,24 @@ class TransactionManagerRegistry:
 
 _installed: TransactionManagerRegistry | None = None
 _installed_lock = threading.Lock()
+_bound: ContextVar[tuple[TransactionManagerRegistry | None] | None] = ContextVar(
+    "pyfly_transaction_manager_registry", default=None
+)
+
+
+@contextmanager
+def bind_registry(registry: TransactionManagerRegistry | None) -> Iterator[None]:
+    """Resolve unnamed/named managers in this task through *registry* until the scope exits.
+
+    ``None`` explicitly masks the process fallback: an application without Data must never borrow
+    another application's managers. Nested scopes, errors and cancellation restore the prior binding.
+    This selects infrastructure ownership only; it grants no data or caller authority.
+    """
+    token = _bound.set((registry,))
+    try:
+        yield
+    finally:
+        _bound.reset(token)
 
 
 def install_registry(registry: TransactionManagerRegistry) -> None:
@@ -245,8 +265,9 @@ def uninstall_registry(registry: TransactionManagerRegistry) -> None:
 
 
 def installed_registry() -> TransactionManagerRegistry | None:
-    """The installed registry, or ``None`` outside a started application context."""
-    return _installed
+    """The task's registry when bound; otherwise the legacy process-installed registry."""
+    bound = _bound.get()
+    return bound[0] if bound is not None else _installed
 
 
 def resolve_manager(target: object = None) -> TransactionManager:

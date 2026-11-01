@@ -3,7 +3,7 @@
 PyFly's caching module provides a declarative, decorator-based caching system
 with pluggable backends. Following the hexagonal architecture pattern, a
 `CacheAdapter` protocol defines the interface, and concrete adapters
-(`InMemoryCache`, `RedisCacheAdapter`) supply the implementation. A
+(`PostgresCacheAdapter`, `InMemoryCache`, `RedisCacheAdapter`) supply the implementation. PostgreSQL is the default shared provider when caching is enabled. A
 `CacheManager` adds automatic failover between a primary and fallback cache.
 
 ---
@@ -15,6 +15,7 @@ with pluggable backends. Following the hexagonal architecture pattern, a
 3. [InMemoryCache](#inmemorycache)
 4. [RedisCacheAdapter](#rediscacheadapter)
 5. [PostgresCacheAdapter](#postgrescacheadapter)
+   - [Shared Atomic Coordination](#shared-atomic-coordination)
 6. [CacheManager: Failover and Resilience](#cachemanager-failover-and-resilience)
 7. [Named Caches: Regions and Dedicated Caches](#named-caches-regions-and-dedicated-caches)
 8. [Caching and Transactions](#caching-and-transactions)
@@ -183,7 +184,7 @@ unbounded cache (`max_size=None`) is bounded by its TTLs.
 
 ## RedisCacheAdapter
 
-The `RedisCacheAdapter` is the production cache backend. It delegates to a
+The `RedisCacheAdapter` is an explicitly selected production cache backend. It delegates to a
 `redis.asyncio.Redis` client and transparently handles JSON serialization.
 
 The cache usually shares its Redis database with sessions, locks, the event bus
@@ -265,13 +266,11 @@ and delete in batches. Glob characters in a prefix are taken literally.
 ## PostgresCacheAdapter
 
 The `PostgresCacheAdapter` is a **durable, production-grade** cache backend
-backed by a SQL table on one of the application's datasources. It is suited for
-environments where Redis is not available but PostgreSQL already is, or when
-cache durability across process restarts is required. PostgreSQL is its main
+backed by a SQL table on one of the application's datasources. It is the default when caching is enabled, borrowing the application's registered primary datasource unless an explicit named datasource or URL is configured. PostgreSQL is its main
 target; the table and its statements are portable, so it also runs on SQLite,
 MySQL and MariaDB.
 
-**Install:** `uv add "pyfly[data-relational,postgresql]"` (this pulls in
+**Install:** `uv add "pyfly[cache]"` (this pulls in
 `sqlalchemy[asyncio]` and `asyncpg`). A clear `ValueError` is raised at
 startup if `sqlalchemy.ext.asyncio` is not importable.
 
@@ -327,6 +326,7 @@ delete them (`DELETE FROM pyfly_cache_entries WHERE cache_key NOT LIKE
 | `create_table` | `bool` (default `True`) | Create the table on `start()` when it is missing; with `False` the table is only checked, and a missing one fails the start. |
 | `purge_interval` | `timedelta \| None` (default 60 s) | How often a write purges a batch of expired rows; `None` leaves purging to `purge_expired()`. |
 | `table_name` | `str` (default `pyfly_cache_entries`) | The table. |
+| `window_table_name` | `str` (default `pyfly_cache_windows`) | The separate rolling-window table. |
 | `namespace` | `str` (default `pyfly:cache:`) | Keyword-only. The key prefix of the cache's entries; a `:` is appended when it does not end with one, so `clear()` never reaches a namespace that merely starts with it. An empty namespace declares that the cache owns the whole table. |
 
 ### Table schema
@@ -360,8 +360,11 @@ so any serializable Python object can be cached transparently.
 
 ### TTL and expiry
 
-When `ttl` is provided the adapter stores the expiry as a UTC instant in
-`expires_at`, bound as a typed value: an entry expires after its TTL whatever
+PostgreSQL uses `clock_timestamp()` for default TTL writes, reads and cleanup,
+so replicas of the application do not disagree because their host clocks differ.
+An explicit constructor `clock` remains an opt-in override; portable SQL backends
+keep their UTC application clock. When `ttl` is provided the adapter stores a UTC instant in
+`expires_at`: an entry expires after its TTL whatever
 the process's time zone, and nodes in different zones agree. Expiry is
 enforced at read time (`get()`, `exists()`, `get_keys()` and `get_stats()`
 skip expired rows), and expired rows are **purged**: at most once per
@@ -428,14 +431,79 @@ pyfly:
       purge-interval: 60s          # seconds or a duration (500ms, 2m, 1h); 0 turns the purge on writes off
 ```
 
-The table is created at startup if `pyfly.data.relational.ddl-auto` is
+Both cache tables are created at startup if `pyfly.data.relational.ddl-auto` is
 `create` (the default on an embedded database) or `create-drop`; with `none`
 (the default on a database server and beside startup migrations) or `validate`
-it must exist (a migration creates it) or the startup fails, naming it.
+they must exist (migrations create them) or startup fails, naming the missing table.
 
 If `sqlalchemy.ext.asyncio` is not installed, a `ValueError` is raised
 immediately at startup with a message directing you to install
 `pyfly[data-relational,postgresql]`.
+
+---
+
+## Shared Atomic Coordination
+
+`from pyfly.cache import CacheCoordination` is an optional port implemented by
+`PostgresCacheAdapter`. Inject the port or use a dedicated PostgreSQL cache returned
+by `with_namespace(name)`. General `CacheAdapter` implementations are not required to
+provide coordination; a local fallback is unsafe for shared admission or ownership.
+
+```python
+from datetime import timedelta
+from pyfly.cache.adapters.postgres import PostgresCacheAdapter
+
+async def admit(cache: PostgresCacheAdapter, token_id: str) -> bool:
+    rate = cache.with_namespace("api-rate-v1")
+    return await rate.consume_window(token_id, 20, timedelta(seconds=60))
+
+async def revoke_bucket(cache: PostgresCacheAdapter, token_id: str) -> None:
+    await cache.with_namespace("api-rate-v1").clear_window(token_id)
+```
+
+- `compare_and_set(key, expected, value, ttl=None)` replaces an **existing unexpired**
+  serialized value. `None` means an actual cached JSON null, never absence; use
+  `put_if_absent` for absence. Equality is byte equality under `cache_dumps`, so callers
+  use stable owner tokens or consistently ordered DTO serialization.
+- `evict_if_value(key, expected)` deletes only an existing unexpired matching owner.
+  A stale owner cannot delete a successor's record. It is not an external-effect fence.
+- `consume_window(key, limit, window)` returns whether an event was admitted. PostgreSQL
+  serializes each namespaced key and reads `clock_timestamp()` **after** acquiring its
+  row lock. It retains admitted events in `(now-window, now]`; denied attempts do not
+  extend the bucket. This is a rolling window, preventing the boundary bursts of a
+  fixed counter. Limits must be integers from 1 to 10000 and windows positive, at most 365 days.
+  A live key cannot change its window: use a policy-versioned key, clear it explicitly,
+  or wait for expiry. Changing a limit counts all still-retained admissions.
+- `clear_window(key)` returns whether it removed that bucket, serialized against
+  concurrent consumption. Other keys and namespaces remain unchanged.
+
+Every coordination call uses an independent native primary transaction with a 5 second
+native deadline, including inside a caller's replica/read-only/business transaction.
+Its commit survives caller rollback. Errors propagate; no memory fallback is attempted.
+A saturated database can deny service, and an uncertain commit is not silently retried.
+The caller still holds its own connection while the operation borrows another; size the
+existing pool for that use and avoid calling while holding locks on coordination rows.
+
+Rolling buckets live in `pyfly_cache_windows`, separately from serialized cache values:
+`cache_key` TEXT primary key, `events` JSONB, `expires_at` TIMESTAMPTZ with an index,
+`window_microseconds` BIGINT, all non-null. Include `cache_windows` or
+`cache_windows_table()` from `pyfly.data.relational.framework_schema` in migrations
+alongside `cache_entries`. Production `ddl-auto=none/validate` only validates these
+native tables; the operator must migrate before rollout. `create/create-drop` allows
+native table creation. Runtime privileges are SELECT/INSERT/UPDATE/DELETE on both
+cache tables, without schema-creation grants.
+
+`clear()` and ordinary cache eviction never touch rolling buckets. Dedicated value
+namespaces protect idempotency records from application-cache clears. No size/LRU
+policy evicts live shared rows. `purge_expired_windows()` removes at most 1000 expired
+buckets per call, skips locked rows, and is also attempted periodically during admission.
+For an idle store, schedule bounded maintenance explicitly; PostgreSQL is not a TTL
+engine and expired rows can remain physically stored until cleanup or next use.
+
+The existing HTTP idempotency filter remains a response replay cache, not an atomic
+execution reservation. The resilience `RateLimiter` remains a process-local token
+bucket. Applications opt into this port to build distributed admission and ownership;
+changing the cache default does not silently upgrade those other contracts.
 
 ---
 
@@ -930,27 +998,26 @@ class ProductService:
 
 ## Auto-Configuration
 
-When using automatic configuration, PyFly selects the cache adapter based on
-the `pyfly.cache.provider` setting (default `auto`). When `auto` is selected,
-the best available adapter is detected at startup:
+Caching stays disabled until `pyfly.cache.enabled: true`. Once enabled, the default
+`postgres` provider and the compatibility value `auto` both select `PostgresCacheAdapter`,
+regardless of whether a Redis client happens to be installed. Missing SQL support,
+missing datasource configuration, unknown provider names and unavailable explicit
+providers fail startup; there is no automatic local-memory failover.
 
-| Detection Order | Library Checked         | Adapter Selected        |
-|-----------------|-------------------------|-------------------------|
-| 1               | `redis.asyncio`         | `RedisCacheAdapter`     |
-| 2               | *(fallback)*            | `InMemoryCache`         |
+`pyfly[cache]` includes native relational and PostgreSQL dependencies. Explicit
+`memory` remains useful for development/testing; explicit `redis` retains compatibility.
+A user-provided `CacheAdapter` bean still replaces auto-configuration. The PostgreSQL
+adapter is also available by concrete type, and `CacheCoordination` resolves to that
+same instance. No extra engine, connection credential or coordination bean is created.
 
-You can also pin a provider explicitly:
+| `pyfly.cache.provider` value | Adapter | Required packages |
+|---|---|---|
+| `postgres` or `auto` | `PostgresCacheAdapter` | `sqlalchemy[asyncio]`, `asyncpg` for PostgreSQL |
+| `memory` | `InMemoryCache` | None |
+| `redis` | `RedisCacheAdapter` | `redis[hiredis]` |
 
-| `pyfly.cache.provider` value | Adapter Selected      | Required packages |
-|------------------------------|-----------------------|-------------------|
-| `auto`                       | Detected (see above)  | —                 |
-| `memory`                     | `InMemoryCache`       | None              |
-| `redis`                      | `RedisCacheAdapter`   | `redis[hiredis]`  |
-| `postgres`                   | `PostgresCacheAdapter` | `sqlalchemy[asyncio]` + `asyncpg` |
-
-When Redis is detected in auto mode, the `CacheManager` can be configured with
-`RedisCacheAdapter` as the primary and `InMemoryCache` as the fallback for
-automatic failover.
+Existing portable SQL cache operations continue to work on SQLite/MySQL/MariaDB;
+`CacheCoordination` operations explicitly require PostgreSQL and refuse other dialects.
 
 ---
 
@@ -962,22 +1029,22 @@ Configure caching in your `pyfly.yaml`:
 pyfly:
   cache:
     enabled: false
-    provider: auto      # auto | memory | redis | postgres
+    provider: postgres  # postgres (default/auto), explicit memory or redis
     ttl: 300            # Default TTL in seconds (5 minutes)
 
     redis:
       url: redis://localhost:6379/0
 
     postgres:
-      url: postgresql+asyncpg://user:pass@host/db
+      datasource: primary  # borrow the existing registered pool and credentials
 ```
 
 | Property                    | Default                      | Description |
 |-----------------------------|------------------------------|-------------|
 | `pyfly.cache.enabled`      | `false`                      | Enable or disable caching globally. |
-| `pyfly.cache.provider`     | `"auto"`                     | Cache provider: `"auto"`, `"memory"`, `"redis"`, or `"postgres"`. |
+| `pyfly.cache.provider`     | `"postgres"`                     | Cache provider: `"auto"`, `"memory"`, `"redis"`, or `"postgres"`. |
 | `pyfly.cache.ttl`          | `300`                        | Default TTL in seconds, applied when decorators do not specify their own TTL. |
-| `pyfly.cache.redis.url`    | `"redis://localhost:6379/0"` | Redis connection URL (used when provider is `"redis"` or auto-detected). |
+| `pyfly.cache.redis.url`    | `"redis://localhost:6379/0"` | Redis connection URL (only used when provider is explicitly `"redis"`). |
 | `pyfly.cache.postgres.url` | *(none)*: the primary datasource | PostgreSQL connection URL (used when provider is `"postgres"`). See below. |
 | `pyfly.cache.postgres.datasource` | *(none)*: the primary datasource | Name of the datasource the cache table lives on (instead of a URL). |
 | `pyfly.cache.postgres.purge-interval` | `60` | Time between purges of expired rows made by writes: seconds or a duration (`90s`, `500ms`, `2m`, `1h`); `0` turns them off. |

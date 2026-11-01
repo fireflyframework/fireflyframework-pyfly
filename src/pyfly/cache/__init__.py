@@ -26,12 +26,13 @@ Caches hold copies, never live ORM objects (:class:`CacheValueError`); the decor
 from pyfly.cache.decorators import cache, cache_evict, cache_put, cacheable
 from pyfly.cache.manager import CacheManager
 from pyfly.cache.namespaces import PrefixedCache, cache_region, dedicated_cache
-from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.cache.ports.outbound import CacheAdapter, CacheCoordination
 from pyfly.cache.serialization import CacheValueError
 from pyfly.cache.transaction import TransactionAwareCache
 
 __all__ = [
     "CacheAdapter",
+    "CacheCoordination",
     "CacheManager",
     "CacheValueError",
     "PrefixedCache",

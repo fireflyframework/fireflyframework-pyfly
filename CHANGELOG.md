@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.31 (2026-10-31)
+
+### Added
+
+- Add optional native `CacheCoordination` for serialized compare-and-set, owner-checked eviction,
+  rolling-window admission and per-bucket reset. PostgreSQL uses database time, row locks,
+  independent primary transactions, bounded event history and bounded expired-bucket cleanup.
+- Declare `pyfly_cache_windows` on framework metadata for operator-owned migrations.
+  Native DI exposes coordination and the cache on the same adapter and datasource.
+- Bind the owning application's transaction registry outside the complete native HTTP/WebSocket
+  middleware stack, including management and streaming responses. Expose `bind_registry` for explicit
+  headless ownership, with nested/error/cancellation restoration and explicit no-registry masking.
+
+### Changed
+
+- Select PostgreSQL for enabled default/auto caching, borrowing the registered primary datasource.
+  Use database time for default PostgreSQL TTL writes, reads and cleanup; preserve explicit clock overrides.
+  Unknown/unavailable providers fail startup; memory and Redis remain explicit choices.
+  The cache extra includes native relational/PostgreSQL dependencies and retains Redis compatibility.
+- Keep cache clearing separate from rolling-window coordination and dedicated idempotency namespaces.
+  Existing generic HTTP response idempotency and local resilience rate limiting are unchanged.
+
+### Fixed
+
+- Recheck conditional-value expiry after acquiring the row lock, so an expired owner cannot act after
+  waiting. Skip locked expiry candidates and recheck their expiry during deletion, preserving owners
+  renewed concurrently with cache cleanup.
+- Keep PostgreSQL TTLs and coordination windows in UTC elapsed seconds across session-local DST,
+  and prevent another started application context redirecting a request's plain transaction calls.
+
 ## v26.10.30 (2026-10-31)
 
 ### Added

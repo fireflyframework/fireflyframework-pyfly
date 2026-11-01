@@ -80,3 +80,21 @@ class CacheAdapter(Protocol):
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
+
+
+@runtime_checkable
+class CacheCoordination(Protocol):
+    """Optional shared coordination, without local failover or caller transaction participation.
+
+    Equality is serialized value equality, including a stored ``None``. Conditional operations only
+    match existing, unexpired values; use ``CacheAdapter.put_if_absent`` for absence. Window admission
+    uses database time and retains only admitted events in the preceding rolling window.
+    """
+
+    async def compare_and_set(self, key: str, expected: Any, value: Any, ttl: timedelta | None = None) -> bool: ...
+
+    async def evict_if_value(self, key: str, expected: Any) -> bool: ...
+
+    async def consume_window(self, key: str, limit: int, window: timedelta) -> bool: ...
+
+    async def clear_window(self, key: str) -> bool: ...

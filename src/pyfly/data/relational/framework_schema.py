@@ -34,6 +34,7 @@ Table                             Used by
 ================================  ============================================================================
 ``pyfly_orchestration_state``     ``SqlAlchemyPersistenceProvider`` (saga, TCC and workflow state)
 ``pyfly_cache_entries``           ``PostgresCacheAdapter`` (``pyfly.cache.provider=postgres``)
+``pyfly_cache_windows``           ``PostgresCacheAdapter`` (bounded rolling-window admission)
 ``pyfly_locks``                   ``LeaseLock`` (``@scheduled(lock=...)`` and other leases)
 ``pyfly_users``                   ``SqlUserDetailsService``
 ``pyfly_event_store``             ``SqlAlchemyEventStore`` (the event log, paged by global position)
@@ -118,6 +119,7 @@ __all__ = [
     "AUDIT_ENTRIES",
     "AUDIT_HEADS",
     "CACHE_ENTRIES",
+    "CACHE_WINDOWS",
     "CREATE_ATTEMPTS",
     "EVENT_STORE",
     "EVENT_STORE_HEAD",
@@ -153,6 +155,8 @@ __all__ = [
     "audit_heads_table",
     "cache_entries",
     "cache_entries_table",
+    "cache_windows",
+    "cache_windows_table",
     "context_datasource_registry",
     "creates_tables",
     "ensure_tables",
@@ -228,6 +232,7 @@ framework_metadata = MetaData(naming_convention=NAMING_CONVENTION)
 ORCHESTRATION_STATE = "pyfly_orchestration_state"
 AGENTIC_MEMORY = "pyfly_agentic_memory"
 CACHE_ENTRIES = "pyfly_cache_entries"
+CACHE_WINDOWS = "pyfly_cache_windows"
 LOCKS = "pyfly_locks"
 USERS = "pyfly_users"
 EVENT_STORE = "pyfly_event_store"
@@ -473,6 +478,22 @@ def cache_entries_table(name: str = CACHE_ENTRIES) -> Table:
         )
 
     return _declare("cache_entries", name, build)
+
+
+def cache_windows_table(name: str = CACHE_WINDOWS) -> Table:
+    """Bounded admitted instants per namespaced rolling-window key; independent of evictable values."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("cache_key", key_string(512).with_variant(Text(), "postgresql", "sqlite"), primary_key=True),
+            Column("events", JSON().with_variant(JSONB(), "postgresql"), nullable=False),
+            Column("expires_at", UtcTimestamp(), nullable=False, index=True),
+            Column("window_microseconds", BigInteger(), nullable=False),
+        )
+
+    return _declare("cache_windows", name, build)
 
 
 def locks_table(name: str = LOCKS) -> Table:
@@ -905,6 +926,9 @@ orchestration_state = orchestration_state_table()
 
 cache_entries = cache_entries_table()
 """``pyfly_cache_entries`` (:func:`cache_entries_table`)."""
+
+cache_windows = cache_windows_table()
+"""``pyfly_cache_windows`` (:func:`cache_windows_table`)."""
 
 locks = locks_table()
 """``pyfly_locks`` (:func:`locks_table`)."""

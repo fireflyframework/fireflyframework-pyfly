@@ -133,7 +133,7 @@ pyfly:
     # server or beside startup migrations (pyfly.data.relational.migrations.enabled).
   cache:
     enabled: false
-    provider: "memory"
+    provider: "postgres"
     ttl: 300
   feature-flags:
     # Feature flags on OpenFeature + flagd (docs/modules/feature-flags.md). Off until enabled.
