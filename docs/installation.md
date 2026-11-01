@@ -114,7 +114,7 @@ Which extras should be installed?
   6) data-relational — SQL Database (SQLAlchemy, Alembic)
   7) data-document — Document Database (MongoDB, Beanie ODM)
   8) eda — Event-Driven (Kafka, RabbitMQ)
-  9) cache — Redis and in-memory caching
+  9) cache — PostgreSQL caching, with explicit Redis and in-memory alternatives
  10) client — HTTP client, circuit breaker and retry
  11) security — Auth & JWT
  12) scheduling — Cron and scheduled tasks
@@ -329,7 +329,7 @@ Each extra pulls in the third-party libraries needed for a specific framework mo
 | `kafka` | aiokafka | Apache Kafka messaging only |
 | `rabbitmq` | aio-pika | RabbitMQ messaging only |
 | `redis` | redis[hiredis] | Redis client (hiredis C parser for performance) |
-| `cache` | redis[hiredis] | Caching with Redis backend |
+| `cache` | SQLAlchemy, asyncpg, redis[hiredis] | PostgreSQL default cache; explicit Redis compatibility |
 | `client` | httpx | Resilient HTTP client with retry and circuit breaker |
 | `observability` | prometheus-client, opentelemetry-api, opentelemetry-sdk, structlog | Metrics, distributed tracing, structured logging |
 | `security` | pyjwt[crypto], bcrypt, cryptography | JWT token generation/verification, password hashing |
@@ -531,7 +531,7 @@ PyFly Doctor
     ✓ mypy — Type checker
 
   PyFly packages:
-    ✓ pyfly v26.10.30
+    ✓ pyfly v26.10.31
 
   All checks passed!
 ```

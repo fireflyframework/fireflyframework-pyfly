@@ -34,7 +34,7 @@ class TestAutoConfiguration:
         from pyfly.cache.auto_configuration import CacheAutoConfiguration
 
         provider = CacheAutoConfiguration.detect_provider()
-        assert provider in ("redis", "memory")
+        assert provider == "postgres"
 
     def test_detect_messaging_provider(self):
         from pyfly.messaging.auto_configuration import MessagingAutoConfiguration

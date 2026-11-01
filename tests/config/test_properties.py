@@ -77,7 +77,7 @@ class TestCacheProperties:
         config = Config({"pyfly": {"cache": {}}})
         props = config.bind(CacheProperties)
         assert props.enabled is False
-        assert props.provider == "auto"
+        assert props.provider == "postgres"
         assert props.ttl == 300
 
     def test_bind_enabled_redis(self):

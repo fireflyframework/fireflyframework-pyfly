@@ -599,7 +599,7 @@ class BannerMode(enum.Enum):
 | Mode | Behavior |
 |---|---|
 | `TEXT` | Full ASCII art banner (default) with a framework version line. |
-| `MINIMAL` | Single line: `:: PyFly :: (v26.10.30)` |
+| `MINIMAL` | Single line: `:: PyFly :: (v26.10.31)` |
 | `OFF` | No banner output at all. |
 
 ### BannerPrinter Class
@@ -640,7 +640,7 @@ ______ ___.__._/ ____\  | ___.__.
 |   __// ____| |__|  |____/ ____|
 |__|   \/                 \/
 
-:: PyFly Framework :: (v26.10.30)
+:: PyFly Framework :: (v26.10.31)
 ```
 
 ### Custom Banner Files
@@ -764,7 +764,7 @@ pyfly:
 | `pyfly.data.relational.url` | — (required) | Database URL; `pyfly.data.url` is a deprecated alias |
 | `pyfly.data.relational.pool.size` | SQLAlchemy's (5) | Connection pool size; `pyfly.data.pool-size` is a deprecated alias |
 | `pyfly.cache.enabled` | `false` | Enable caching |
-| `pyfly.cache.provider` | `"memory"` | Cache backend (`redis`, `memory`) |
+| `pyfly.cache.provider` | `"postgres"` | Shared default; explicit `redis` or `memory` alternatives |
 | `pyfly.cache.ttl` | `300` | Default TTL in seconds |
 | `pyfly.messaging.provider` | `"memory"` | Messaging backend (`kafka`, `rabbitmq`, `memory`) |
 | `pyfly.client.timeout` | `30` | HTTP client timeout in seconds |

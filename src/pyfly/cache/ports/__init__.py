@@ -13,6 +13,6 @@
 # limitations under the License.
 """Cache ports — abstract interfaces for the cache module."""
 
-from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.cache.ports.outbound import CacheAdapter, CacheCoordination
 
-__all__ = ["CacheAdapter"]
+__all__ = ["CacheAdapter", "CacheCoordination"]

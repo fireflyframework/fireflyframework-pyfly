@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from pyfly.cache.ports.outbound import CacheAdapter
+from pyfly.cache.ports.outbound import CacheAdapter, CacheCoordination
 from pyfly.config.auto import AutoConfiguration
 from pyfly.container.bean import bean
 from pyfly.container.container import Container
@@ -38,17 +38,17 @@ class CacheAutoConfiguration:
 
     @staticmethod
     def detect_provider() -> str:
-        """Detect the best available cache provider."""
-        if AutoConfiguration.is_available("redis.asyncio"):
-            return "redis"
-        return "memory"
+        """The shared default is PostgreSQL, independent of installed optional clients."""
+        return "postgres"
 
     @bean
     def cache_adapter(self, config: Config, container: Container | None = None) -> CacheAdapter:
-        configured = str(config.get("pyfly.cache.provider", "auto"))
+        configured = str(config.get("pyfly.cache.provider", "postgres"))
         provider = configured if configured != "auto" else self.detect_provider()
 
-        if provider == "redis" and AutoConfiguration.is_available("redis.asyncio"):
+        if provider == "redis":
+            if not AutoConfiguration.is_available("redis.asyncio"):
+                raise ValueError("pyfly.cache.provider=redis requires pyfly[redis].")
             import redis.asyncio as aioredis
 
             from pyfly.cache.adapters.redis import RedisCacheAdapter
@@ -76,11 +76,16 @@ class CacheAutoConfiguration:
             registry = context_datasource_registry(config, container)
             datasource = module_datasource(registry, config, "pyfly.cache.postgres", name="cache")
             purge_interval = _purge_interval(config.get("pyfly.cache.postgres.purge-interval", 60))
+            if container is not None:
+                container.bind(CacheCoordination, PostgresCacheAdapter)
             return PostgresCacheAdapter(
                 datasource,
                 create_table=creates_tables(registry.properties.ddl_auto),
                 purge_interval=purge_interval if purge_interval > timedelta(0) else None,
             )
+
+        if provider != "memory":
+            raise ValueError(f"Unknown pyfly.cache.provider {provider!r}; choose postgres, memory or redis.")
 
         from pyfly.cache.adapters.memory import InMemoryCache
 

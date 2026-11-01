@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.10.31` | 2026-10-31 | PostgreSQL default cache and primary atomic rolling-window coordination. |
 | `26.10.30` | 2026-10-31 | Scoped Admin audit reads, explicit cost coverage, telemetry privacy and frozen skill packages. |
 | `26.10.29` | 2026-10-31 | Native audit journal, trusted module recording, signed archive delivery and conservative effect admission. |
 | `26.10.28` | 2026-10-31 | Verified email TLS, private diagnostics, explicit uncertain outcomes and optional Azure email. |
@@ -128,20 +129,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.10.30"
+print(pyfly.__version__)  # → "26.10.31"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.10.30
+pyfly --version            # → pyfly, version 26.10.31
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.10.30) (Python 3.13.9)
+:: PyFly Framework :: (v26.10.31) (Python 3.13.9)
 ```
 
 ---

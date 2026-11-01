@@ -46,7 +46,14 @@ from pyfly.cqrs.query.bus import DefaultQueryBus
 from pyfly.cqrs.query.handler import QueryHandler
 from pyfly.cqrs.types import Query
 from pyfly.data.relational.datasource_registry import DataSourceRegistry
-from pyfly.data.relational.framework_schema import cache_entries, event_store, event_store_head, locks, snapshots
+from pyfly.data.relational.framework_schema import (
+    cache_entries,
+    cache_windows,
+    event_store,
+    event_store_head,
+    locks,
+    snapshots,
+)
 from pyfly.data.transaction import CommitTracker, track_commits, transactional
 from pyfly.eventsourcing.event import StoredEventEnvelope
 from pyfly.eventsourcing.store import EventStore
@@ -90,7 +97,9 @@ class PriceHandler(QueryHandler[PriceQuery, int]):
 @pytest.fixture
 async def context(relational_backend: RelationalBackend) -> AsyncIterator[ApplicationContext]:
     ATTEMPTS.clear()
-    await relational_backend.create_tables(event_store, event_store_head, snapshots, cache_entries, locks)
+    await relational_backend.create_tables(
+        event_store, event_store_head, snapshots, cache_entries, cache_windows, locks
+    )
     ctx = ApplicationContext(
         relational_backend.config(
             {

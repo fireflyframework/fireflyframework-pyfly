@@ -129,16 +129,17 @@ class TestConfigEnvVarNormalization:
         assert config.get("pyfly.data.pool-size") == "20"
 
 
-class TestDefaultsNoInfrastructure:
-    """Framework defaults must not depend on external infrastructure."""
+class TestDefaultsInfrastructure:
+    """Disabled subsystems do not connect; enabling the cache selects shared PostgreSQL."""
 
     def test_messaging_defaults_to_memory(self):
         config = Config(Config._load_framework_defaults())
         assert config.get("pyfly.messaging.provider") == "memory"
 
-    def test_cache_defaults_to_memory(self):
+    def test_cache_defaults_to_postgres_but_is_disabled(self):
         config = Config(Config._load_framework_defaults())
-        assert config.get("pyfly.cache.provider") == "memory"
+        assert config.get("pyfly.cache.provider") == "postgres"
+        assert config.get("pyfly.cache.enabled") is False
 
 
 class TestMultiSourceConfig:
