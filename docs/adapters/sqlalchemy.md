@@ -87,6 +87,11 @@ SQLite, PostgreSQL, MySQL 8 and MariaDB 11 are the databases the test suite runs
 MariaDB, `pool.pre-ping` needs SQLAlchemy 2.0.50 or later, which the `data-relational` extra requires:
 with 2.0.49 and PyMySQL 1.2 installed, every other pre-pinged checkout raised `TypeError`.
 
+PostgreSQL TLS options depend on the selected driver. `asyncpg` accepts `ssl: true`; psycopg uses
+libpq fields such as `sslmode: verify-full` and `sslrootcert`. PyFly forwards these options without
+translation. Follow [PostgreSQL TLS by driver](../modules/data-relational.md#postgresql-tls-by-driver)
+for CA loading, hostname verification and complete examples before changing a driver or role.
+
 ---
 
 ## Adapter-Specific Features
