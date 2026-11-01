@@ -302,7 +302,7 @@ The journal remains borrowed: Admin neither starts exporters nor closes the
 journal, creates keys, appends facts, acknowledges deliveries or replays effects.
 
 The `#audit` view lists cursor pages in one currently authorized scope, supports
-keyboard entry details, and verifies a displayed range of at most100 entries.
+keyboard entry details, and verifies a displayed range of at most 100 entries.
 Every read and range check requires a verified `SecurityContext`, an allowed
 Admin role, a host-resolved scope and the corresponding scoped permission.
 This applies even if legacy monitoring uses `require-auth: false`.
@@ -348,7 +348,7 @@ Applications may expose existing separate resolver/evaluator beans instead.
 This composition deliberately supplies no default identity, project or policy.
 
 `GET /admin/api/audit?scope=<opaque-handle>&after=0&limit=25` requires
-`admin:audit:read`; `limit` is1–100. The response contains exact scope/head,
+`admin:audit:read`; `limit` is 1–100. The response contains exact scope/head,
 immutable entry facts, `snapshot_through_sequence`, `next_after_sequence` and
 `has_more`. Send `through=<snapshot_through_sequence>` for later pages in that
 snapshot. No global count, scope enumeration or SQL search is fabricated.
@@ -374,7 +374,7 @@ deployments should use the authenticated operator configuration above; these
 process-local views do not establish Studio project/tenant isolation. Studio's
 human/project permissions remain the product's domain authority.
 
-HTTP trace query values are discarded before retention. The500-row collector
+HTTP trace query values are discarded before retention. The 500-row collector
 and live client use process-local monotonic IDs; evicted/cleared gaps are
 reported, and reconnect replay is deduplicated within the retained window.
 The configured Admin and actuator prefixes are excluded. Recorded status is
