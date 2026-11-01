@@ -14,6 +14,7 @@
 
 """Lab subpackage -- sessions, benchmarks, comparisons, datasets, and evaluation."""
 
+from pyfly.agentic.lab._inputs import LabInput
 from pyfly.agentic.lab.benchmark import Benchmark, BenchmarkResult
 from pyfly.agentic.lab.comparison import ComparisonEntry, ModelComparison
 from pyfly.agentic.lab.dataset import EvalCase, EvalDataset
@@ -29,6 +30,7 @@ __all__ = [
     "EvalOrchestrator",
     "EvalReport",
     "EvalResult",
+    "LabInput",
     "LabSession",
     "ModelComparison",
     "SessionEntry",

@@ -17,15 +17,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import deepcopy
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+from pyfly.agentic.lab._inputs import LabInput, snapshot_input
 
 
 class ComparisonEntry(BaseModel):
     """A single comparison data point."""
 
-    prompt: str
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    prompt: LabInput
     responses: dict[str, str] = {}  # agent_name -> response
 
 
@@ -36,16 +41,17 @@ class ModelComparison:
         prompts: Test prompts.
     """
 
-    def __init__(self, prompts: Sequence[str]) -> None:
-        self._prompts = list(prompts)
+    def __init__(self, prompts: Sequence[LabInput]) -> None:
+        self._prompts = [snapshot_input(value) for value in prompts]
 
     async def compare(self, agents: dict[str, Any]) -> list[ComparisonEntry]:
         """Run every prompt through every agent and return entries."""
         entries: list[ComparisonEntry] = []
-        for prompt in self._prompts:
+        prompts = [snapshot_input(value) for value in self._prompts]
+        for prompt in prompts:
             responses: dict[str, str] = {}
             for name, agent in agents.items():
-                result = await agent.run(prompt)
+                result = await agent.run(deepcopy(prompt))
                 responses[name] = str(result.output if hasattr(result, "output") else result)
             entries.append(ComparisonEntry(prompt=prompt, responses=responses))
         return entries

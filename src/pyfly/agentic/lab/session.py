@@ -16,19 +16,23 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from pyfly.agentic.lab._inputs import LabInput, snapshot_input
 from pyfly.agentic.types import AgentLike
 
 
 class SessionEntry(BaseModel):
     """A single interaction within a lab session."""
 
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    prompt: str
+    prompt: LabInput
     response: str = ""
     metadata: dict[str, Any] = {}
 
@@ -55,9 +59,10 @@ class LabSession:
     def history(self) -> list[SessionEntry]:
         return list(self._history)
 
-    async def interact(self, prompt: str, **kwargs: Any) -> str:
+    async def interact(self, prompt: LabInput, **kwargs: Any) -> str:
         """Send a prompt to the agent and record the interaction."""
-        result = await self._agent.run(prompt, **kwargs)
+        prompt = snapshot_input(prompt)
+        result = await self._agent.run(deepcopy(prompt), **kwargs)
         response = str(result.output if hasattr(result, "output") else result)
         self._history.append(SessionEntry(prompt=prompt, response=response, metadata=kwargs))
         return response

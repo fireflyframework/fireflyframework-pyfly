@@ -21,13 +21,17 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+from pyfly.agentic.lab._inputs import LabInput, snapshot_input
 
 
 class EvalCase(BaseModel):
     """A single evaluation test case."""
 
-    input: str
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    input: LabInput
     expected_output: str = ""
     metadata: dict[str, Any] = {}
 
@@ -59,12 +63,11 @@ class EvalDataset:
 
     def to_json(self, path: str | Path) -> None:
         """Save the dataset to a JSON file."""
+        snapshots = [case.model_copy(update={"input": snapshot_input(case.input)}).model_dump() for case in self._cases]
+        encoded = json.dumps(snapshots, indent=2)
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps([c.model_dump() for c in self._cases], indent=2),
-            encoding="utf-8",
-        )
+        target.write_text(encoded, encoding="utf-8")
 
     def __len__(self) -> int:
         return len(self._cases)

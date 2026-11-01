@@ -149,6 +149,77 @@ dataset = EvalDataset.from_json("test_data.json")
 
 ---
 
+## Structured process inputs
+
+Lab inputs can be text or a JSON object through the shared `LabInput` type. An
+object retains its nested lists, numbers, booleans and null values in datasets,
+evaluation reports, comparison entries and session history. `to_json` and
+`from_json` preserve that structure; a field named `input` inside the object is
+ordinary business data, not an instruction to unwrap the payload.
+
+Lab validates inputs before invoking the subject. Non-JSON values and nonfinite
+numbers are rejected. Each invocation receives its own copy so a process that
+changes its input cannot alter the dataset, another comparison subject's input,
+or the original input recorded in the report. Configured batches are validated
+before their first invocation.
+
+This contract describes the input to the **evaluation subject**. A concrete
+PyFly or PydanticAI agent still accepts its supported text or multimodal prompt.
+To evaluate a process that accepts a business object, adapt the configured native
+pipeline explicitly. Pass the object as `inputs=` to `PipelineEngine.run`; its
+first positional argument has a different purpose.
+
+The following adapter evaluates an existing native engine and exposes its final
+output to the existing string scorer. It fails the evaluation if the pipeline
+fails, rather than scoring a failed execution as an ordinary response.
+
+```python
+from types import SimpleNamespace
+from typing import Any
+
+from pyfly.agentic.lab import EvalCase, EvalDataset, EvalOrchestrator, LabInput
+from pyfly.agentic.pipeline import PipelineEngine
+
+
+class PipelineSubject:
+    def __init__(self, engine: PipelineEngine) -> None:
+        self.engine = engine
+
+    async def run(self, prompt: LabInput, **kwargs: Any) -> SimpleNamespace:
+        result = await self.engine.run(inputs=prompt, **kwargs)
+        if not result.success:
+            raise RuntimeError("The evaluated pipeline did not complete successfully")
+        return SimpleNamespace(output=result.final_output)
+
+
+async def evaluate_pipeline(engine: PipelineEngine):
+    dataset = EvalDataset([
+        EvalCase(
+            input={"input": {"order_id": "order-42", "quantity": 2}},
+            expected_output="approved",
+        ),
+    ])
+    report = await EvalOrchestrator().evaluate(
+        PipelineSubject(engine), dataset, agent_name="order-review"
+    )
+    assert report.results[0].input == dataset.cases[0].input
+    return report
+```
+
+The supplied engine must implement the order-review process and validate its
+business schema. Lab's JSON validation does not replace application permissions,
+resource limits, secret handling or runtime admission. Keep those checks on the
+same native execution path used outside evaluation. Lab records inputs in its
+reports and dataset files, so use evaluation data appropriate for their access
+and retention policy.
+
+`Benchmark`, `ModelComparison` and `LabSession` accept the same input contract
+when their subjects support it. Expected outputs, actual outputs and custom
+scorers remain strings; structured input does not silently change scoring
+semantics or add a structured-output evaluator.
+
+---
+
 ## Evaluators
 
 The `EvalOrchestrator` runs an agent against an `EvalDataset` with a pluggable scorer

@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from pyfly.agentic.lab._inputs import LabInput, snapshot_input
 from pyfly.agentic.lab.dataset import EvalDataset
 from pyfly.agentic.types import AgentLike
 
@@ -30,7 +32,9 @@ Scorer = Callable[[str, str], float]
 class EvalResult(BaseModel):
     """Result for a single evaluation case."""
 
-    input: str
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    input: LabInput
     expected: str
     actual: str
     score: float = 0.0
@@ -64,15 +68,16 @@ class EvalOrchestrator:
         """Evaluate *agent* against *dataset*."""
         name = agent_name or getattr(agent, "name", "unknown")
         results: list[EvalResult] = []
+        cases = [(snapshot_input(case.input), case.expected_output) for case in dataset.cases]
 
-        for case in dataset.cases:
-            result = await agent.run(case.input)
+        for original, expected in cases:
+            result = await agent.run(deepcopy(original))
             actual = str(result.output if hasattr(result, "output") else result)
-            score = self._scorer(case.expected_output, actual)
+            score = self._scorer(expected, actual)
             results.append(
                 EvalResult(
-                    input=case.input,
-                    expected=case.expected_output,
+                    input=original,
+                    expected=expected,
                     actual=actual,
                     score=score,
                 )
