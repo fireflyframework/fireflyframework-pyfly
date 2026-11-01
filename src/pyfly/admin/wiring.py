@@ -67,9 +67,7 @@ def build_admin_routes(
     from pyfly.admin.providers.transactions_provider import TransactionsProvider
     from pyfly.admin.registry import AdminViewRegistry
 
-    admin_props = AdminProperties()
-    with contextlib.suppress(Exception):
-        admin_props = context.config.bind(AdminProperties)
+    admin_props = context.config.bind(AdminProperties)
 
     # Server mode: build the instance registry and seed it from statically
     # configured instances so the /api/instances routes are mounted and
@@ -140,6 +138,11 @@ def build_admin_routes(
         flags=FlagsProvider(context),
         agentic=AgenticProvider(context),
     )
+    from pyfly.admin.audit.wiring import build_audit_routes
     from pyfly.admin.data.wiring import build_data_routes
 
-    return build_data_routes(context, admin_props.path, extra_post_start) + list(admin_builder.build_routes())
+    return (
+        build_audit_routes(context, admin_props.path, extra_post_start)
+        + build_data_routes(context, admin_props.path, extra_post_start)
+        + list(admin_builder.build_routes())
+    )

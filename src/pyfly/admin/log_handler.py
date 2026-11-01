@@ -41,6 +41,12 @@ class AdminLogHandler(logging.Handler):
         self._records: deque[dict[str, Any]] = deque(maxlen=max_records)
         self._counter: int = 0
 
+    async def start(self) -> None:
+        logging.getLogger().addHandler(self)
+
+    async def stop(self) -> None:
+        logging.getLogger().removeHandler(self)
+
     @staticmethod
     def _parse_message(raw: str) -> dict[str, str]:
         """Strip ANSI codes and extract structlog event/context if possible."""

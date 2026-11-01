@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.10.30 (2026-10-31)
+
+### Added
+
+- Add opt-in native DI Admin audit read ports with mandatory trusted scope resolution,
+  current scoped permissions, bounded immutable cursor pages and unanchored range checks.
+  Provide a read-only native dashboard view with keyboard details and authorized paging;
+  no journal mutation, external custody, global tenant search or OTel history is implied.
+- Expose known/partial/unknown/unavailable cost coverage and a known subtotal from the
+  shared native UsageTracker, plus a bounded OTel status counter. Preserve legacy
+  numeric totals and budgets without repricing historical or manual observations.
+- Add frozen, bounded SkillPackage snapshots with exact skill pins, dependency-first
+  resolution and host-provided requirement checks. Packaging grants no tool capability,
+  implicit installation, signature trust or remote execution authority.
+
+### Fixed
+
+- Fail closed on invalid Admin configuration instead of silently disabling configured
+  authentication. Discard HTTP query values before retention and honor configured
+  monitoring exclusions; keep saturated SSE advancing with gaps and replay deduplication.
+- Retain the actual prepared streaming HTTP status instead of the filter's 200 sentinel.
+  Label HTTP dispatch and Agentic retained usage honestly as process-local operations data.
+- Register Admin log capture only through native lifecycle start/stop, retaining other
+  contexts' handlers and removing it after failed startup or ordinary shutdown.
+- Refuse Admin journal reads inside active, suspended or repository auto-read Data units,
+  and recheck current scope authority before releasing facts.
+
 ## v26.10.29 (2026-10-31)
 
 ### Added

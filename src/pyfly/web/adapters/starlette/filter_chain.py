@@ -37,8 +37,8 @@ class _AlreadySentResponse(Response):
     pass-through ASGI middleware.
     """
 
-    def __init__(self) -> None:
-        super().__init__(b"", status_code=200)
+    def __init__(self, status_code: int) -> None:
+        super().__init__(b"", status_code=status_code)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: D401
         return
@@ -154,7 +154,7 @@ class WebFilterChainMiddleware:
 
             if state["streaming"]:
                 # Body already forwarded live; nothing left to send.
-                return _AlreadySentResponse()
+                return _AlreadySentResponse(status_code)
 
             response = Response(content=b"".join(body_parts), status_code=status_code)
             response.raw_headers[:] = raw_headers

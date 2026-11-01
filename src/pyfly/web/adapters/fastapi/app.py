@@ -87,9 +87,13 @@ def create_app(
 
     admin_trace_collector = None
     if admin_enabled:
+        from pyfly.actuator.exposure import base_path as actuator_base_path
         from pyfly.admin.middleware.trace_collector import TraceCollectorFilter
 
-        admin_trace_collector = TraceCollectorFilter()
+        admin_trace_collector = TraceCollectorFilter(
+            admin_path=str(context.config.get("pyfly.admin.path", "/admin")) if context else "/admin",
+            actuator_path=actuator_base_path(context.config if context else None),
+        )
 
     # HTTP auto-instrumentation (Spring `http.server.requests` parity). Owned
     # directly here because the bean is built too late to reach the chain.

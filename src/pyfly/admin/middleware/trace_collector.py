@@ -16,10 +16,12 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
@@ -34,8 +36,18 @@ class TraceCollectorFilter(OncePerRequestFilter):
 
     exclude_patterns = ["/admin/*", "/actuator/*"]
 
-    def __init__(self, max_traces: int = 500) -> None:
+    def __init__(self, max_traces: int = 500, *, admin_path: str = "/admin", actuator_path: str = "/actuator") -> None:
         self._traces: deque[dict[str, Any]] = deque(maxlen=max_traces)
+        self._lock = threading.Lock()
+        self._sequence = 0
+        self._collector_id = uuid4().hex
+        self._excluded_prefixes = (admin_path.rstrip("/"), actuator_path.rstrip("/"))
+
+    def should_not_filter(self, request: Any) -> bool:
+        path = request.url.path
+        return super().should_not_filter(request) or any(
+            path == prefix or path.startswith(prefix + "/") for prefix in self._excluded_prefixes
+        )
 
     async def do_filter(self, request: Any, call_next: CallNext) -> Any:
         start = time.monotonic()
@@ -43,7 +55,6 @@ class TraceCollectorFilter(OncePerRequestFilter):
         duration_ms = round((time.monotonic() - start) * 1000, 2)
 
         # Extract additional request metadata
-        query_string = str(request.url.query) if request.url.query else ""
         client_host = request.client.host if request.client else None
         content_type = request.headers.get("content-type")
         user_agent = request.headers.get("user-agent", "")
@@ -58,24 +69,31 @@ class TraceCollectorFilter(OncePerRequestFilter):
                 with contextlib.suppress(ValueError, TypeError):
                     content_length = int(cl)
 
-        self._traces.append(
-            {
-                "timestamp": datetime.now(UTC).isoformat(),
-                "method": request.method,
-                "path": request.url.path,
-                "query_string": query_string,
-                "status": response.status_code,
-                "duration_ms": duration_ms,
-                "client_host": client_host,
-                "content_type": content_type,
-                "user_agent": user_agent,
-                "content_length": content_length,
-            }
-        )
+        with self._lock:
+            self._sequence += 1
+            self._traces.append(
+                {
+                    "id": self._sequence,
+                    "collector_id": self._collector_id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "method": request.method,
+                    "path": request.url.path,
+                    # Query values frequently carry credentials; withhold them before retention.
+                    "query_string": "",
+                    "status": response.status_code,
+                    "duration_ms": duration_ms,
+                    "client_host": client_host,
+                    "content_type": content_type,
+                    "user_agent": user_agent,
+                    "content_length": content_length,
+                }
+            )
         return response
 
     def get_traces(self) -> list[dict[str, Any]]:
-        return list(self._traces)
+        with self._lock:
+            return [dict(trace) for trace in self._traces]
 
     def clear_traces(self) -> None:
-        self._traces.clear()
+        with self._lock:
+            self._traces.clear()

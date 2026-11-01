@@ -438,6 +438,7 @@ class AdminRouteBuilder:
                 "serverMode": self._instance_registry is not None,
                 "agenticEnabled": self._agentic is not None and self._agentic.available,
                 "dataEnabled": str(self._props.data.get("enabled", False)).lower() in ("true", "1", "yes"),
+                "auditEnabled": str(self._props.audit.get("enabled", False)).lower() in ("true", "1", "yes"),
             }
         )
 

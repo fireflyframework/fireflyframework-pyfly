@@ -24,6 +24,13 @@ function metric(label, value) {
 }
 const number = value => Number(value || 0).toLocaleString();
 const money = value => '$' + Number(value || 0).toFixed(4);
+function costEstimate(usage) {
+    if (!usage?.record_count || usage.cost_status === 'unavailable') return 'No observations';
+    const amount = usage.known_cost_usd;
+    if (!['known', 'partial'].includes(usage.cost_status) || amount == null
+        || !Number.isFinite(Number(amount)) || Number(amount) < 0) return 'Unknown';
+    return money(amount) + (usage.cost_status === 'partial' ? ' (partial)' : '');
+}
 
 export async function render(container, api, { signal } = {}) {
     const wrapper = node('div', 'agentic-view');
@@ -59,7 +66,7 @@ export async function render(container, api, { signal } = {}) {
                 ['Input tokens', number(data.usage.total_input_tokens)],
                 ['Output tokens', number(data.usage.total_output_tokens)],
                 ['Total tokens', number(data.usage.total_tokens)],
-                ['Estimated cost', money(data.usage.total_cost_usd)],
+                ['Estimated cost', costEstimate(data.usage)],
                 ['Total latency', number(Math.round(data.usage.total_latency_ms || 0)) + ' ms'],
                 ['Retained calls', number(data.usage.record_count)],
             ]) {
@@ -68,7 +75,7 @@ export async function render(container, api, { signal } = {}) {
                 usage.append(item);
             }
             body.append(card('Usage', usage));
-            const note = node('p', 'text-muted mb-lg', 'Usage covers retained calls in this runtime. Cost is an estimate; unpriced models may report zero.');
+            const note = node('p', 'text-muted mb-lg', 'Usage shows retained observations in this process. Costs are estimates; unknown pricing is excluded from the known subtotal.');
             body.append(note);
             const quota = node('div', 'admin-card-body');
             quota.append(node('p', '', data.quota.enabled ? 'Quota management enabled' : 'Quota management disabled'));
@@ -98,7 +105,7 @@ export async function render(container, api, { signal } = {}) {
                     detailBody.append(node('p', '', `Tags: ${(detail.tags || []).join(', ') || 'None'}`));
                     if (kind === 'agents') {
                         detailBody.append(node('p', '', `Version: ${detail.version}`));
-                        detailBody.append(node('p', '', `Model requests: ${number(detail.usage.total_requests)} · Total tokens: ${number(detail.usage.total_tokens)} · Estimated cost: ${money(detail.usage.total_cost_usd)}`));
+                        detailBody.append(node('p', '', `Model requests: ${number(detail.usage.total_requests)} · Total tokens: ${number(detail.usage.total_tokens)} · Estimated cost: ${costEstimate(detail.usage)}`));
                     } else {
                         detailBody.append(node('p', '', `Parameters: ${number(detail.parameter_count)}`));
                     }

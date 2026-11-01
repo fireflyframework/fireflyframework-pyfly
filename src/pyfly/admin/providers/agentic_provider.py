@@ -44,6 +44,10 @@ class AgenticProvider:
                 "total_requests",
                 "total_latency_ms",
                 "record_count",
+                "cost_status",
+                "known_cost_usd",
+                "known_cost_records",
+                "unknown_cost_records",
             )
         }
 

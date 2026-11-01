@@ -5,7 +5,7 @@
  * navigates on Enter. Built with safe DOM construction (no innerHTML with data).
  */
 
-import { createSvgIcon, ICONS, NAV_ITEMS, SERVER_ITEMS, DATA_ITEMS, AGENTIC_ITEMS } from './sidebar.js';
+import { createSvgIcon, ICONS, NAV_ITEMS, SERVER_ITEMS, DATA_ITEMS, AGENTIC_ITEMS, AUDIT_ITEMS } from './sidebar.js';
 
 /**
  * Install the command palette and its global ⌘K / Ctrl-K shortcut.
@@ -16,8 +16,8 @@ import { createSvgIcon, ICONS, NAV_ITEMS, SERVER_ITEMS, DATA_ITEMS, AGENTIC_ITEM
  * @param {function} [opts.onToggleTheme]  Toggle dark/light.
  * @returns {{ open: function, close: function }}
  */
-export function installCommandPalette({ onNavigate, serverMode = false, dataEnabled = false, agenticEnabled = false, onToggleTheme = null }) {
-    const navItems = [...NAV_ITEMS, ...(agenticEnabled ? AGENTIC_ITEMS : []), ...(dataEnabled ? DATA_ITEMS : []), ...(serverMode ? SERVER_ITEMS : [])];
+export function installCommandPalette({ onNavigate, serverMode = false, dataEnabled = false, agenticEnabled = false, auditEnabled = false, onToggleTheme = null }) {
+    const navItems = [...NAV_ITEMS, ...(agenticEnabled ? AGENTIC_ITEMS : []), ...(dataEnabled ? DATA_ITEMS : []), ...(auditEnabled ? AUDIT_ITEMS : []), ...(serverMode ? SERVER_ITEMS : [])];
 
     const commands = [
         ...navItems.map((it) => ({

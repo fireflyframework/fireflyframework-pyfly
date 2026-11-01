@@ -54,6 +54,7 @@ def test_agentic_dashboard_browser(tmp_path):
                 expect(page).to_have_title("pyfly admin")
                 expect(page.locator(".admin-navbar-title")).to_have_text("pyfly admin")
                 expect(page.get_by_role("heading", name="Agentic", exact=True)).to_be_visible()
+                expect(page.locator(".agentic-metrics").get_by_text("Unknown", exact=True)).to_be_visible()
                 expect(page.get_by_role("link", name="Agentic", exact=True)).to_be_visible()
                 expect(page.get_by_role("button", name="research_assistant", exact=True)).to_be_visible()
                 page.get_by_role("button", name="research_assistant", exact=True).focus()

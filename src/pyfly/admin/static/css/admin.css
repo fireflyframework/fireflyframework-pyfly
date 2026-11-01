@@ -2297,3 +2297,8 @@ body.has-fullscreen {
 }
 .admin-sidebar-section { font-size: 0.8rem; font-weight: 650; }
 .stat-card-label { font-size: 0.88rem; }
+
+.audit-view .audit-fact { overflow-wrap: anywhere; }
+.audit-view .filter-toolbar { flex-wrap: wrap; }
+.audit-view .filter-toolbar label { display: grid; gap: 6px; min-width: 0; }
+.audit-view .page-subtitle { max-width: 70ch; }

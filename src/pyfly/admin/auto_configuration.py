@@ -15,11 +15,13 @@
 
 from __future__ import annotations
 
+from pyfly.admin.audit import AdminAuditProvider, AdminAuditScopeResolver
 from pyfly.admin.config import AdminClientProperties, AdminProperties
 from pyfly.admin.log_handler import AdminLogHandler
 from pyfly.admin.providers.runtime_provider import RuntimeProvider
 from pyfly.admin.registry import AdminViewRegistry
 from pyfly.admin.server.client_registration import AdminClientRegistration
+from pyfly.audit.ports import AuditJournal
 from pyfly.container.bean import bean
 from pyfly.context.conditions import (
     auto_configuration,
@@ -27,6 +29,7 @@ from pyfly.context.conditions import (
     conditional_on_property,
 )
 from pyfly.core.config import Config
+from pyfly.security.permission import PermissionEvaluator
 
 
 @auto_configuration
@@ -47,6 +50,17 @@ class AdminAutoConfiguration:
     def runtime_provider(self) -> RuntimeProvider:
         return RuntimeProvider()
 
+    @bean
+    @conditional_on_property("pyfly.admin.audit.enabled", having_value="true")
+    def admin_audit_provider(
+        self,
+        properties: AdminProperties,
+        journal: AuditJournal,
+        resolver: AdminAuditScopeResolver,
+        evaluator: PermissionEvaluator,
+    ) -> AdminAuditProvider:
+        return AdminAuditProvider(journal, resolver, evaluator, allowed_roles=tuple(properties.allowed_roles))
+
     # NOTE: the HTTP trace collector (TraceCollectorFilter) is created and wired
     # into the WebFilter chain directly by ``create_app`` — it must join the
     # chain while the ASGI middleware is assembled, which happens before this
@@ -59,7 +73,6 @@ class AdminAutoConfiguration:
 
         handler = AdminLogHandler()
         handler.setFormatter(logging.Formatter("%(message)s"))
-        logging.getLogger().addHandler(handler)
         return handler
 
     @bean

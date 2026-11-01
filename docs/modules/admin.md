@@ -242,7 +242,7 @@ stream for live updates.
 | **Metrics** | `metrics` | Built-in process metrics (CPU, memory, threads, GC, uptime) always available without external dependencies. Optional Prometheus metrics included when `prometheus_client` is installed. Selecting a numeric metric opens a **live time-series trend** — a rolling chart polled at the configured refresh interval with a Value / Rate (Δ/s) toggle, pause/resume, Current/Min/Max/Avg summary, a measurement selector for multi-series (tagged) metrics, and a live-refreshing measurements table. Non-numeric metrics show a snapshot instead. |
 | **Observability** | `observability` | Live server-layer observability for the ASGI server (uvicorn, granian, hypercorn). Stat cards for workers, uptime, active connections, in-flight requests, and requests/sec, plus rolling charts and a per-worker breakdown table. Shows worker lifecycle (started/stopped) and links across to the Metrics and Traces views. Backed by the `server_*` meters exposed at `/actuator/prometheus`. Real-time SSE updates. |
 | **Scheduled Tasks** | `scheduled` | All `@scheduled` tasks with cron expressions, fixed-rate/delay configuration, and execution status. |
-| **HTTP Traces** | `traces` | Recent HTTP request/response traces captured by `TraceCollectorFilter`. **Live request analytics**: total requests, average/max latency, error rate (4xx+5xx), a status-code mix bar (2xx/3xx/4xx/5xx), a latency-distribution histogram and latency percentiles (p50/p90/p95/p99) — all updating live as requests arrive. Shows method, path, status code, duration, query string, client host, content type, user agent, and response content-length. Click-to-detail panel. Status code filter pills (All, 2xx, 3xx, 4xx, 5xx). Real-time SSE for new traces. Client buffer bounded to the 500-entry ring buffer. |
+| **HTTP Traces** | `traces` | Recent HTTP request/response traces captured by `TraceCollectorFilter`. **Live request analytics**: total requests, average/max latency, error rate (4xx+5xx), a status-code mix bar (2xx/3xx/4xx/5xx), a latency-distribution histogram and latency percentiles (p50/p90/p95/p99) — all updating live as requests arrive. Shows method, path, status code, duration, client host, content type, user agent, and response content-length. Query values are withheld before retention. Click-to-detail panel. Status code filter pills (All, 2xx, 3xx, 4xx, 5xx). Real-time SSE for new traces. Client buffer bounded to the 500-entry ring buffer. |
 
 ### Infrastructure
 
@@ -269,7 +269,13 @@ parameter count), and workflow definitions. Select an agent or tool with the key
 or pointer for details; agent details include its own usage totals. **Refresh** fetches
 a new snapshot. Usage reports input/output/total tokens, model requests, estimated cost,
 latency and retained calls from this runtime's `UsageTracker`. Retention limits affect
-these totals, and models without price data can report zero estimated cost.
+these totals. Cost coverage is explicit: **known**, **partial**, **unknown**, or
+**unavailable** (no retained observations). A resolved valid zero is known; an
+unpriced model or a manually recorded legacy observation defaults to unknown.
+The displayed known subtotal excludes unknown observations. Numeric legacy
+totals, cumulative budgets and enforcement remain unchanged; historical calls
+are never repriced from current tariffs. This is process-local estimated usage,
+not an invoice or a project-isolated ledger.
 
 Quota information shows whether management is enabled, the configured daily budget,
 and remaining requests in configured per-minute rate limits. Model/provider identifiers
@@ -278,6 +284,103 @@ collect execution history. Every endpoint is read-only and uses the existing adm
 `require-auth` and `allowed-roles` policy. Agent instructions, prompts, messages,
 correlation IDs, tool arguments/defaults, model configuration and credentials are not
 included in these responses.
+
+`UsageRecord.cost_status` defaults to `unknown`. Native `UsageTracker.record_call`
+sets it to `known` only when a resolver returns a valid finite nonnegative price.
+`UsageSummary` adds `cost_status`, `known_cost_usd`, `known_cost_records`, and
+`unknown_cost_records`; the same coverage is present in agent/model buckets.
+The OTel `pyfly.agentic.cost.observations` counter has only a `status` label
+(`known`/`unknown`). EventBusSink includes `cost_status` alongside its existing
+numeric cost. Manual observations are not silently upgraded into priced facts.
+
+### Scoped Audit Journal (Read-Only)
+
+Enable `pyfly.admin.audit.enabled` explicitly, provide an application-owned
+`AuditJournal`, and register both `AdminAuditScopeResolver` and the native
+`PermissionEvaluator` as DI beans. Missing mandatory authority fails startup.
+The journal remains borrowed: Admin neither starts exporters nor closes the
+journal, creates keys, appends facts, acknowledges deliveries or replays effects.
+
+The `#audit` view lists cursor pages in one currently authorized scope, supports
+keyboard entry details, and verifies a displayed range of at most 100 entries.
+Every read and range check requires a verified `SecurityContext`, an allowed
+Admin role, a host-resolved scope and the corresponding scoped permission.
+This applies even if legacy monitoring uses `require-auth: false`.
+The scope resolver must recheck current host authority; an opaque query handle,
+a JWT role alone or a cursor is never a cross-project grant.
+
+```yaml
+pyfly:
+  admin:
+    enabled: true
+    require-auth: true
+    allowed-roles: [OPERATIONS]
+    audit:
+      enabled: true
+```
+
+```python
+from pyfly.admin.audit import AdminAuditScopeResolver
+from pyfly.container.bean import bean
+from pyfly.container.stereotypes import configuration
+from pyfly.security.permission import PermissionEvaluator
+from typing import Protocol
+
+class HostAuditAuthority(AdminAuditScopeResolver, PermissionEvaluator, Protocol):
+    """The host implements both methods against its current authorization store."""
+
+@configuration
+class AuditReaderConfiguration:
+    @bean
+    def admin_audit_scope_resolver(self, authority: HostAuditAuthority) -> AdminAuditScopeResolver:
+        return authority
+
+    @bean
+    def admin_audit_permissions(self, authority: HostAuditAuthority) -> PermissionEvaluator:
+        return authority
+```
+
+Register this configuration and a host implementation of `HostAuditAuthority`
+in the same context. Its async `resolve(security, requested_handle)` returns an
+exact `AuditScope` only after current scope authorization; its synchronous native
+`has_permission(...)` returns `True` only for the named read/verify operation.
+Applications may expose existing separate resolver/evaluator beans instead.
+This composition deliberately supplies no default identity, project or policy.
+
+`GET /admin/api/audit?scope=<opaque-handle>&after=0&limit=25` requires
+`admin:audit:read`; `limit` is 1–100. The response contains exact scope/head,
+immutable entry facts, `snapshot_through_sequence`, `next_after_sequence` and
+`has_more`. Send `through=<snapshot_through_sequence>` for later pages in that
+snapshot. No global count, scope enumeration or SQL search is fabricated.
+Authority is checked before querying and again before releasing results;
+responses use `Cache-Control: no-store`. The host resolver/evaluator must consult
+current revocation state rather than treating old JWT claims as durable grants.
+Reads refuse active Data units, including suspended and repository auto-read
+units, so they cannot expose an enclosing operation's uncommitted facts.
+
+`GET /admin/api/audit/verify?first=1&last=25` requires
+`admin:audit:verify` on the same host-resolved scope. It checks that bounded range
+and at most one predecessor with the native archive builder. The result is
+`range_verified_unanchored`: it establishes neither full-prefix verification
+nor an independently trusted checkpoint or external custody. Merely listing
+entries reports `not_verified`. Local archive storage is not WORM. This view
+does not read archive relay status, global backlog or OpenTelemetry spans.
+There is no audit SSE with handshake-only authorization, mutable journal CRUD,
+background polling verification, new storage backend or implicit global scope.
+
+Legacy Agentic, logs, HTTP traces and process metrics remain whole-application
+operations views using existing `require-auth`/`allowed-roles` semantics. Secure
+deployments should use the authenticated operator configuration above; these
+process-local views do not establish Studio project/tenant isolation. Studio's
+human/project permissions remain the product's domain authority.
+
+HTTP trace query values are discarded before retention. The 500-row collector
+and live client use process-local monotonic IDs; evicted/cleared gaps are
+reported, and reconnect replay is deduplicated within the retained window.
+The configured Admin and actuator prefixes are excluded. Recorded status is
+the actual prepared HTTP response status, including streaming responses;
+neither a prepared response nor retained dispatch timing proves client delivery
+or domain success. No OTel query store or span tree is inferred from exporters.
 
 ### Dashboard Identity
 

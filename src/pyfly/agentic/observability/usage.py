@@ -16,11 +16,12 @@ reasoning, experiments).
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 from pydantic_ai.usage import RunUsage
@@ -82,7 +83,7 @@ def reasoning_tokens_not_in_output(usage: Any) -> int:
 
 
 class UsageRecord(BaseModel):
-    """A single LLM usage observation. Schema is intentionally stable."""
+    """A usage observation; cost coverage is additive to the legacy numeric fields."""
 
     agent: str = ""
     model: str = ""
@@ -96,6 +97,11 @@ class UsageRecord(BaseModel):
     latency_ms: float = 0.0
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     correlation_id: str = ""
+    cost_status: Literal["known", "unknown"] = "unknown"
+
+    @property
+    def has_known_cost(self) -> bool:
+        return self.cost_status == "known" and math.isfinite(self.cost_usd) and self.cost_usd >= 0
 
 
 class UsageSummary(BaseModel):
@@ -108,15 +114,43 @@ class UsageSummary(BaseModel):
     record_count: int = 0
     by_agent: dict[str, dict[str, Any]] = Field(default_factory=dict)
     by_model: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    cost_status: Literal["known", "partial", "unknown", "unavailable"] = "unavailable"
+    known_cost_usd: float | None = None
+    known_cost_records: int = 0
+    unknown_cost_records: int = 0
+
+
+def _coverage_status(known: int, unknown: int) -> Literal["known", "partial", "unknown", "unavailable"]:
+    if known:
+        return "partial" if unknown else "known"
+    return "unknown" if unknown else "unavailable"
+
+
+def _usage_bucket() -> dict[str, Any]:
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "requests": 0,
+        "known_cost_usd": None,
+        "known_cost_records": 0,
+        "unknown_cost_records": 0,
+    }
+
+
+def _add_coverage(bucket: dict[str, Any], record: UsageRecord) -> None:
+    if record.has_known_cost:
+        bucket["known_cost_records"] += 1
+        bucket["known_cost_usd"] = (bucket["known_cost_usd"] or 0.0) + record.cost_usd
+    else:
+        bucket["unknown_cost_records"] += 1
 
 
 def _aggregate(records: list[UsageRecord]) -> UsageSummary:
-    by_agent: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0, "requests": 0}
-    )
-    by_model: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0, "requests": 0}
-    )
+    by_agent: dict[str, dict[str, Any]] = defaultdict(_usage_bucket)
+    by_model: dict[str, dict[str, Any]] = defaultdict(_usage_bucket)
+    coverage = _usage_bucket()
     total_in = total_out = total_tok = total_req = 0
     total_cost = total_lat = 0.0
     for r in records:
@@ -126,6 +160,7 @@ def _aggregate(records: list[UsageRecord]) -> UsageSummary:
         total_req += r.request_count
         total_cost += r.cost_usd
         total_lat += r.latency_ms
+        _add_coverage(coverage, r)
         if r.agent:
             a = by_agent[r.agent]
             a["input_tokens"] += r.input_tokens
@@ -133,6 +168,7 @@ def _aggregate(records: list[UsageRecord]) -> UsageSummary:
             a["total_tokens"] += r.total_tokens
             a["cost_usd"] += r.cost_usd
             a["requests"] += r.request_count
+            _add_coverage(a, r)
         if r.model:
             m = by_model[r.model]
             m["input_tokens"] += r.input_tokens
@@ -140,6 +176,9 @@ def _aggregate(records: list[UsageRecord]) -> UsageSummary:
             m["total_tokens"] += r.total_tokens
             m["cost_usd"] += r.cost_usd
             m["requests"] += r.request_count
+            _add_coverage(m, r)
+    for bucket in (*by_agent.values(), *by_model.values()):
+        bucket["cost_status"] = _coverage_status(bucket["known_cost_records"], bucket["unknown_cost_records"])
     return UsageSummary(
         total_input_tokens=total_in,
         total_output_tokens=total_out,
@@ -150,11 +189,15 @@ def _aggregate(records: list[UsageRecord]) -> UsageSummary:
         record_count=len(records),
         by_agent=dict(by_agent),
         by_model=dict(by_model),
+        cost_status=_coverage_status(coverage["known_cost_records"], coverage["unknown_cost_records"]),
+        known_cost_usd=coverage["known_cost_usd"],
+        known_cost_records=coverage["known_cost_records"],
+        unknown_cost_records=coverage["unknown_cost_records"],
     )
 
 
 # Type alias: a resolver is either the full chain (Sequence[CostFn]) or a single callable.
-_ResolverArg = Sequence[CostFn] | Callable[[CostContext], float] | None
+_ResolverArg = Sequence[CostFn] | CostFn | None
 
 
 class UsageTracker:
@@ -202,7 +245,7 @@ class UsageTracker:
             reasoning_tokens=reasoning_tokens,
             provider_payload=provider_payload,
         )
-        cost = self._resolve(ctx)
+        cost, status = self._resolve_with_status(ctx)
         record = UsageRecord(
             agent=agent,
             model=model,
@@ -213,6 +256,7 @@ class UsageTracker:
             cache_read_tokens=cache_read_tokens,
             request_count=request_count,
             cost_usd=cost,
+            cost_status=status,
             latency_ms=latency_ms,
             correlation_id=correlation_id,
         )
@@ -220,16 +264,16 @@ class UsageTracker:
         return record
 
     def _resolve(self, ctx: CostContext) -> float:
-        # resolve_cost returns float | None (strict mode raises instead);
-        # UsageRecord.cost_usd is a float, so coerce None to 0.0 here.
-        # The cost_unknown metric and WARNING have already fired upstream.
+        return self._resolve_with_status(ctx)[0]
+
+    def _resolve_with_status(self, ctx: CostContext) -> tuple[float, Literal["known", "unknown"]]:
         if self._resolver is None:
             result = resolve_cost(ctx)
         elif callable(self._resolver):
-            result = self._resolver(ctx)
+            result = resolve_cost(ctx, [self._resolver], strict=False)
         else:
             result = resolve_cost(ctx, self._resolver)
-        return 0.0 if result is None else float(result)
+        return (0.0, "unknown") if result is None else (float(result), "known")
 
     # -- Low-level entry -------------------------------------------------
     def record(self, usage: UsageRecord, scope_ctx: ScopeContext | None = None) -> None:

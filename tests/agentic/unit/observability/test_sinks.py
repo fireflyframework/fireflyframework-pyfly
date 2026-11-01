@@ -90,6 +90,7 @@ def test_event_bus_sink_calls_agent_completed() -> None:
             latency_ms=50.0,
             model="x",
             cost_usd=0.01,
+            cost_status="unknown",
             input_tokens=6,
             output_tokens=4,
         )

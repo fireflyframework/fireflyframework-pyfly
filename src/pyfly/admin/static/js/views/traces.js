@@ -379,7 +379,7 @@ export async function render(container, api) {
     headerLeft.appendChild(h1);
     const sub = document.createElement('div');
     sub.className = 'page-subtitle';
-    sub.textContent = 'application.traces';
+    sub.textContent = 'Retained HTTP dispatch metadata in this process. Not an OpenTelemetry trace store or proof of delivery.';
     headerLeft.appendChild(sub);
     header.appendChild(headerLeft);
 
@@ -705,8 +705,9 @@ export async function render(container, api) {
         }, 400);
     }
 
-    sse.connectTyped('/traces', 'trace', (traceData) => {
+    const traceSource = sse.connectTyped('/traces', 'trace', (traceData) => {
         if (paused) return;
+        if (traces.some(row => row.collector_id === traceData.collector_id && row.id === traceData.id)) return;
         traces.unshift(traceData);
         // Bound the in-memory window (newest kept).
         if (traces.length > MAX_TRACES) traces.length = MAX_TRACES;
@@ -723,6 +724,9 @@ export async function render(container, api) {
             }
         }
         scheduleAnalyticsRefresh();
+    });
+    traceSource.addEventListener('trace-gap', () => {
+        sub.textContent = 'Some HTTP observations were cleared or evicted. This process-local window is incomplete; no delivery or OpenTelemetry history is implied.';
     });
 
     // ── Pause/Resume ─────────────────────────────────────────
