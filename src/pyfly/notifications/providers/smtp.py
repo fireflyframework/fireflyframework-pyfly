@@ -1,5 +1,6 @@
 # Copyright 2026 Firefly Software Foundation.
 # Licensed under the Apache License, Version 2.0.
+# SPDX-License-Identifier: Apache-2.0
 """Verified SMTP with explicit acceptance and uncertain-outcome semantics."""
 
 from __future__ import annotations
@@ -121,9 +122,9 @@ class SmtpEmailProvider:
         if message.bcc:
             msg["Bcc"] = ", ".join(message.bcc)
         if message.body_text:
-            msg.set_content(message.body_text)
+            msg.set_content(message.body_text, cte="quoted-printable")
         if message.body_html:
-            msg.add_alternative(message.body_html, subtype="html")
+            msg.add_alternative(message.body_html, subtype="html", cte="quoted-printable")
         for name, value in message_headers(message).items():
             msg[name] = value
         html = msg.get_body(preferencelist=("html",))
