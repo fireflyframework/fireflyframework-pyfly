@@ -81,8 +81,9 @@ from pyfly.session import HttpSession
 | `id` | Unique session identifier (UUID hex string) |
 | `is_new` | `True` if the session was created during this request |
 | `stored_id` | The id the store is known to hold the session under: the id it was loaded with, then the id of its last save (`None` for a new session not saved yet) |
-| `rotate_id(*, on_login=False)` | Assign a fresh id (session-fixation defense). `on_login=True` for a login: the new id is stored even if the old entry is gone meanwhile. Otherwise (a privilege elevation) the filter moves the stored session to the new id only while the store still holds it, so a session logged out or evicted meanwhile is not brought back |
+| `rotate_id(*, on_login=False)` | Assign a fresh id (session-fixation defense). `on_login=True` for a login: the new id is stored even if the old entry is gone meanwhile, except an atomic-claim continuation must remain live. Otherwise (a privilege elevation) the filter moves the stored session to the new id only while the store still holds it, so a session logged out or evicted meanwhile is not brought back |
 | `previous_id` | The id before the last `rotate_id()` |
+| `claim_bound` | `True` after atomic challenge consumption; authenticated publication still requires the continuation |
 | `rotated_on_login` | `True` when `rotate_id(on_login=True)` was called since the session was last persisted |
 | `created_at` | Unix timestamp of session creation (`float`) |
 | `last_accessed` | Unix timestamp of the most recent access (`float`) |
@@ -135,6 +136,28 @@ A subclass of a shipped store that overrides `save` (to encrypt the data, say) m
 `rename` the same way: the filter writes every change of a session the store already holds through them,
 bypassing `save`.
 
+### `AtomicSessionStore` protocol
+
+Native OAuth2 callbacks additionally require `AtomicSessionStore` (importable from `pyfly.session`).
+Its `claim_attributes(old_id, new_id, expected, names, ttl)` compares the expected string attributes
+against the current, unexpired server snapshot and atomically replaces the old session ID with an
+unoccupied continuation ID, removing the named attributes. It returns the snapshot before removal,
+or `None` without writes on mismatch, expiry or destination collision. IDs must differ, names must be
+nonempty, distinct user attribute names, expected values must be nonempty strings for named attributes,
+and TTL must be a positive integer. A custom storage codec must implement this operation too.
+
+Memory implements the claim under its lock. Redis uses an opaque-byte Lua compare-and-swap without
+JSON re-encoding in Lua; Redis Cluster requires both keys in the same hash slot and otherwise fails
+closed. SQL claims are supported on **SQLite and PostgreSQL only**. Other SQL engines retain ordinary
+session operations but reject native OAuth2 callback claims before token exchange with
+`SessionClaimUnavailable`. SQL claims own their commit and reject an ambient unit of work, so a caller's
+later rollback cannot restore a consumed challenge. Do not wrap the callback in a business transaction.
+
+The native filter supplies `request.state.claim_session_attributes(expected, names)`, chooses the fresh
+continuation ID, adopts the authoritative server attributes into the request's session and returns the
+consumed attributes. Native OAuth2 uses this hook; callers must not emulate it by mutating a local snapshot.
+Missing capabilities, storage exceptions and uncertain outcomes suppress session persistence and cookies.
+
 ### `InMemorySessionStore`
 
 ```python
@@ -179,7 +202,7 @@ callable returning one). `start()` creates the table when the schema strategy al
 (`pyfly.data.relational.ddl-auto`), otherwise checks it and fails fast. A session is read only before it
 expires; a write purges a batch of expired sessions at most once per `purge_interval`, after its commit,
 and `purge_expired()` deletes them all. Each operation joins the unit of work bound for the store's
-datasource, and outside one is a single statement.
+datasource, and outside one is a single statement. Atomic claims are the explicit exception described above.
 
 ### `SessionFilter`
 
@@ -227,6 +250,12 @@ if the old entry is gone), is inserted with `save`, and the entry the store held
 (`stored_id`) is deleted, however many rotations came before, so no earlier id resolves to the session. With a
 custom store that has no `replace` and `rename`, every change goes through `save`, which brings such a session
 back.
+
+An unchanged loaded session is checked for existence and expiry before its cookie is reissued. A missing
+session invalidates the request's local session and emits no `Set-Cookie`, including no deletion that could
+clear a newer login cookie. This publication-time check does not guarantee browser response arrival order.
+Claim-bound OAuth2 login rotation also uses conditional persistence: a deleted or expired continuation
+cannot be recreated by a successful token response.
 
 **Deletions run to their end.** The deletion of an invalidated session (a logout, a refused or failed login)
 and of a rotated session's old id runs in a task of its own, shielded from the request's cancellation: a
@@ -276,7 +305,24 @@ HP+150) reads this attribute and restores the `SecurityContext` onto
 `request.state.security_context`.
 
 This means browser-based OAuth2 login works without any extra wiring: enable
-sessions, enable OAuth2 login, and the two filters cooperate automatically.
+sessions, enable OAuth2 login, and the two filters cooperate automatically when the store supports
+atomic claims. State, nonce and PKCE verifier are consumed together before any token exchange, including
+provider-error callbacks. Two callbacks for one stored challenge admit at most one provider exchange.
+Stale ordinary session writes cannot reintroduce the challenge under its retired ID.
+
+The claim also removes the prior `SECURITY_CONTEXT`: pending or unadopted continuations are anonymous,
+including uncertain commit outcomes and cancellation. An unknown anonymous continuation may remain until
+its bounded session TTL expires; the filter never blindly deletes a destination that could already belong
+to another session. Only a normal completed failed-reauthentication response can restore the authoritative
+prior context, through conditional persistence and the same configured session-concurrency admission as
+fresh authentication. Restoration can be denied or evict another session under that policy. Exceptions,
+cancellation and a revoked continuation never restore prior authentication. Successful login publishes
+only the freshly validated identity.
+
+Logout/expiry that wins before claim blocks exchange. Once claim wins, a logout carrying only the retired
+old cookie does **not** revoke the independently claimed pending authentication. Revoking its continuation
+before final publication does block login. This boundary provides no global pending-login revocation or
+predecessor-lineage mechanism.
 
 ---
 

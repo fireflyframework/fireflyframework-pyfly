@@ -19,6 +19,7 @@ Import concrete store types from the adapter package::
     from pyfly.session.adapters.redis import RedisSessionStore
 """
 
+from pyfly.session._claims import SessionClaimUnavailable
 from pyfly.session.concurrency import (
     ConcurrencyControlPolicy,
     InMemorySessionRegistry,
@@ -26,14 +27,16 @@ from pyfly.session.concurrency import (
     SessionRegistry,
 )
 from pyfly.session.filter import SessionFilter
-from pyfly.session.ports.outbound import ConditionalSessionStore, SessionStore
+from pyfly.session.ports.outbound import AtomicSessionStore, ConditionalSessionStore, SessionStore
 from pyfly.session.session import HttpSession
 
 __all__ = [
+    "AtomicSessionStore",
     "ConcurrencyControlPolicy",
     "ConditionalSessionStore",
     "HttpSession",
     "InMemorySessionRegistry",
+    "SessionClaimUnavailable",
     "SessionConcurrencyController",
     "SessionFilter",
     "SessionRegistry",

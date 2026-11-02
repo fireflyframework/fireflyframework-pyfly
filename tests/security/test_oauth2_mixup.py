@@ -24,6 +24,7 @@ from starlette.requests import Request
 from pyfly.security.oauth2.client import ClientRegistration, InMemoryClientRegistrationRepository
 from pyfly.security.oauth2.login import _OAUTH2_STATE_KEY, OAuth2LoginHandler
 from pyfly.session.session import HttpSession
+from tests.security._session_callbacks import stored_callback
 
 
 def _handler(**reg_overrides: Any) -> OAuth2LoginHandler:
@@ -67,7 +68,7 @@ def _body(resp: Any) -> dict[str, Any]:
 async def test_callback_aborts_on_iss_mismatch() -> None:
     """A returned iss that differs from the registration's issuer aborts (mix-up)."""
     handler = _handler()
-    resp = await handler._handle_callback(_callback("state=st&code=abc&iss=https://evil.example.com"))
+    resp = await stored_callback(handler, _callback("state=st&code=abc&iss=https://evil.example.com"))
     assert resp.status_code == 400
     assert _body(resp)["error"] == "invalid_iss"
 
@@ -76,7 +77,7 @@ async def test_callback_aborts_on_iss_mismatch() -> None:
 async def test_callback_requires_iss_when_configured() -> None:
     """With require_iss=True, a callback lacking the iss param is rejected."""
     handler = _handler(require_iss=True)
-    resp = await handler._handle_callback(_callback("state=st&code=abc"))
+    resp = await stored_callback(handler, _callback("state=st&code=abc"))
     assert resp.status_code == 400
     assert _body(resp)["error"] == "invalid_iss"
 
@@ -90,7 +91,7 @@ async def test_callback_iss_match_passes_to_token_exchange(monkeypatch: pytest.M
         return {}  # empty -> handler returns 502 token_exchange_failed (proves we got past iss)
 
     monkeypatch.setattr(handler, "_exchange_code", _fake_exchange)
-    resp = await handler._handle_callback(_callback("state=st&code=abc&iss=https://good.example.com"))
+    resp = await stored_callback(handler, _callback("state=st&code=abc&iss=https://good.example.com"))
     assert resp.status_code == 502
 
 
@@ -110,6 +111,6 @@ async def test_callback_no_iss_param_allowed_when_not_required() -> None:
         return {}
 
     handler._exchange_code = _patched  # type: ignore[assignment]
-    resp = await handler._handle_callback(_callback("state=st&code=abc"))
+    resp = await stored_callback(handler, _callback("state=st&code=abc"))
     assert resp.status_code == 502
     assert monkeypatch_done

@@ -45,6 +45,7 @@ class HttpSession:
         # A session that is not new was loaded from the store under its id.
         self._stored_id: str | None = None if is_new else session_id
         self._rotated_on_login = False
+        self._claim_bound = False
 
         now = time.time()
         if "_created_at" not in self._data:
@@ -112,6 +113,22 @@ class HttpSession:
         """Whether :meth:`rotate_id` was called with ``on_login=True`` since the session was last persisted."""
         return self._rotated_on_login
 
+    @property
+    def claim_bound(self) -> bool:
+        """A claimed continuation must still exist when fresh authentication is published."""
+        return self._claim_bound
+
+    def adopt_claim(self, session_id: str, data: dict[str, Any]) -> None:
+        """Adopt the store's authoritative continuation, retaining this request's session object."""
+        self._previous_id = self._id
+        self._id = session_id
+        self._data = data
+        self._stored_id = session_id
+        self._is_new = False
+        self._modified = False
+        self._rotated_on_login = False
+        self._claim_bound = True
+
     def rotate_id(self, *, on_login: bool = False) -> None:
         """Assign a fresh session id, preserving all data.
 
@@ -123,7 +140,8 @@ class HttpSession:
         Args:
             on_login: The rotation comes with a fresh authentication (a login): the
                 store gets the session under the new id even if the old entry is gone
-                meanwhile, since the authentication stands on its own. Otherwise (a
+                meanwhile, since the authentication stands on its own. An atomically claimed
+                OAuth2 continuation is an exception: it must still exist at publication. Otherwise (a
                 privilege elevation within a session, say) the filter moves the stored
                 session to the new id only while the store still holds it, so a session
                 logged out or evicted meanwhile is not brought back under the new id.

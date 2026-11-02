@@ -16,8 +16,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
+from collections.abc import Mapping
 from typing import Any
+
+from pyfly.session._claims import matches, validate_claim
 
 
 class InMemorySessionStore:
@@ -72,6 +76,29 @@ class InMemorySessionStore:
                 return False
             self._store[new_id] = (data, time.monotonic() + ttl)
             return True
+
+    async def claim_attributes(
+        self, old_id: str, new_id: str, expected: Mapping[str, str], names: tuple[str, ...], ttl: int
+    ) -> dict[str, Any] | None:
+        validate_claim(old_id, new_id, expected, names, ttl)
+        async with self._lock:
+            now = time.monotonic()
+            entry = self._store.get(old_id)
+            destination = self._store.get(new_id)
+            if (
+                entry is None
+                or entry[1] <= now
+                or not matches(entry[0], expected)
+                or (destination is not None and destination[1] > now)
+            ):
+                return None
+            snapshot = copy.deepcopy(entry[0])
+            remaining = copy.deepcopy(snapshot)
+            for name in names:
+                remaining.pop(name, None)
+            self._store[new_id] = (remaining, now + ttl)
+            del self._store[old_id]
+            return snapshot
 
     async def delete(self, session_id: str) -> None:
         """Remove a session."""

@@ -19,7 +19,10 @@ import dataclasses
 import importlib
 import json
 import logging
+from collections.abc import Mapping
 from typing import Any, cast
+
+from pyfly.session._claims import matches, validate_claim
 
 _logger = logging.getLogger(__name__)
 
@@ -33,6 +36,15 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
   return 0
 end
 redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+redis.call('DEL', KEYS[1])
+return 1
+"""
+
+# Compare opaque bytes: Lua JSON re-encoding changes empty arrays and large numbers.
+_CLAIM = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('EXISTS', KEYS[2]) ~= 0 then return 0 end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
 redis.call('DEL', KEYS[1])
 return 1
 """
@@ -79,7 +91,7 @@ def _json_object_hook(d: dict[str, Any]) -> Any:
         return d
     payload = {k: v for k, v in d.items() if k != _TYPE_KEY}
     if tag not in _ALLOWED_TYPE_TAGS:
-        _logger.warning("Refusing to rehydrate non-allowlisted session type %r", tag)
+        _logger.warning("session_type_not_allowlisted")
         return payload
     module_name, _, qualname = tag.partition(":")
     try:
@@ -101,6 +113,7 @@ class RedisSessionStore:
     def __init__(self, client: Any) -> None:
         self._client = client
         self._rename: Any = None
+        self._claim: Any = None
 
     def _key(self, session_id: str) -> str:
         return f"{_KEY_PREFIX}{session_id}"
@@ -113,7 +126,7 @@ class RedisSessionStore:
         try:
             return cast(dict[str, Any], json.loads(raw, object_hook=_json_object_hook))
         except (json.JSONDecodeError, TypeError):
-            _logger.warning("Failed to deserialize session '%s'", session_id)
+            _logger.warning("session_deserialization_failed")
             return None
 
     async def save(self, session_id: str, data: dict[str, Any], ttl: int) -> None:
@@ -136,6 +149,33 @@ class RedisSessionStore:
         raw = json.dumps(data, default=_json_default)
         moved = await self._rename(keys=[self._key(old_id), self._key(new_id)], args=[raw.encode(), ttl])
         return bool(int(moved))
+
+    async def claim_attributes(
+        self, old_id: str, new_id: str, expected: Mapping[str, str], names: tuple[str, ...], ttl: int
+    ) -> dict[str, Any] | None:
+        """Claim using a byte-exact Lua CAS; both keys must share a Redis Cluster hash slot.
+
+        A cross-slot or unavailable script fails closed: it never falls back to local consumption.
+        """
+        validate_claim(old_id, new_id, expected, names, ttl)
+        raw = await self._client.get(self._key(old_id))
+        if raw is None:
+            return None
+        try:
+            snapshot = json.loads(raw, object_hook=_json_object_hook)
+        except (json.JSONDecodeError, TypeError):
+            _logger.warning("session_deserialization_failed")
+            return None
+        if not matches(snapshot, expected):
+            return None
+        remaining = {key: value for key, value in snapshot.items() if key not in names}
+        if self._claim is None:
+            self._claim = self._client.register_script(_CLAIM)
+        won = await self._claim(
+            keys=[self._key(old_id), self._key(new_id)],
+            args=[raw, json.dumps(remaining, default=_json_default).encode(), ttl],
+        )
+        return cast(dict[str, Any], snapshot) if int(won) == 1 else None
 
     async def delete(self, session_id: str) -> None:
         """Remove a session."""

@@ -202,6 +202,21 @@ class OAuth2LoginHandler:
     # ------------------------------------------------------------------
 
     async def _handle_callback(self, request: Request) -> Response:
+        # A claim's continuation remains anonymous until a completed response publishes authentication.
+        # On an uncertain claim or cancellation there is no prior authority left on an unadopted ID.
+        previous_context: list[SecurityContext] = []
+        response = await self._handle_callback_response(request, previous_context)
+        if response.status_code >= 400 and previous_context:
+            session: HttpSession = request.state.session
+            prior = previous_context[0]
+            if not session.invalidated and prior.user_id is not None:
+                session.set_attribute(_SECURITY_CONTEXT_KEY, prior)
+                failure = await self._publish_authentication(request, prior.user_id)
+                if failure is not None:
+                    return failure
+        return response
+
+    async def _handle_callback_response(self, request: Request, previous_context: list[SecurityContext]) -> Response:
         """Handle the OAuth2 provider callback and exchange the code for tokens."""
         registration_id = request.path_params["registration_id"]
         registration = self._client_repository.find_by_registration_id(registration_id)
@@ -225,14 +240,32 @@ class OAuth2LoginHandler:
                 status_code=400,
             )
 
-        # Consume state (one-time use)
-        session.remove_attribute(_OAUTH2_STATE_KEY)
+        # Consume the persisted challenge before any provider I/O, not just this request's snapshot.
+        claim = getattr(request.state, "claim_session_attributes", None)
+        if claim is None:
+            return JSONResponse({"error": "session_claim_unavailable"}, status_code=400)
+        try:
+            consumed = await claim(
+                {_OAUTH2_STATE_KEY: expected_state},
+                (_OAUTH2_STATE_KEY, _OAUTH2_NONCE_KEY, _OAUTH2_PKCE_VERIFIER_KEY, _SECURITY_CONTEXT_KEY),
+            )
+        except Exception:
+            logger.warning("oauth2_session_claim_failed")
+            return JSONResponse({"error": "session_claim_unavailable"}, status_code=400)
+        if consumed is None:
+            return JSONResponse(
+                {"error": "invalid_state", "message": "OAuth2 challenge is no longer available"}, status_code=400
+            )
+
+        prior = consumed.get(_SECURITY_CONTEXT_KEY)
+        if isinstance(prior, SecurityContext) and prior.user_id is not None:
+            previous_context.append(prior)
 
         # Check for error response from provider
         error = request.query_params.get("error")
         if error:
             error_description = request.query_params.get("error_description", "")
-            logger.warning("OAuth2 provider returned error: %s — %s", error, error_description)
+            logger.warning("OAuth2 provider returned an error")
             return JSONResponse(
                 {"error": error, "message": error_description or error},
                 status_code=400,
@@ -255,8 +288,7 @@ class OAuth2LoginHandler:
         # PKCE: retrieve and consume the one-time verifier stashed at authorization time.
         code_verifier = None
         if _uses_pkce(registration):
-            code_verifier = session.get_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
-            session.remove_attribute(_OAUTH2_PKCE_VERIFIER_KEY)
+            code_verifier = consumed.get(_OAUTH2_PKCE_VERIFIER_KEY)
 
         # Exchange authorization code for tokens
         token_response = await self._exchange_code(registration, code, code_verifier)
@@ -271,8 +303,7 @@ class OAuth2LoginHandler:
         # Prefer verified OIDC ID-token claims when present; the id_token is
         # signature/issuer/audience/nonce validated against the provider JWKS
         # before any claim is trusted (audit #48).
-        nonce = session.get_attribute(_OAUTH2_NONCE_KEY)
-        session.remove_attribute(_OAUTH2_NONCE_KEY)
+        nonce = consumed.get(_OAUTH2_NONCE_KEY)
         security_context: SecurityContext | None = None
         id_token = token_response.get("id_token")
         can_validate = bool(getattr(registration, "jwks_uri", "")) or self._id_token_validator_factory is not None
@@ -323,6 +354,16 @@ class OAuth2LoginHandler:
         redirect_uri = session.get_attribute(_REDIRECT_URI_KEY) or self._success_uri
         session.remove_attribute(_REDIRECT_URI_KEY)
 
+        failure = await self._publish_authentication(request, security_context.user_id)
+        if failure is not None:
+            return failure
+
+        logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)
+        return RedirectResponse(url=str(redirect_uri), status_code=302)
+
+    async def _publish_authentication(self, request: Request, user_id: str) -> Response | None:
+        """Publish only a live continuation and register it under the configured session-cap policy."""
+        session: HttpSession = request.state.session
         # Enforce per-principal session concurrency (Spring maximumSessions) — the principal
         # is now bound to the (rotated) session id, so this is the one correct enforcement point.
         # The session is saved first: the controller counts a session while the store has it,
@@ -330,12 +371,23 @@ class OAuth2LoginHandler:
         # the login's last write of the session (every change above is made before it, and the
         # SessionFilter does not save an unchanged session again): a concurrent login may evict
         # this session meanwhile, and a later save would bring it back, live and uncounted.
+        persist = getattr(request.state, "persist_session", None)
+        if persist is None:
+            session.invalidate()
+            return JSONResponse({"error": "session_claim_unavailable"}, status_code=400)
+        try:
+            await persist()
+        except BaseException:
+            # An uncertain commit must not leave a live, unregistered authenticated session behind.
+            session.invalidate()
+            raise
+        if session.invalidated:
+            return JSONResponse(
+                {"error": "session_ended", "message": "Login session is no longer available"}, status_code=401
+            )
         if self._concurrency is not None:
             try:
-                persist = getattr(request.state, "persist_session", None)
-                if persist is not None:
-                    await persist()
-                allowed = await self._concurrency.on_login(security_context.user_id, session.id, session.created_at)
+                allowed = await self._concurrency.on_login(user_id, session.id, session.created_at)
             except BaseException:
                 # Saved but perhaps never registered: the SessionFilter deletes it rather than leave a
                 # logged-in session the cap does not count.
@@ -348,8 +400,7 @@ class OAuth2LoginHandler:
                     status_code=401,
                 )
 
-        logger.info("OAuth2 login successful for user: %s (via %s)", security_context.user_id, registration_id)
-        return RedirectResponse(url=str(redirect_uri), status_code=302)
+        return None
 
     # ------------------------------------------------------------------
     # Route 3: Logout

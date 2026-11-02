@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -58,3 +59,20 @@ class ConditionalSessionStore(SessionStore, Protocol):
         store holds it under *old_id* and it has not expired, in one atomic step (*old_id* no longer resolves
         afterwards); ``False`` (and nothing written) otherwise."""
         ...
+
+
+@runtime_checkable
+class AtomicSessionStore(ConditionalSessionStore, Protocol):
+    """Durably consume a one-shot challenge before external I/O.
+
+    Atomically compare *expected* string attributes on the current unexpired session, retire *old_id*,
+    and create an unoccupied *new_id* with *names* removed and a fresh TTL. Return the authoritative
+    snapshot before removal, or ``None`` without writes on mismatch, expiry or destination collision.
+    Claims must commit before returning, never participate in the caller's rollbackable transaction.
+    An unsupported backend raises ``SessionClaimUnavailable``; no snapshot-only fallback is safe.
+    Subclasses changing the storage encoding must override this operation as well as save/replace/rename.
+    """
+
+    async def claim_attributes(
+        self, old_id: str, new_id: str, expected: Mapping[str, str], names: tuple[str, ...], ttl: int
+    ) -> dict[str, Any] | None: ...

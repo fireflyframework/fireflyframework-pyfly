@@ -342,18 +342,20 @@ HTTP session on subsequent requests (see the
 The callback (`_handle_callback`) is the security-critical step. In order it:
 
 1. validates the `state` parameter against the session value (CSRF / fixation
-   defense) and consumes it (one-time use);
+   defense), then atomically claims the persisted challenge through `SessionFilter`, consuming
+   state, nonce and PKCE verifier together and retiring the old session ID before any provider I/O;
+   missing/unsupported atomic storage fails closed; prior authentication is also withheld from the
+   pending continuation until completed publication;
 2. surfaces any provider `error` response as a 400;
 3. validates the RFC 9207 `iss` parameter (see
    [require_iss](#rfc-9207-issuer-identification-require_iss));
-4. retrieves and consumes the one-time PKCE `code_verifier`;
+4. uses the one-time PKCE `code_verifier` from the claimed server snapshot;
 5. exchanges the code for tokens at `token_uri`, sending the `code_verifier`;
 6. establishes identity from the verified `id_token` (preferred) or the
    `user_info_uri`;
 7. **rotates the session id** (`session.rotate_id(on_login=True)`) to defeat session
-   fixation, then stores the `SecurityContext` under the session; with session
-   concurrency control, it saves the session before registering it with the
-   controller;
+   fixation, then stores the `SecurityContext` only while the claimed continuation remains live;
+   it persists before reporting success or registering session concurrency;
 8. fails with `401` if no authenticated principal could be determined (no silent
    anonymous session).
 
@@ -383,6 +385,10 @@ On every authorization request the handler generates and stores a random `state`
 (32-byte URL-safe token) and a random OIDC `nonce` in the session. `state` is
 validated and consumed on callback (mismatch → 400 `invalid_state`); `nonce` is
 bound into the ID token and checked during [ID token validation](#id-token-validation).
+Atomic consumption and the precise concurrent logout boundary are documented under
+[session integration](session.md#integration-with-oauth2-login). Ordinary SQL session storage remains
+portable, but native callback claims currently require SQLite or PostgreSQL (or memory/Redis), and
+SQL callbacks must run outside an ambient business unit of work.
 
 ### RFC 9207 issuer identification (require_iss)
 
