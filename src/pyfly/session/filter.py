@@ -18,10 +18,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from pyfly.container.ordering import HIGHEST_PRECEDENCE
-from pyfly.session.ports.outbound import ConditionalSessionStore, SessionStore
+from pyfly.session.ports.outbound import AtomicSessionStore, ConditionalSessionStore, SessionStore
 from pyfly.session.session import HttpSession
 from pyfly.web.filters import OncePerRequestFilter
 from pyfly.web.ports.filter import CallNext
@@ -64,6 +65,12 @@ class SessionFilter(OncePerRequestFilter):
     ``rename`` gets every change through ``save``, an insert-or-replace, and cannot tell a revoked
     session from a live one: the filter logs ``session_store_without_replace`` (a WARNING) when it is
     built on one.
+
+    Unchanged loaded sessions are checked for existence before their cookie is reissued. An atomic
+    challenge claim (``request.state.claim_session_attributes``) retires the old id and adopts a fresh
+    continuation from the current server snapshot. Even a fresh login must conditionally persist this
+    continuation: deleting or expiring it during token exchange prevents authenticated publication.
+    A logout carrying only the already retired old cookie does not revoke the independent continuation.
 
     **Deletions run to their end.** The deletion of an invalidated session (a logout) and of a rotated
     session's old id runs in a task of its own, shielded from the request's cancellation: a
@@ -108,6 +115,38 @@ class SessionFilter(OncePerRequestFilter):
             if not ended:
                 ended = not await self._persist_session(session)
 
+        async def claim_session_attributes(
+            expected: Mapping[str, str], names: tuple[str, ...]
+        ) -> dict[str, Any] | None:
+            nonlocal ended
+            try:
+                if (
+                    ended
+                    or session.invalidated
+                    or session.stored_id is None
+                    or not isinstance(self._store, AtomicSessionStore)
+                ):
+                    ended = True
+                    session.invalidate()
+                    return None
+                continuation = uuid.uuid4().hex
+                snapshot = await self._store.claim_attributes(
+                    session.stored_id, continuation, expected, names, self._ttl
+                )
+                if snapshot is None:
+                    ended = True
+                    session.invalidate()
+                    return None
+                consumed = {name: snapshot[name] for name in names if name in snapshot}
+                session.adopt_claim(continuation, {key: value for key, value in snapshot.items() if key not in names})
+                return consumed
+            except BaseException:
+                # Outcome may be unknown: neither save a stale snapshot nor publish any cookie.
+                ended = True
+                session.invalidate()
+                raise
+
+        request.state.claim_session_attributes = claim_session_attributes
         request.state.persist_session = persist_session
         # Expose the session to the container for SESSION-scoped bean resolution.
         from pyfly.context.request_context import HTTP_SESSION_KEY, RequestContext
@@ -172,9 +211,12 @@ class SessionFilter(OncePerRequestFilter):
             await self._delete_shielded([session_id for session_id in (stale, session.id) if session_id is not None])
             return True
         if not session.modified:
+            if stored is not None and not await self._store.exists(stored):
+                session.invalidate()
+                return False
             return True
         conditional = self._conditional
-        if conditional is not None and stored is not None and not session.rotated_on_login:
+        if conditional is not None and stored is not None and (not session.rotated_on_login or session.claim_bound):
             data = session.get_data()
             if stale is None:
                 written = await conditional.replace(session.id, data, self._ttl)

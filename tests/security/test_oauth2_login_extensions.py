@@ -12,6 +12,7 @@ from pyfly.security.oauth2.client import ClientRegistration, InMemoryClientRegis
 from pyfly.security.oauth2.login import OAuth2LoginHandler
 from pyfly.security.oauth2.resource_server import ClaimMappings, JWKSTokenValidator, build_security_context
 from pyfly.session.session import HttpSession
+from tests.security._session_callbacks import stored_callback
 from tests.security.test_oauth2_resource_server import _mint
 from tests.security.test_oauth2_resource_server import jwks as jwks
 
@@ -79,7 +80,11 @@ async def test_success_hook_receives_verified_claims_before_session_publication(
     seen = []
 
     async def success(req, registration, context):
-        assert req.state.session.id == "before" and req.state.session.get_attribute("SECURITY_CONTEXT") is None
+        assert (
+            req.state.session.claim_bound
+            and req.state.session.id != "before"
+            and req.state.session.get_attribute("SECURITY_CONTEXT") is None
+        )
         assert context.user_id == "user" and context.attributes["auth_time"] == 123
         seen.append("hook")
 
@@ -95,7 +100,7 @@ async def test_success_hook_receives_verified_claims_before_session_publication(
         handler, "_exchange_code", AsyncMock(return_value={"access_token": "owned-test", "id_token": token})
     )
     incoming = request("state=state&code=code")
-    response = await handler._handle_callback(incoming)
+    response = await stored_callback(handler, incoming)
     assert response.status_code == 302 and seen == ["hook"]
     assert (
         incoming.state.session.id != "before"
@@ -110,8 +115,8 @@ async def test_strict_oidc_never_uses_userinfo_as_identity_fallback(monkeypatch)
     fallback = AsyncMock(return_value={"sub": "unverified"})
     monkeypatch.setattr(handler, "_fetch_user_info", fallback)
     incoming = request("state=state&code=code")
-    response = await handler._handle_callback(incoming)
-    assert response.status_code == 401 and incoming.state.session.id == "before"
+    response = await stored_callback(handler, incoming)
+    assert response.status_code == 401 and incoming.state.session.claim_bound
     assert incoming.state.session.get_attribute("SECURITY_CONTEXT") is None
     fallback.assert_not_awaited()
 
@@ -163,7 +168,7 @@ async def test_native_context_discovers_optional_ports_and_login_claim_configura
         await context.stop()
 
 
-async def test_success_denial_does_not_rotate_persist_or_register_identity(jwks, monkeypatch):
+async def test_success_denial_consumes_challenge_without_publishing_or_registering_identity(jwks, monkeypatch):
     from pyfly.kernel.exceptions import SecurityException
 
     uri, issuer, _ = jwks
@@ -180,11 +185,9 @@ async def test_success_denial_does_not_rotate_persist_or_register_identity(jwks,
         handler, "_exchange_code", AsyncMock(return_value={"access_token": "owned-test", "id_token": token})
     )
     incoming = request("state=state&code=code")
-    incoming.state.persist_session = AsyncMock()
     with pytest.raises(SecurityException):
-        await handler._handle_callback(incoming)
-    assert incoming.state.session.id == "before" and incoming.state.session.get_attribute("SECURITY_CONTEXT") is None
-    incoming.state.persist_session.assert_not_awaited()
+        await stored_callback(handler, incoming)
+    assert incoming.state.session.claim_bound and incoming.state.session.get_attribute("SECURITY_CONTEXT") is None
     concurrency.on_login.assert_not_awaited()
 
 
@@ -212,6 +215,6 @@ async def test_native_nonce_and_authorized_party_checks_precede_success(jwks, mo
     incoming = request("state=state&code=code")
     if nonce is None:
         incoming.state.session.remove_attribute("oauth2_nonce")
-    assert (await handler._handle_callback(incoming)).status_code == 401
+    assert (await stored_callback(handler, incoming)).status_code == 401
     hook.assert_not_awaited()
     assert incoming.state.session.get_attribute("SECURITY_CONTEXT") is None

@@ -45,15 +45,17 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 from pyfly.data.transaction import infrastructure_unit
+from pyfly.session._claims import SessionClaimUnavailable, matches, validate_claim
 from pyfly.session.adapters.redis import _json_default, _json_object_hook
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
+    from sqlalchemy.engine import CursorResult
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 _logger = logging.getLogger(__name__)
@@ -166,7 +168,7 @@ class SqlSessionStore:
         try:
             return cast(dict[str, Any], json.loads(raw, object_hook=_json_object_hook))
         except (json.JSONDecodeError, TypeError):
-            _logger.warning("Failed to deserialize session '%s'", session_id)
+            _logger.warning("session_deserialization_failed")
             return None
 
     async def save(self, session_id: str, data: dict[str, Any], ttl: int) -> None:
@@ -248,6 +250,72 @@ class SqlSessionStore:
         if moved:
             await self._purge_if_due()
         return moved
+
+    async def claim_attributes(
+        self, old_id: str, new_id: str, expected: Mapping[str, str], names: tuple[str, ...], ttl: int
+    ) -> dict[str, Any] | None:
+        """Committed opaque JSON compare-and-swap, outside any ambient unit of work.
+
+        SQLite and PostgreSQL provide a byte-exact predicate here. Other SQL backends explicitly reject
+        claims until their large-text binary comparison has been qualified (ordinary session I/O remains
+        supported). No row lock is held during token exchange.
+        """
+        from sqlalchemy import LargeBinary, func, select, update
+        from sqlalchemy import cast as sql_cast
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from pyfly.data.relational.dialect_customizers import begin_immediate
+        from pyfly.data.transaction import current_unit_of_work
+
+        validate_claim(old_id, new_id, expected, names, ttl)
+        if current_unit_of_work() is not None:
+            raise SessionClaimUnavailable("Session claims cannot join an ambient unit of work")
+        await self.start()
+        backend = self._backend()
+        if backend not in {"sqlite", "postgresql"}:
+            raise SessionClaimUnavailable("Atomic session claims are unsupported on this SQL backend")
+        table = self._table
+        # A separate, owned transaction commits the claim before the caller can perform external I/O.
+        try:
+            async with AsyncSession(self.engine) as connection, connection.begin():
+                if backend == "sqlite":
+                    await begin_immediate(connection)
+                raw = (
+                    await connection.execute(
+                        select(table.c.data).where(table.c.session_id == old_id, table.c.expires_at > self._clock())
+                    )
+                ).scalar_one_or_none()
+                if raw is None:
+                    return None
+                try:
+                    snapshot = json.loads(raw, object_hook=_json_object_hook)
+                except (json.JSONDecodeError, TypeError):
+                    _logger.warning("session_deserialization_failed")
+                    return None
+                if not matches(snapshot, expected):
+                    return None
+                remaining = {key: value for key, value in snapshot.items() if key not in names}
+                binary = (
+                    func.convert_to(table.c.data, "UTF8")
+                    if backend == "postgresql"
+                    else sql_cast(table.c.data, LargeBinary)
+                )
+                now = self._clock()
+                changed = await connection.execute(
+                    update(table)
+                    .where(table.c.session_id == old_id, table.c.expires_at > now, binary == raw.encode("utf-8"))
+                    .values(
+                        session_id=new_id,
+                        data=json.dumps(remaining, default=_json_default),
+                        expires_at=now + timedelta(seconds=ttl),
+                    )
+                )
+                won = cast("CursorResult[Any]", changed).rowcount == 1
+        except IntegrityError:
+            # The continuation id was already occupied. The transaction rolled back unchanged.
+            return None
+        return cast(dict[str, Any], snapshot) if won else None
 
     async def delete(self, session_id: str) -> None:
         from sqlalchemy import delete

@@ -28,7 +28,7 @@ set -euo pipefail
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-PYFLY_VERSION="26.11.02"
+PYFLY_VERSION="26.11.03"
 PYFLY_REPO="https://github.com/fireflyframework/fireflyframework-pyfly.git"
 DEFAULT_INSTALL_DIR="$HOME/.pyfly"
 MIN_PYTHON_MAJOR=3

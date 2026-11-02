@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.11.03 (2026-11-01)
+
+### Added
+
+- Add native atomic session claims for memory, Redis, SQLite and PostgreSQL, consuming
+  persisted OAuth2/OIDC state, nonce and PKCE exactly once before provider exchange.
+  Unsupported stores and SQL dialects reject callback claims before external I/O.
+
+### Fixed
+
+- Retire the previous session capability during claims so stale requests cannot restore
+  consumed challenges. Keep pending and uncertain continuations anonymous; publish
+  authentication only through conditional persistence and configured session limits.
+- Suppress stale cookies after session revocation or expiry, and preserve authentication
+  recency and concurrency admission when a completed failed reauthentication restores
+  the prior identity. Rejection, cancellation and uncertain persistence fail closed.
+- Exclude raw session identifiers, malformed serialized values and provider error
+  descriptions from session/OAuth2 diagnostics.
+
 ## v26.11.02 (2026-11-01)
 
 ### Added
