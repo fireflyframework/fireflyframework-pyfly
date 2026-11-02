@@ -240,6 +240,62 @@ result = await pipeline.invoke(run_id=result.run_id)
 result = await pipeline.invoke(state=loaded_state, start_at=deployer)
 ```
 
+### Persistence failure contract
+
+When a checkpointer is configured, a failed save stops the pipeline with
+`PipelinePersistenceError("Pipeline checkpoint save failed")`. A failed read
+raises the same non-retryable error type with `"Pipeline checkpoint load failed"`.
+Neither error includes stored content or the backend exception. A genuinely
+missing record remains a `PipelineError`; it does not start a new run.
+
+Resume validates the saved pipeline/run identity, completed-node/result mapping,
+successful node results and typed shared state before scheduling any node. An
+inconsistent record is rejected as a whole with `"Pipeline checkpoint is invalid"`.
+A pause is announced only after its checkpoint has been saved successfully.
+Normal `on_node_complete` events describe completed node execution, not a durable
+storage acknowledgement. A `Pause` emits only the persisted `on_node_pause`
+event. If parallel nodes complete in the same batch, completed peer results are
+retained and no peer save may clear the pause marker. Multiple pauses in that
+batch share one pipeline-level approval barrier; `approve_pause=True` releases
+that barrier, not independently authorized approvals for each node.
+Cyclic resume selects the saved node's successor using restored state, then allows
+required node revisits; it does not treat every historically completed node as a
+node that can never run again. Records preserve completed results, not a complete
+historical trace of every visit. Per-run recursion limits still apply.
+
+New records preserve the original `start_at` node in `execution_start` across
+resumes. Nodes excluded by that starting boundary remain excluded. Legacy records
+without it are accepted only when the completed prefix is internally consistent;
+an ambiguous missing ancestor is rejected before executing new work.
+
+Historical conditional skip decisions are not persisted by this format. A
+topological resume with unresolved conditional gates that could introduce a
+previously inactive branch is rejected, rather than guessing from later state.
+Uncheckpointed conditional execution is unchanged. Cyclic/runtime-router runs
+continue from their saved cursor and apply their per-visit routing contract.
+Static topological reachability is checked for explicit starting boundaries;
+runtime routers are arbitrary host callables, so static topology alone cannot
+prove their historical route. These checks establish internal consistency, not
+authorization or cryptographic proof of past effects. Bind graph/run identity and
+protect checkpoint storage at the application boundary.
+
+An already completed external effect cannot be undone when its checkpoint fails.
+Do not automatically retry a `PipelinePersistenceError`: storage may have committed
+before reporting failure. Inspect the acknowledged state and the external outcome
+before deciding whether recovery is safe. Concurrent nodes that already started
+may have effects; pending work is cancelled and awaited when execution stops.
+
+The current checkpoint format has no durable dispatch frontier for dynamic
+`Send` fan-out. A pipeline with a checkpointer rejects that fan-out before its
+workers are dispatched. Ordinary static parallel graphs, cycles and pause/resume
+remain supported; dynamic fan-out without checkpointing is unchanged.
+
+Checkpointing does not provide graph-version migration, distributed resume
+exclusion, application authorization or exactly-once external effects. The host
+must bind runs to the intended graph and control who can approve/resume them.
+Storage durability and cross-process concurrency also depend on the selected
+backend; atomic file replacement alone is not a distributed coordination protocol.
+
 To use a durable store, copy one of the example templates into your project.
 Each implements `save` / `load_latest` / `list_runs` against a connection you
 supply, so swapping it in is a one-line change at the builder:

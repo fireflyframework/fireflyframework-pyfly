@@ -15,8 +15,7 @@
 """The dynamic-workflow DSL primitives: ``agent``, ``parallel``, ``pipeline``,
 ``phase`` and ``log``.
 
-These mirror the primitives of Claude's Workflow tool, adapted to Python and
-pydantic-ai:
+These native primitives compose Python workflows over PydanticAI agents:
 
 * ``agent(prompt, ...)`` — run one isolated sub-agent; honours the run budget,
   the concurrency gate, and the resume journal.
@@ -43,6 +42,7 @@ from pyfly.agentic.exceptions import (
     WorkflowContextError,
     WorkflowError,
     WorkflowInterrupt,
+    WorkflowPersistenceError,
 )
 from pyfly.agentic.workflows.context import current_workflow
 from pyfly.agentic.workflows.runner import AgentCall, StreamingAgentRunner
@@ -55,7 +55,7 @@ _T = TypeVar("_T")
 
 # Structural / kill-switch / control-flow signals must abort the run, not be
 # swallowed to ``None`` by a parallel branch or a pipeline stage.
-_NEVER_SWALLOW = (WorkflowBudgetError, WorkflowContextError, WorkflowInterrupt)
+_NEVER_SWALLOW = (WorkflowBudgetError, WorkflowContextError, WorkflowInterrupt, WorkflowPersistenceError)
 
 
 @overload

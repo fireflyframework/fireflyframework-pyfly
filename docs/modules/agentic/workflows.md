@@ -173,8 +173,8 @@ await run_workflow("deep_research", args, journal=journal)   # cached calls repl
 
 Persist `journal.to_dict()` (and rebuild with `Journal.from_dict(...)`) to resume
 manually. To persist completed calls, attach a `JournalBackend`; the journal
-attempts a flush after every completed call. Backend errors are logged and
-suppressed, so durability depends on successful storage:
+persists a candidate snapshot after every completed call and acknowledges it in
+memory only after the backend returns successfully:
 
 ```python
 from pyfly.agentic.workflows import Journal, FileJournalBackend
@@ -190,6 +190,24 @@ await run_workflow("deep_research", args,
 `FileJournalBackend` stores each run as JSON (strings/numbers/lists/dicts
 round-trip exactly; structured outputs round-trip as their serialized form).
 Implement the `JournalBackend` protocol (`load`/`save`) for Postgres/Redis/S3.
+A configured backend requires a nonempty stable `run_key`. A missing file is an
+empty journal; an unreadable or malformed store is not. Load/save failures raise
+`WorkflowPersistenceError` with fixed messages and `retryable=False`. Invalid
+history is rejected, and a failed or cancelled write leaves the previously
+acknowledged in-memory cache unchanged. Backend mappings are detached from that
+cache, including nested values. Backend-attached `get()` and `to_dict()` also
+return detached values, so modifying a replay response cannot rewrite acknowledged
+history on a later save. A failed read copy raises a content-free journal error.
+In-memory-only journal reads retain their existing behavior. Workflow `parallel` and `pipeline` propagate this
+error instead of converting it to an ordinary failed branch/item.
+
+A provider/tool operation may already have completed before journal persistence
+fails, and a backend may have committed before raising. Native pipeline node
+retries must not repeat that operation automatically. Inspect the outcome before
+attempting explicit recovery. This contract does not undo published stream data,
+provide exactly-once external effects, coordinate concurrent processes or bind a
+journal to a new workflow version. Cancellation also propagates without granting a
+successful journal acknowledgement.
 
 > **Replay contract.** Journal keys are call sequence numbers, not hashes of the
 > prompt, model, or arguments. Resume with the same inputs and call sequence; code

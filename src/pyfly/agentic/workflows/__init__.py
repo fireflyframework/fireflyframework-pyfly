@@ -34,7 +34,7 @@ The engine enforces a :class:`WorkflowBudget` (concurrency / agent-count / token
 ceilings) and journals every agent call for deterministic resume.
 """
 
-from pyfly.agentic.exceptions import WorkflowInterrupt
+from pyfly.agentic.exceptions import WorkflowInterrupt, WorkflowPersistenceError
 from pyfly.agentic.workflows.context import (
     WorkflowBudget,
     WorkflowContext,
@@ -107,6 +107,7 @@ __all__ = [
     "WorkflowBudget",
     "WorkflowContext",
     "WorkflowInterrupt",
+    "WorkflowPersistenceError",
     "WorkflowRegistry",
     "adversarial_verify",
     "agent",
