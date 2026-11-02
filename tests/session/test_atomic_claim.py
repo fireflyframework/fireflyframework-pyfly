@@ -172,3 +172,71 @@ async def test_redis_malformed_session_and_unknown_type_do_not_log_bearer_values
     assert await RedisSessionStore(Client()).get(canary) is None
     assert _json_object_hook({"__pyfly_type__": canary, "field": True}) == {"field": True}
     assert canary not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [{}, {"_created_at": 120.0, "_last_accessed": 130.0}, {"_created_at": 120.0, "_authenticated_at": 125.0}],
+)
+def test_claim_adoption_normalizes_housekeeping_without_restoring_stale_authority(metadata, monkeypatch):
+    from types import SimpleNamespace
+
+    from pyfly.security.context import SecurityContext
+    from pyfly.session import HttpSession
+
+    session = HttpSession(
+        "old",
+        {
+            "_created_at": 5.0,
+            "_authenticated_at": 7.0,
+            "SECURITY_CONTEXT": SecurityContext(user_id="stale-user"),
+            "old-only": True,
+        },
+    )
+    monkeypatch.setattr("pyfly.session.session.time", SimpleNamespace(time=lambda: 5000.0))
+    current = {**metadata, "current-server-value": True}
+    session.adopt_claim("continuation", dict(current))
+    assert session.created_at == metadata.get("_created_at", 5000.0)
+    assert session.last_accessed == 5000.0
+    assert session.authenticated_at == metadata.get("_authenticated_at")
+    assert session.get_attribute("SECURITY_CONTEXT") is None
+    assert session.get_attribute("old-only") is None
+    assert session.get_attribute("current-server-value") is True
+    assert set(session.get_data()) == set(current) | {"_created_at", "_last_accessed"}
+    assert session.claim_bound and session.stored_id == "continuation" and not session.modified
+
+
+async def test_native_sqlite_independent_claims_do_not_upgrade_deferred_read_locks(tmp_path):
+    from pyfly.core import Config
+    from pyfly.data.relational.datasource_registry import DataSourceRegistry
+
+    registry = DataSourceRegistry(
+        Config({"pyfly": {"data": {"relational": {"url": f"sqlite+aiosqlite:///{tmp_path / 'native-claims.db'}"}}}})
+    )
+    stores = [SqlSessionStore(registry.primary, purge_interval=None) for _ in range(2)]
+    try:
+        for store in stores:
+            await store.start()
+        for index in range(8):
+            await stores[0].save(f"old-{index}", {"state": f"challenge-{index}"}, 60)
+        results = await asyncio.gather(
+            *(
+                stores[index % 2].claim_attributes(
+                    f"old-{index}", f"new-{index}", {"state": f"challenge-{index}"}, ("state",), 60
+                )
+                for index in range(8)
+            ),
+            return_exceptions=True,
+        )
+        failures = [
+            (type(result).__name__, getattr(getattr(result, "orig", None), "sqlite_errorname", None))
+            for result in results
+            if isinstance(result, BaseException)
+        ]
+        assert not failures, failures
+        assert results == [{"state": f"challenge-{index}"} for index in range(8)]
+        for index in range(8):
+            assert await stores[1].get(f"old-{index}") is None
+            assert await stores[1].get(f"new-{index}") == {}
+    finally:
+        await registry.close()
