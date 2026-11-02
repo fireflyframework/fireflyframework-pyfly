@@ -19,6 +19,7 @@ import asyncio
 import copy
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pyfly.session._claims import matches, validate_claim
@@ -53,6 +54,15 @@ class InMemorySessionStore:
         async with self._lock:
             expires_at = time.monotonic() + ttl
             self._store[session_id] = (data, expires_at)
+
+    async def expires_at(self, session_id: str) -> datetime | None:
+        """Observe the current monotonic deadline as a UTC instant without renewing it."""
+        async with self._lock:
+            entry = self._store.get(session_id)
+            if entry is None:
+                return None
+            remaining = entry[1] - time.monotonic()
+            return datetime.now(UTC) + timedelta(seconds=remaining) if remaining > 0 else None
 
     async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
         """Replace the session's data and TTL only if the store holds it and it has not expired (under the

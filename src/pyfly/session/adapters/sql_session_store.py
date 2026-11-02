@@ -184,6 +184,28 @@ class SqlSessionStore:
             await upsert(session, self._table, values, key=["session_id"])
         await self._purge_if_due()
 
+    async def expires_at(self, session_id: str) -> datetime | None:
+        """Read the current stored deadline on primary, independently of a caller's replica snapshot."""
+        from sqlalchemy import select
+
+        from pyfly.data.transaction import Propagation, TransactionTemplate
+
+        await self.start()
+        table = self._table
+        template = TransactionTemplate(
+            self._datasource(), propagation=Propagation.REQUIRES_NEW, read_only=True, read_from_primary=True
+        )
+        async with template.transaction() as unit:
+            assert unit is not None
+            value = (
+                await unit.resource.execute(
+                    select(table.c.expires_at).where(
+                        table.c.session_id == session_id, table.c.expires_at > self._clock()
+                    )
+                )
+            ).scalar_one_or_none()
+        return value.astimezone(UTC) if value is not None else None
+
     async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:
         """Replace the session's attributes and expire it *ttl* seconds from now, only while the table holds it
         unexpired: one conditional ``UPDATE`` (a matched row counts on MySQL and MariaDB too, whose dialects

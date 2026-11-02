@@ -82,6 +82,12 @@ class HttpSession:
         return float(self._data["_last_accessed"])
 
     @property
+    def authenticated_at(self) -> float | None:
+        """Server observation of the last fresh-login rotation, not an identity-provider auth-time claim."""
+        value = self._data.get("_authenticated_at")
+        return float(value) if isinstance(value, (int, float)) else None
+
+    @property
     def invalidated(self) -> bool:
         return self._invalidated
 
@@ -152,6 +158,8 @@ class HttpSession:
         self._id = uuid.uuid4().hex
         self._modified = True
         self._rotated_on_login = self._rotated_on_login or on_login
+        if on_login:
+            self._data["_authenticated_at"] = time.time()
 
     def invalidate(self) -> None:
         """Mark the session for deletion."""

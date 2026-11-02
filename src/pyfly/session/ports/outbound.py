@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -33,6 +34,19 @@ class SessionStore(Protocol):
     async def delete(self, session_id: str) -> None: ...
 
     async def exists(self, session_id: str) -> bool: ...
+
+
+@runtime_checkable
+class SessionExpiryStore(SessionStore, Protocol):
+    """Optional read-only expiry observation, implemented by the shipped session stores.
+
+    A UTC deadline is a snapshot, not an authorization guarantee: deletion, eviction or a later session
+    write can change it immediately. Reading it never saves, touches or renews the session. ``None`` means
+    no current finite deadline (missing, expired or a store entry without an expiry). A custom store that
+    does not implement this port remains a valid :class:`SessionStore`; callers must not invent a deadline.
+    """
+
+    async def expires_at(self, session_id: str) -> datetime | None: ...
 
 
 @runtime_checkable
