@@ -474,6 +474,56 @@ This fail-fast behavior is intentional. In a microservice context, it is better
 to reject a request quickly and let the caller retry or use a fallback than to
 queue requests indefinitely, which can cause cascading backpressure.
 
+### Bounded asynchronous admission
+
+Use `QueuedBulkhead` when asynchronous work may wait briefly for capacity. It
+limits both active callers and waiting callers, assigns permits in arrival
+order, and releases an assigned permit if a waiting task is cancelled before
+it resumes. It belongs to one process and one event loop.
+
+```python
+import asyncio
+
+from pyfly.resilience import QueuedBulkhead
+
+
+async def main() -> None:
+    admission = QueuedBulkhead(
+        max_concurrent=2,
+        max_waiters=4,
+        wait_timeout_seconds=5.0,
+    )
+    async with admission.hold():
+        # Reserve capacity before opening a transaction or claiming a job.
+        print(admission.active_count)
+    admission.close()
+
+
+asyncio.run(main())
+```
+
+`acquire()` raises `BulkheadException` when the waiting queue is full, the
+waiting deadline expires, or admission has closed. With `max_waiters=0`, it
+rejects saturation immediately. `hold()` returns capacity on success,
+failure or cancellation. For manual ownership, pair each successful
+`acquire()` with one `release()`, after cleanup has finished. Another task
+on the same event loop may return the permit.
+
+`close()` rejects pending and new callers. It does not cancel active work;
+the worker remains responsible for stopping that work and releasing its
+permit. Observe `active_count`, `waiting_count` and `available_slots` when
+reporting local capacity. Limits are per instance: adding replicas increases
+total capacity, so budget database pools and downstream quotas accordingly.
+
+Admission is not a durable job queue or a distributed lock. Compose it with
+the [transactional outbox](events.md) and fenced job ownership: reserve local
+capacity, claim work in a short transaction, release the database connection,
+perform the work, then acknowledge the owned delivery. Do not wait for local
+capacity while holding a transaction or a job lease. Keep ingestion and
+interactive work in separately named admission limits when they need reserved
+capacity. This primitive has no dependency on PostgreSQL, another database,
+or a particular message broker.
+
 ### @bulkhead Decorator
 
 The `bulkhead()` function returns a decorator that automatically acquires a
@@ -771,6 +821,11 @@ pyfly:
         max-concurrent: 20
       db-pool:
         max-concurrent: 5
+    queued-bulkhead:
+      ingestion:
+        max-concurrent: 2
+        max-waiters: 4
+        wait-timeout: 5s
     time-limiter:
       default:
         timeout: 5s
@@ -794,6 +849,9 @@ treated as seconds.
 | `rate-limiter.<name>` | `max-tokens` | `max_tokens` | `10` |
 | `rate-limiter.<name>` | `refill-rate` | `refill_rate` | `10.0` |
 | `bulkhead.<name>` | `max-concurrent` | `max_concurrent` | `10` |
+| `queued-bulkhead.<name>` | `max-concurrent` | `max_concurrent` | `10` |
+| `queued-bulkhead.<name>` | `max-waiters` | `max_waiters` | `0` |
+| `queued-bulkhead.<name>` | `wait-timeout` | `wait_timeout_seconds` | `30s` |
 | `time-limiter.<name>` | `timeout` | *(stored as `timedelta`)* | `30s` |
 
 ### Injecting the ResilienceRegistry
@@ -825,12 +883,28 @@ You can also look up instances directly at call site:
 cb = registry.circuit_breaker("payment-api")
 rl = registry.rate_limiter("search-api")
 bh = registry.bulkhead("db-pool")
+admission = registry.queued_bulkhead("ingestion")
 timeout = registry.time_limiter("slow-report")   # timedelta
 ```
 
 An unknown name raises `KeyError` with a message listing available names.
 The registry is always-on — when no `pyfly.resilience.*` keys are configured,
 it starts empty (no error).
+
+The application context closes the registry's queued admission limits during
+shutdown. A registry created outside the context must be closed by its owner.
+Use and close a bound queued limiter on its original event loop. Configuration
+rejects nonpositive concurrency, negative waiting capacity, booleans in place
+of limits, and nonpositive or nonfinite waiting deadlines.
+
+Declare each named queued limiter in configuration; an empty mapping uses its
+defaults. Its individual settings resolve environment overrides and
+placeholders before validation, including settings omitted from that mapping.
+For the `ingestion` instance above,
+`PYFLY_RESILIENCE_QUEUED_BULKHEAD_INGESTION_MAX_CONCURRENT=1` reduces capacity
+to one. Alternatively, configure `max-concurrent: ${WORKER_LIMIT:2}` and
+supply `WORKER_LIMIT` at deployment. Integer strings are accepted; fractional
+limits and boolean values are rejected instead of silently coerced.
 
 > **Sync time-limiter note**: when `@time_limiter` wraps a synchronous function,
 > the call runs in a `ThreadPoolExecutor` worker thread and the calling thread

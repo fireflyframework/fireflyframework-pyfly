@@ -16,6 +16,7 @@
 from pyfly.resilience.bulkhead import Bulkhead, bulkhead
 from pyfly.resilience.circuit_breaker import CircuitBreaker, CircuitState, circuit_breaker
 from pyfly.resilience.fallback import fallback
+from pyfly.resilience.queued_bulkhead import QueuedBulkhead
 from pyfly.resilience.rate_limiter import RateLimiter, rate_limiter
 from pyfly.resilience.registry import ResilienceRegistry
 from pyfly.resilience.retry import retry
@@ -26,6 +27,7 @@ __all__ = [
     "CircuitBreaker",
     "CircuitState",
     "RateLimiter",
+    "QueuedBulkhead",
     "ResilienceRegistry",
     "bulkhead",
     "circuit_breaker",

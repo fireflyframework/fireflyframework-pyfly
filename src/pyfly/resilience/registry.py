@@ -24,8 +24,10 @@ import re
 from datetime import timedelta
 from typing import Any
 
+from pyfly.context.lifecycle import pre_destroy
 from pyfly.resilience.bulkhead import Bulkhead
 from pyfly.resilience.circuit_breaker import CircuitBreaker
+from pyfly.resilience.queued_bulkhead import QueuedBulkhead
 from pyfly.resilience.rate_limiter import RateLimiter
 
 # Pattern: "5s" → 5 seconds, "1m" → 60 seconds, "500ms" → 0.5 seconds, "2.5" → 2.5 seconds
@@ -65,6 +67,14 @@ def _parse_duration(raw: str | int | float) -> timedelta:
 parse_duration = _parse_duration
 
 
+def _admission_limit(raw: Any) -> int:
+    if type(raw) is int:
+        return raw
+    if isinstance(raw, str) and re.fullmatch(r"[+-]?[0-9]+", raw.strip()):
+        return int(raw)
+    raise ValueError("Queued bulkhead capacity must be an integer")
+
+
 class ResilienceRegistry:
     """Registry of named resilience instances built from configuration.
 
@@ -86,11 +96,13 @@ class ResilienceRegistry:
         rate_limiters: dict[str, RateLimiter] | None = None,
         bulkheads: dict[str, Bulkhead] | None = None,
         time_limiters: dict[str, timedelta] | None = None,
+        queued_bulkheads: dict[str, QueuedBulkhead] | None = None,
     ) -> None:
         self._circuit_breakers: dict[str, CircuitBreaker] = circuit_breakers or {}
         self._rate_limiters: dict[str, RateLimiter] = rate_limiters or {}
         self._bulkheads: dict[str, Bulkhead] = bulkheads or {}
         self._time_limiters: dict[str, timedelta] = time_limiters or {}
+        self._queued_bulkheads: dict[str, QueuedBulkhead] = queued_bulkheads or {}
 
     # ------------------------------------------------------------------
     # Typed accessors
@@ -140,6 +152,20 @@ class ResilienceRegistry:
             available = sorted(self._time_limiters)
             raise KeyError(f"No time-limiter named {name!r}. Available: {available or '(none)'}") from None
 
+    def queued_bulkhead(self, name: str) -> QueuedBulkhead:
+        """Return the asynchronous admission limiter registered under *name*."""
+        try:
+            return self._queued_bulkheads[name]
+        except KeyError:
+            available = sorted(self._queued_bulkheads)
+            raise KeyError(f"No queued-bulkhead named {name!r}. Available: {available or '(none)'}") from None
+
+    @pre_destroy
+    def close(self) -> None:
+        """Stop queued admission when the application context destroys this registry."""
+        for limiter in self._queued_bulkheads.values():
+            limiter.close()
+
     # ------------------------------------------------------------------
     # Convenience: list registered names
     # ------------------------------------------------------------------
@@ -163,6 +189,11 @@ class ResilienceRegistry:
     def time_limiter_names(self) -> list[str]:
         """Sorted list of registered time-limiter names."""
         return sorted(self._time_limiters)
+
+    @property
+    def queued_bulkhead_names(self) -> list[str]:
+        """Sorted names of configured asynchronous admission limiters."""
+        return sorted(self._queued_bulkheads)
 
     # ------------------------------------------------------------------
     # Factory
@@ -191,13 +222,21 @@ class ResilienceRegistry:
         ``pyfly.resilience.time-limiter.<name>``
             * ``timeout`` (duration, default ``"30s"``)
 
+        ``pyfly.resilience.queued-bulkhead.<name>``
+            * ``max-concurrent`` (int, default 10)
+            * ``max-waiters`` (int, default 0)
+            * ``wait-timeout`` (duration, default ``"30s"``)
+
         Config.get_section() is used to retrieve each sub-map; relaxed binding
-        (kebab/snake interchangeable) is handled by Config internally.
+        (kebab/snake interchangeable) is handled by Config internally. Queued
+        bulkhead settings use get() individually so deployment overrides and
+        placeholders also apply to omitted settings of declared instances.
         """
         circuit_breakers: dict[str, CircuitBreaker] = {}
         rate_limiters: dict[str, RateLimiter] = {}
         bulkheads: dict[str, Bulkhead] = {}
         time_limiters: dict[str, timedelta] = {}
+        queued_bulkheads: dict[str, QueuedBulkhead] = {}
 
         # --- circuit-breakers ---
         cb_section: dict[str, Any] = config.get_section("pyfly.resilience.circuit-breaker")
@@ -241,6 +280,22 @@ class ResilienceRegistry:
             max_concurrent = int(params.get("max_concurrent", 10))
             bulkheads[name] = Bulkhead(max_concurrent=max_concurrent)
 
+        qb_section = config.get("pyfly.resilience.queued-bulkhead", {})
+        if not isinstance(qb_section, dict):
+            raise ValueError("Queued bulkheads require a named settings mapping")
+        for name, raw in qb_section.items():
+            if not isinstance(raw, dict):
+                raise ValueError(f"Queued bulkhead {name!r} requires a settings mapping")
+            prefix = f"pyfly.resilience.queued-bulkhead.{name}"
+            timeout = config.get(f"{prefix}.wait-timeout", "30s")
+            if isinstance(timeout, bool):
+                raise ValueError("Queued bulkhead wait-timeout must be a positive duration")
+            queued_bulkheads[name] = QueuedBulkhead(
+                max_concurrent=_admission_limit(config.get(f"{prefix}.max-concurrent", 10)),
+                max_waiters=_admission_limit(config.get(f"{prefix}.max-waiters", 0)),
+                wait_timeout_seconds=_parse_duration(timeout).total_seconds(),
+            )
+
         # --- time-limiters ---
         tl_section: dict[str, Any] = config.get_section("pyfly.resilience.time-limiter")
         for name, raw in tl_section.items():
@@ -255,4 +310,5 @@ class ResilienceRegistry:
             rate_limiters=rate_limiters,
             bulkheads=bulkheads,
             time_limiters=time_limiters,
+            queued_bulkheads=queued_bulkheads,
         )
