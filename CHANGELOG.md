@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.11.04 (2026-11-01)
+
+### Added
+
+- Add optional immutable output-admission hooks and explicit guarded streaming with
+  configurable byte and time limits, preserving native typed results and message APIs.
+
+### Fixed
+
+- Admit guarded output before ordinary observers, agent memory and result delivery
+  across asynchronous, synchronous and guarded streaming runs. Recheck changed hook
+  output and reject replaced result types or native history before further publication.
+- Reject incompatible incremental streams and raw event callbacks before model calls
+  when output guards are attached. Retain observed usage and finalize interrupted
+  streams without repeating model calls, admission or memory writes.
+
 ## v26.11.03 (2026-11-01)
 
 ### Added

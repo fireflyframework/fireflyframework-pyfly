@@ -26,7 +26,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pyfly.core.config import config_properties
 
@@ -74,6 +74,12 @@ class AgenticConfig(BaseModel):
 
     max_retries: int = 3
     """Default maximum number of retries for agent runs and tool calls."""
+
+    guarded_stream_max_bytes: int = Field(default=1024 * 1024, gt=0, strict=True)
+    """Maximum UTF-8 JSON bytes of retained final-response parts during guarded streaming."""
+
+    guarded_stream_timeout: float = Field(default=30.0, gt=0, allow_inf_nan=False, strict=True)
+    """Finite wall-clock deadline for guarded stream entry, completion, and admission."""
 
     # -- Reasoning -----------------------------------------------------------
     reasoning_output_mode: Literal["tool", "native", "prompted"] | None = None

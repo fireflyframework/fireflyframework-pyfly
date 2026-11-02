@@ -29,6 +29,7 @@ import atexit
 import contextlib
 import functools
 import logging
+import math
 import re
 import sys
 import threading
@@ -38,11 +39,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from types import NoneType
 from typing import TYPE_CHECKING, Any, Generic, Literal, cast
 
+from pydantic import TypeAdapter
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import DeferredToolRequests, DeferredToolResults, RunContext
 from pydantic_ai import Tool as PydanticTool
 from pydantic_ai.capabilities import AgentCapability, HandleDeferredToolCalls, Instrumentation
 from pydantic_ai.exceptions import UserError
+from pydantic_ai.messages import ModelResponsePart
 from pydantic_ai.models import Model, infer_model
 from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.wrapper import WrapperModel
@@ -640,8 +643,13 @@ class Agent(Generic[AgentDepsT, OutputT]):
                 mw_ctx.prompt, deps=deps, timeout=timeout, retry_override=mw_ctx.metadata.get("_retry_config"), **kwargs
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            await self._persist_memory(conversation_id, prompt, result)
             self._record_usage(result, elapsed_ms, correlation_id=context.correlation_id, model_identifier=mw_ctx.model)
+            if self._middleware.requires_output_admission:
+                result = await self._middleware.run_after(mw_ctx, result)
+                await self._persist_memory(conversation_id, prompt, result)
+            else:
+                await self._persist_memory(conversation_id, prompt, result)
+                result = await self._middleware.run_after(mw_ctx, result)
         except asyncio.CancelledError:
             await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
             raise
@@ -651,7 +659,6 @@ class Agent(Generic[AgentDepsT, OutputT]):
             await self._middleware.run_error(mw_ctx, exc)
             raise
 
-        result = await self._middleware.run_after(mw_ctx, result)
         return result
 
     def run_sync(
@@ -732,17 +739,22 @@ class Agent(Generic[AgentDepsT, OutputT]):
                     **kwargs,
                 )
                 elapsed_ms = (time.monotonic() - t0) * 1000
-                await self._persist_memory(conversation_id, prompt, result)
                 self._record_usage(
                     result, elapsed_ms, correlation_id=context.correlation_id, model_identifier=mw_ctx.model
                 )
+                if self._middleware.requires_output_admission:
+                    result = await self._middleware.run_after(mw_ctx, result)
+                    await self._persist_memory(conversation_id, prompt, result)
+                else:
+                    await self._persist_memory(conversation_id, prompt, result)
+                    result = await self._middleware.run_after(mw_ctx, result)
             except asyncio.CancelledError:
                 await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
                 raise
             except Exception as exc:
                 await self._middleware.run_error(mw_ctx, exc)
                 raise
-            return await self._middleware.run_after(mw_ctx, result)
+            return result
 
         if self._runtime is not None:
             with self._runtime.activate():
@@ -770,6 +782,8 @@ class Agent(Generic[AgentDepsT, OutputT]):
         timeout: float | None = None,
         context: AgentContext | None = None,
         streaming_mode: str = "buffered",
+        guarded_max_bytes: int | None = None,
+        guarded_timeout: float | None = None,
         model_options: ModelOptions | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -782,9 +796,37 @@ class Agent(Generic[AgentDepsT, OutputT]):
             streaming_mode: Streaming mode:
                 - "buffered" (default): Stream in chunks/messages (backward compatible)
                 - "incremental": True token-by-token streaming with minimal latency
+                - "guarded": Complete and admit output before exposing the stream
+
+        Output-admission middleware automatically selects guarded mode instead
+        of buffered mode. Incremental mode is incompatible with these guards.
         """
-        if streaming_mode not in ("buffered", "incremental"):
-            raise ValueError(f"Invalid streaming_mode: {streaming_mode!r}. Expected 'buffered' or 'incremental'.")
+        if streaming_mode not in ("buffered", "incremental", "guarded"):
+            raise ValueError(
+                f"Invalid streaming_mode: {streaming_mode!r}. Expected 'buffered', 'incremental', or 'guarded'."
+            )
+        guarded = self._middleware.requires_output_admission
+        if guarded and streaming_mode == "incremental":
+            raise ValueError("Output guards require guarded streaming; incremental content cannot be admitted safely.")
+        max_bytes = self._config.guarded_stream_max_bytes if guarded_max_bytes is None else guarded_max_bytes
+        deadline = self._config.guarded_stream_timeout if guarded_timeout is None else guarded_timeout
+        if guarded or streaming_mode == "guarded" or guarded_max_bytes is not None or guarded_timeout is not None:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise ValueError("guarded_max_bytes must be a positive integer")
+            if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+                raise ValueError("guarded_timeout must be positive and finite")
+            try:
+                finite = math.isfinite(deadline)
+            except OverflowError:
+                finite = False
+            if not finite or deadline <= 0:
+                raise ValueError("guarded_timeout must be positive and finite")
+        if guarded or streaming_mode == "guarded":
+            if timeout is not None:
+                if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+                    raise ValueError("timeout must be positive and finite for guarded streaming")
+                deadline = min(timeout, deadline)
+            timeout = deadline
 
         if model_options is not None:
             kwargs["model_options"] = model_options
@@ -821,6 +863,18 @@ class Agent(Generic[AgentDepsT, OutputT]):
             await self._middleware.run_error(mw_ctx, exc)
             raise
 
+        if guarded or streaming_mode == "guarded":
+            return _GuardedStreamContext(
+                stream_ctx,
+                self,
+                time.monotonic(),
+                mw_ctx,
+                max_bytes=max_bytes,
+                correlation_id=context.correlation_id,
+                timeout=timeout,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
         if streaming_mode == "incremental":
             return _IncrementalStreamContext(
                 stream_ctx,
@@ -998,7 +1052,10 @@ class Agent(Generic[AgentDepsT, OutputT]):
 
         try:
             result: ReasoningResult[Any] = await pattern.execute(self, mw_ctx.prompt, **kwargs)
-            # Persist the reasoning output as a conversation turn
+            guarded = self._middleware.requires_output_admission
+            if guarded:
+                result = await self._middleware.run_after(mw_ctx, result)
+            # Persist only the admitted reasoning outcome.
             if self._memory is not None and conversation_id is not None:
                 prompt_text = prompt if isinstance(prompt, str) else str(prompt)
                 output_text = str(result.output)[:1000] if result.output else ""
@@ -1008,6 +1065,8 @@ class Agent(Generic[AgentDepsT, OutputT]):
                     output_text,
                     [],
                 )
+            if not guarded:
+                result = await self._middleware.run_after(mw_ctx, result)
 
         except asyncio.CancelledError:
             await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
@@ -1019,7 +1078,6 @@ class Agent(Generic[AgentDepsT, OutputT]):
             await self._middleware.run_error(mw_ctx, exc)
             raise
 
-        result = await self._middleware.run_after(mw_ctx, result)
         return result
 
     # -- Decorator proxies ---------------------------------------------------
@@ -1103,6 +1161,10 @@ class Agent(Generic[AgentDepsT, OutputT]):
 
     def _prepare_model_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Translate portable options at the invocation boundary, never on shared model state."""
+        if self._middleware.requires_output_admission and (
+            kwargs.get("event_stream_handler") is not None or self._agent.event_stream_handler is not None
+        ):
+            raise ValueError("Output guards cannot expose raw provider events through event_stream_handler.")
         if "model" in kwargs:
             self._execution_state(kwargs)
         override = kwargs.pop("model_options", None)
@@ -1408,21 +1470,87 @@ class _UsageTrackingStreamContext:
                 return result
             # After the stream closes, usage() is available on the stream handle.
             if self._stream is not None:
-                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
                 self._agent._record_usage(
                     self._stream,
                     elapsed_ms,
                     correlation_id=self._correlation_id,
                     model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
                 )
-            # Run after-hooks on the stream handle so middleware can inspect usage.
-            if self._mw_ctx is not None:
+            guarded = self._agent._middleware.requires_output_admission
+            if self._mw_ctx is not None and guarded:
+                await self._agent._middleware.run_after(self._mw_ctx, self._stream)
+            if self._stream is not None:
+                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+            if self._mw_ctx is not None and not guarded:
                 await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             return result
         except BaseException as exc:
             if self._mw_ctx is not None:
                 await self._agent._middleware.run_error(self._mw_ctx, exc)
             raise
+
+
+_RESPONSE_PARTS = TypeAdapter(list[ModelResponsePart])
+
+
+class _GuardedStreamContext(_UsageTrackingStreamContext):
+    """Complete and admit bounded output before exposing the native provider handle."""
+
+    def __init__(self, *args: Any, max_bytes: int, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._max_bytes = max_bytes
+        self._usage_recorded = False
+
+    async def __aenter__(self) -> Any:
+        stream = await super().__aenter__()
+        try:
+            remaining = None if self._timeout is None else max(0, self._timeout - (time.monotonic() - self._t0))
+            async with asyncio.timeout(remaining):
+                # Snapshots retain all response parts so far. Count each current
+                # buffer, not the sum of repeated snapshots, including tool args.
+                async with contextlib.aclosing(stream.stream_response(debounce_by=None)) as responses:
+                    async for response in responses:
+                        if len(_RESPONSE_PARTS.dump_json(response.parts)) > self._max_bytes:
+                            raise AgentError("Guarded stream exceeds guarded_max_bytes")
+                await stream.get_output()
+                admitted = await self._agent._middleware.admit_output(self._mw_ctx, stream)
+                if admitted is not stream:
+                    raise AgentError("Output admission cannot return a replacement native stream")
+                self._usage_recorded = True
+                self._agent._record_usage(
+                    stream,
+                    (time.monotonic() - self._t0) * 1000,
+                    correlation_id=self._correlation_id,
+                    model_identifier=self._mw_ctx.model,
+                )
+                admitted = await self._agent._middleware.run_after(self._mw_ctx, stream, output_admitted=True)
+                if admitted is not stream:
+                    raise AgentError("After hooks cannot return a replacement native stream")
+                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, stream)
+            return stream
+        except BaseException as exc:
+            # __aexit__ is not called by async-with when entry fails. Close the
+            # provider here, retaining usage without exposing its rejected data.
+            try:
+                await self._stream_ctx.__aexit__(type(exc), exc, exc.__traceback__)
+            finally:
+                try:
+                    if not self._usage_recorded:
+                        self._usage_recorded = True
+                        self._agent._record_usage(
+                            stream,
+                            (time.monotonic() - self._t0) * 1000,
+                            correlation_id=self._correlation_id,
+                            model_identifier=self._mw_ctx.model,
+                        )
+                finally:
+                    await self._agent._middleware.run_error(self._mw_ctx, exc)
+            raise
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        # The admitted model run, usage, hooks and memory were finalized before
+        # handing out its stream. Consumer-body failures are not a second model run.
+        return await self._stream_ctx.__aexit__(exc_type, exc_val, exc_tb)
 
 
 class _IncrementalStreamContext:
@@ -1492,15 +1620,18 @@ class _IncrementalStreamContext:
                 return result
             # After the stream closes, usage() is available on the stream handle.
             if self._stream is not None:
-                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
                 self._agent._record_usage(
                     self._stream,
                     elapsed_ms,
                     correlation_id=self._correlation_id,
                     model_identifier=self._mw_ctx.model if self._mw_ctx is not None else None,
                 )
-            # Run after-hooks on the stream handle so middleware can inspect usage.
-            if self._mw_ctx is not None:
+            guarded = self._agent._middleware.requires_output_admission
+            if self._mw_ctx is not None and guarded:
+                await self._agent._middleware.run_after(self._mw_ctx, self._stream)
+            if self._stream is not None:
+                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+            if self._mw_ctx is not None and not guarded:
                 await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             return result
         except BaseException as exc:

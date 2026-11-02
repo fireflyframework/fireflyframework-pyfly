@@ -38,6 +38,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from pydantic import TypeAdapter
+
+from pyfly.agentic.exceptions import AgentError
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,6 +110,21 @@ class AgentMiddleware(Protocol):
         """
 
 
+_OUTPUT_VALUE = TypeAdapter(Any)
+
+
+async def _output_snapshot(result: Any) -> tuple[type[Any], type[Any], bytes, bytes | None]:
+    """Snapshot supported output/history without logging or retaining it externally."""
+    try:
+        stream_output = getattr(result, "get_output", None)
+        output = await stream_output() if callable(stream_output) else getattr(result, "output", result)
+        messages = getattr(result, "all_messages_json", None)
+        history = messages() if callable(messages) else None
+        return type(result), type(output), _OUTPUT_VALUE.dump_json(output, warnings=False), history
+    except Exception:
+        raise AgentError("Guarded after hooks require snapshot-compatible output and history") from None
+
+
 class MiddlewareChain:
     """Ordered chain of middleware that wraps an agent run."""
 
@@ -130,12 +149,50 @@ class MiddlewareChain:
             await self.run_error(context, exc)
             raise
 
-    async def run_after(self, context: MiddlewareContext, result: Any) -> Any:
-        """Execute all ``after_run`` hooks in reverse order."""
+    @property
+    def requires_output_admission(self) -> bool:
+        """Whether final output must be admitted before any content is exposed."""
+        return any(callable(getattr(mw, "admit_output", None)) for mw in self._middlewares)
+
+    async def admit_output(self, context: MiddlewareContext, result: Any) -> Any:
+        """Run optional content guards before ordinary after hooks and memory.
+
+        A middleware defining ``admit_output`` uses this hook instead of
+        ``after_run``. Admission is an immutable predicate: return the exact
+        result without changing its serialized output, types, or native history.
+        """
+        try:
+            for mw in self._middlewares:
+                hook = getattr(mw, "admit_output", None)
+                if callable(hook):
+                    before = await _output_snapshot(result)
+                    admitted = await hook(context, result)
+                    if admitted is not result or before != await _output_snapshot(result):
+                        raise AgentError(
+                            "Output admission hooks cannot mutate output/history or return a replacement result"
+                        )
+        except BaseException as exc:
+            await self.run_error(context, exc)
+            raise
+        return result
+
+    async def run_after(self, context: MiddlewareContext, result: Any, *, output_admitted: bool = False) -> Any:
+        """Admit output, then execute ordinary after hooks in reverse order."""
+        if not output_admitted:
+            result = await self.admit_output(context, result)
         try:
             for mw in reversed(self._middlewares):
-                if hasattr(mw, "after_run"):
+                if hasattr(mw, "after_run") and not callable(getattr(mw, "admit_output", None)):
+                    before = await _output_snapshot(result) if self.requires_output_admission else None
                     result = await mw.after_run(context, result)
+                    if before is not None:
+                        after = await _output_snapshot(result)
+                        if before[:2] != after[:2] or before[3] != after[3]:
+                            raise AgentError(
+                                "Guarded after hooks cannot change native result types or provider history"
+                            )
+                        if before[2] != after[2]:
+                            result = await self.admit_output(context, result)
         except BaseException as exc:
             await self.run_error(context, exc)
             raise

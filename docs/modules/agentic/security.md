@@ -174,15 +174,30 @@ agent = Agent(
     ],
 )
 
-# Or sanitise mode — replaces matched content with [REDACTED]
+# Sanitise input while continuing to reject unsafe output
 agent = Agent(
     name="sanitised",
     middleware=[
         PromptGuardMiddleware(sanitise=True),
-        OutputGuardMiddleware(sanitise=True),
+        OutputGuardMiddleware(),
     ],
 )
 ```
+
+Native output admission runs before ordinary after hooks and conversation-memory
+writes. It is block-only even when `sanitise=True` is configured: redacting `.output`
+alone leaves original provider history accessible and can corrupt structured types.
+The direct legacy `after_run()` redaction helper retains its API but is not the
+native admission path and does not sanitise message history.
+
+With an output guard attached, streaming buffers the complete final output before
+returning a native stream handle, with finite 1 MiB response-part and 30-second
+admission defaults. Incremental mode and raw `event_stream_handler` callbacks are
+rejected before model calls. See the agents guide for overrides and byte-counting
+boundaries. Changed after-hook output is re-admitted; result-type or provider-history
+mutations fail closed before memory. These checks do not reverse earlier observer
+side effects or tools, and do not protect provider-level content instrumentation.
+Leave instrumentation content capture disabled for sensitive workloads.
 
 See the [Agents Guide](agents.md#built-in-middleware) for full middleware
 documentation.
@@ -587,7 +602,7 @@ agent = Agent(
     memory=memory,
     middleware=[
         PromptGuardMiddleware(sanitise=True), # Input validation
-        OutputGuardMiddleware(sanitise=True), # Output scanning
+        OutputGuardMiddleware(), # Output scanning
         CostGuardMiddleware(budget_usd=10.0), # Budget enforcement
     ],
 )

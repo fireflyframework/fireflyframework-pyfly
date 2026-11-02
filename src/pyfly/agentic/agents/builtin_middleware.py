@@ -49,6 +49,7 @@ from typing import Any
 
 from opentelemetry import context as _otel_context
 from opentelemetry import trace as _trace
+from pydantic import TypeAdapter
 from pydantic_ai import DeferredToolRequests
 
 from pyfly.agentic.agents.middleware import MiddlewareContext
@@ -604,17 +605,44 @@ def _replace_output(result: Any, new_output: Any) -> Any:
         return new_output
 
 
+_OUTPUT_JSON = TypeAdapter(Any)
+
+
+def _guard_output_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        encoded = _OUTPUT_JSON.dump_json(value, warnings=False).decode("utf-8")
+        pending = [json.loads(encoded)]
+        strings: list[str] = []
+        while pending:
+            item = pending.pop()
+            if isinstance(item, str):
+                strings.append(item)
+            elif isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        # Preserve literal string values as well as their JSON representation:
+        # a newline/escape in a field must not evade a literal deny pattern.
+        return "\n".join([encoded, *strings])
+    except Exception:
+        raise OutputGuardError("Output admission requires JSON-serializable typed output") from None
+
+
 class OutputGuardMiddleware:
     """Scans LLM output for PII, secrets, harmful content, and custom patterns.
 
-    When the guard detects unsafe content, the middleware either raises
-    :class:`OutputGuardError` (default) or sanitises the output by replacing
-    matched fragments with ``[REDACTED]``.
+    Native Agent output admission rejects unsafe content with
+    :class:`OutputGuardError`, preserving typed output and provider history.
+    The legacy direct ``after_run`` helper optionally redacts only ``output``;
+    it does not sanitise provider messages and is not native admission.
 
     Parameters:
         guard: An :class:`~pyfly.agentic.security.output_guard.OutputGuard`
             instance.  Defaults to the module-level ``default_output_guard``.
-        sanitise: When *True*, sanitise the output instead of rejecting.
+        sanitise: Legacy direct ``after_run`` redaction. Native admission remains block-only.
         block_categories: Only block on these categories (e.g. ``["secrets", "pii"]``).
             When empty (default), all categories trigger blocking.
     """
@@ -636,17 +664,21 @@ class OutputGuardMiddleware:
     async def before_run(self, context: MiddlewareContext) -> None:
         """No pre-processing needed."""
 
+    async def admit_output(self, context: MiddlewareContext, result: Any) -> Any:
+        """Admit final output before downstream hooks, memory, or stream access."""
+        return await self._scan_output(context, result, allow_sanitise=False)
+
     async def after_run(self, context: MiddlewareContext, result: Any) -> Any:
-        """Scan the output; reject or sanitise if unsafe."""
-        if _is_deferred_output(result):
+        """Legacy direct hook: redaction does not sanitise native message history."""
+        return await self._scan_output(context, result, allow_sanitise=True)
+
+    async def _scan_output(self, context: MiddlewareContext, result: Any, *, allow_sanitise: bool) -> Any:
+        streamed = callable(getattr(result, "get_output", None))
+        output = await result.get_output() if streamed else result
+        if isinstance(output, DeferredToolRequests) or _is_deferred_output(output):
             return result
-        output_text = ""
-        if hasattr(result, "output"):
-            output_text = str(result.output)
-        elif isinstance(result, str):
-            output_text = result
-        else:
-            output_text = str(result)
+        value = output if streamed else getattr(result, "output", result)
+        output_text = str(value) if allow_sanitise and not streamed else _guard_output_text(value)
 
         if not output_text:
             return result
@@ -661,7 +693,7 @@ class OutputGuardMiddleware:
             if not blocking:
                 return result
 
-        if self._sanitise and scan_result.sanitised_output is not None:
+        if allow_sanitise and self._sanitise and scan_result.sanitised_output is not None and not streamed:
             logger.warning(
                 "OutputGuardMiddleware: sanitised output for agent '%s' (%d pattern(s) matched in %s)",
                 context.agent_name,
