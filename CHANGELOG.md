@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.11.05 (2026-11-02)
+
+### Fixed
+
+- Stop pipeline execution when checkpoint persistence fails and reject inconsistent
+  saved results or typed state before scheduling effects. Persistence errors are
+  non-retryable and do not expose stored content or backend exception messages.
+- Resume cyclic runs from their saved position and preserve explicit starting
+  boundaries across restarts. Keep a human approval barrier authoritative when
+  parallel nodes complete, retaining completed peer results without bypassing approval.
+- Acknowledge workflow journal entries only after successful persistence and return
+  detached durable replay values so callers cannot silently rewrite earlier history.
+  Propagate journal failures through native workflow composition and retry boundaries.
+
+### Changed
+
+- Reject checkpointed dynamic fan-out and ambiguous historical conditional resumes
+  before dispatch rather than implying durability the saved format cannot establish.
+  Document uncertain external effects, execution-only completion callbacks and the
+  limits of checkpoint authorization, graph identity and distributed coordination.
+
 ## v26.11.04 (2026-11-01)
 
 ### Added

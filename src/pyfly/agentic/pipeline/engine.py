@@ -38,7 +38,7 @@ from pydantic import BaseModel
 from pyfly.agentic._audit import current_audit_invocation, pipeline_admitted, pipeline_node_effect, pipeline_recording
 from pyfly.agentic._runtime_context import selected_runtime
 from pyfly.agentic.config import get_config
-from pyfly.agentic.exceptions import PipelineError
+from pyfly.agentic.exceptions import PipelineError, PipelinePersistenceError
 from pyfly.agentic.observability.usage import default_usage_tracker
 from pyfly.agentic.pipeline.audit import AuditEntry, AuditLog, AuditStatus
 from pyfly.agentic.pipeline.checkpoint import Checkpointer, CheckpointRecord
@@ -419,12 +419,17 @@ class PipelineEngine(AuditRecordingSupport):
             A :class:`PipelineResult` with all node outputs, trace, ``run_id``
             (use to resume later), and ``final_state`` for state-aware runs.
         """
+        resume_after_node: str | None = None
+        start_node: str | None = None
         if run_id is not None and context is None and inputs is None and state is None:
             resume_run_id: str = run_id
-            context, pre_completed_list, sequence_start = self._load_for_resume(
+            context, pre_completed_list, sequence_start, resume_after_node, start_node = self._load_for_resume(
                 resume_run_id, approve_pause=approve_pause
             )
             pre_completed = set(pre_completed_list)
+            if start_node is not None:
+                forward = {start_node} | self._dag.transitive_successors(start_node)
+                pre_completed.update(set(self._dag.nodes) - forward)
             # Preserve original completion order so PipelineResult.completed_nodes
             # reflects the run's actual sequence after resume.
             all_results: dict[str, NodeResult] = {}
@@ -466,6 +471,7 @@ class PipelineEngine(AuditRecordingSupport):
                 start_id = _resolve_node_id(start_at)
                 if start_id not in self._dag.nodes:
                     raise PipelineError(f"start_at='{start_id}' not in DAG")
+                start_node = start_id
                 forward = {start_id} | self._dag.transitive_successors(start_id)
                 pre_completed = {nid for nid in self._dag.nodes if nid not in forward}
 
@@ -496,10 +502,11 @@ class PipelineEngine(AuditRecordingSupport):
                     context=context,
                     run_id=run_id,
                     all_results=all_results,
-                    pre_completed=pre_completed,
                     sequence_start=sequence_start,
                     pipeline_span=_pipeline_span,
                     resume_trace_seed=resume_trace_seed,
+                    resume_after_node=resume_after_node,
+                    start_node=start_node,
                 )
 
             # Topological levels ensure that all upstream dependencies of a node
@@ -672,6 +679,18 @@ class PipelineEngine(AuditRecordingSupport):
                         # a paused checkpoint, and surface the pause in the result.
                         if paused_now:
                             pause_reason = nr.output.reason
+                            if pending_pause is None:
+                                pending_pause = (node_id, pause_reason)
+                            self._save_checkpoint(
+                                run_id=run_id,
+                                node_id=pending_pause[0],
+                                sequence=sequence,
+                                context=context,
+                                all_results=all_results,
+                                execution_start=start_node,
+                                paused=True,
+                                pause_reason=pending_pause[1],
+                            )
                             await self._dispatch(
                                 "on_node_pause",
                                 pipeline_name=self._dag.name,
@@ -679,16 +698,6 @@ class PipelineEngine(AuditRecordingSupport):
                                 node_id=node_id,
                                 reason=pause_reason,
                             )
-                            self._save_checkpoint(
-                                run_id=run_id,
-                                node_id=node_id,
-                                sequence=sequence,
-                                context=context,
-                                all_results=all_results,
-                                paused=True,
-                                pause_reason=pause_reason,
-                            )
-                            pending_pause = (node_id, pause_reason)
                             abort = True
                             continue
 
@@ -724,10 +733,13 @@ class PipelineEngine(AuditRecordingSupport):
                                 context.state = apply_update(context.state, nr.output, self._reducers)
                             self._save_checkpoint(
                                 run_id=run_id,
-                                node_id=node_id,
+                                node_id=pending_pause[0] if pending_pause else node_id,
                                 sequence=sequence,
                                 context=context,
                                 all_results=all_results,
+                                execution_start=start_node,
+                                paused=pending_pause is not None,
+                                pause_reason=pending_pause[1] if pending_pause else None,
                             )
 
                         # Handle failure strategies
@@ -763,7 +775,7 @@ class PipelineEngine(AuditRecordingSupport):
             }
             final_output = list(final_outputs.values())[0] if len(final_outputs) == 1 else final_outputs or None
 
-            success = all(r.success or r.skipped for r in all_results.values())
+            success = pending_pause is None and all(r.success or r.skipped for r in all_results.values())
 
             # Emit pipeline complete event
             await self._dispatch(
@@ -779,10 +791,6 @@ class PipelineEngine(AuditRecordingSupport):
 
             paused_node = pending_pause[0] if pending_pause else None
             pause_reason_final = pending_pause[1] if pending_pause else None
-            if pending_pause is not None:
-                # A paused run is not "successful" — it didn't finish.
-                success = False
-
             if not success and pending_pause is None:
                 _span_error(_pipeline_span, "PipelineError")
 
@@ -823,6 +831,8 @@ class PipelineEngine(AuditRecordingSupport):
         Returns ``True`` on success, ``False`` if any worker failed (the
         caller treats this as an abort signal).
         """
+        if self._checkpointer is not None:
+            raise PipelinePersistenceError("Checkpointed dynamic fan-out is unsupported")
         if current_audit_invocation() is not None:
             raise AuditError(
                 "Automatic audit requires stable worker replay identities; dynamic fan-out was not admitted"
@@ -906,10 +916,11 @@ class PipelineEngine(AuditRecordingSupport):
         context: PipelineContext,
         run_id: str,
         all_results: dict[str, NodeResult],
-        pre_completed: set[str],
         sequence_start: int,
         pipeline_span: Any,
         resume_trace_seed: list[ExecutionTraceEntry] | None = None,
+        resume_after_node: str | None = None,
+        start_node: str | None = None,
     ) -> PipelineResult:
         """Sequential frontier-following scheduler for cyclic DAGs.
 
@@ -921,17 +932,20 @@ class PipelineEngine(AuditRecordingSupport):
         """
         trace_entries: list[ExecutionTraceEntry] = list(resume_trace_seed or [])
         pipeline_start = time.perf_counter()
-        visit_counts: dict[str, int] = dict.fromkeys(pre_completed, 1)
+        visit_counts: dict[str, int] = dict.fromkeys(all_results, 1)
         sequence = sequence_start
 
         # Entry node: insertion order, matching StatePipeline.
         nodes_in_order = list(self._dag.nodes)
         if not nodes_in_order:
             raise PipelineError("Pipeline has no nodes")
-        next_step: str | list[Send] | None = nodes_in_order[0]
-        # Skip past anything already completed during this resumed run.
-        while isinstance(next_step, str) and next_step in pre_completed:
-            next_step = self._cyclic_next(next_step, context)
+        # A completed node may need another visit in a cycle. Resume from the
+        # saved cursor once, rather than walking a completed-set indefinitely.
+        next_step: str | list[Send] | None = (
+            self._cyclic_next(resume_after_node, context)
+            if resume_after_node is not None
+            else start_node or nodes_in_order[0]
+        )
 
         pending_pause: tuple[str, str] | None = None
         interrupted = False
@@ -1038,21 +1052,22 @@ class PipelineEngine(AuditRecordingSupport):
                 # HITL: node returned Pause — checkpoint paused and halt.
                 if paused_now:
                     pause_reason = nr.output.reason
-                    await self._dispatch(
-                        "on_node_pause",
-                        pipeline_name=self._dag.name,
-                        run_id=run_id,
-                        node_id=current,
-                        reason=pause_reason,
-                    )
                     self._save_checkpoint(
                         run_id=run_id,
                         node_id=current,
                         sequence=sequence,
                         context=context,
                         all_results=all_results,
+                        execution_start=start_node,
                         paused=True,
                         pause_reason=pause_reason,
+                    )
+                    await self._dispatch(
+                        "on_node_pause",
+                        pipeline_name=self._dag.name,
+                        run_id=run_id,
+                        node_id=current,
+                        reason=pause_reason,
                     )
                     pending_pause = (current, pause_reason)
                     break
@@ -1074,6 +1089,7 @@ class PipelineEngine(AuditRecordingSupport):
                         sequence=sequence,
                         context=context,
                         all_results=all_results,
+                        execution_start=start_node,
                     )
 
                 try:
@@ -1356,11 +1372,14 @@ class PipelineEngine(AuditRecordingSupport):
         if nr.skipped:
             await self._dispatch("on_node_skip", reason=nr.error or "skipped", **common)
         elif nr.success:
-            await self._dispatch("on_node_complete", latency_ms=nr.latency_ms or 0.0, **common)
+            if not isinstance(nr.output, Pause):
+                await self._dispatch("on_node_complete", latency_ms=nr.latency_ms or 0.0, **common)
         else:
             await self._dispatch("on_node_error", error=nr.error or "unknown", **common)
 
-    def _load_for_resume(self, run_id: str, *, approve_pause: bool = False) -> tuple[PipelineContext, list[str], int]:
+    def _load_for_resume(
+        self, run_id: str, *, approve_pause: bool = False
+    ) -> tuple[PipelineContext, list[str], int, str, str | None]:
         """Rebuild context + completed-set from the latest checkpoint.
 
         Resuming a paused run (checkpoint.paused=True) requires
@@ -1369,28 +1388,82 @@ class PipelineEngine(AuditRecordingSupport):
         """
         if self._checkpointer is None:
             raise PipelineError("Cannot resume: pipeline has no checkpointer configured")
-        record = self._checkpointer.load_latest(self._dag.name, run_id)
+        try:
+            record = self._checkpointer.load_latest(self._dag.name, run_id)
+        except Exception:
+            raise PipelinePersistenceError("Pipeline checkpoint load failed") from None
         if record is None:
-            raise PipelineError(f"No checkpoint found for run_id='{run_id}'")
+            raise PipelineError("No checkpoint found for requested run")
+        try:
+            record = CheckpointRecord.model_validate(record.model_dump(mode="python"), strict=True)
+            completed = record.completed_nodes
+            if (
+                record.pipeline_name != self._dag.name
+                or record.run_id != run_id
+                or record.sequence <= 0
+                or len(completed) != len(set(completed))
+                or not set(completed) <= self._dag.nodes.keys()
+                or record.node_id not in completed
+                or "inputs" not in record.state
+                or not isinstance(record.state.get("results"), dict)
+                or set(record.state["results"]) != set(completed)
+            ):
+                raise ValueError
+            restored = {}
+            for nid, value in record.state["results"].items():
+                if not isinstance(value, dict) or not {"output", "success"} <= value.keys():
+                    raise ValueError
+                result = NodeResult.model_validate(value, strict=True)
+                if result.node_id != nid or not result.success or result.skipped:
+                    raise ValueError
+                restored[nid] = result
+            saved_state = record.state.get("shared_state")
+            if self._state_schema is not None:
+                if not isinstance(saved_state, dict):
+                    raise ValueError
+                shared_state = self._state_schema.model_validate(saved_state)
+            else:
+                if saved_state is not None:
+                    raise ValueError
+                shared_state = None
+            execution_start = record.execution_start
+            if execution_start is not None and execution_start not in self._dag.nodes:
+                raise ValueError
+            if not self._dag.is_cyclic() and not self._routers:
+                allowed = (
+                    {execution_start} | self._dag.transitive_successors(execution_start)
+                    if execution_start is not None
+                    else set(self._dag.nodes)
+                )
+                if not set(completed) <= allowed:
+                    raise ValueError
+                resolved = set(completed) | (set(self._dag.nodes) - allowed)
+                if any(edge.source not in resolved for nid in completed for edge in self._dag.incoming_edges(nid)):
+                    raise ValueError
+                # Historical conditional skips are not recorded. Re-evaluating
+                # them against later state could introduce a previously denied effect.
+                if any(
+                    self._dag.nodes[nid].condition is not None
+                    or any(
+                        edge.condition is not None and edge.source in resolved for edge in self._dag.incoming_edges(nid)
+                    )
+                    for nid in allowed - set(completed)
+                ):
+                    raise ValueError
+            if record.paused and (
+                not isinstance(record.pause_reason, str)
+                or not isinstance(restored[record.node_id].output, dict)
+                or restored[record.node_id].output.get("reason") != record.pause_reason
+            ):
+                raise ValueError
+        except Exception:
+            raise PipelinePersistenceError("Pipeline checkpoint is invalid") from None
         if record.paused and not approve_pause:
-            raise PipelineError(
-                f"Run '{run_id}' is paused at node '{record.node_id}' "
-                f"(reason: {record.pause_reason!r}). Pass approve_pause=True to resume."
-            )
-        context = PipelineContext(inputs=record.state.get("inputs"))
-        for nid, nr_dict in record.state.get("results", {}).items():
-            try:
-                context.set_node_result(nid, NodeResult.model_validate(nr_dict))
-            except Exception:
-                logger.warning("Could not restore NodeResult for '%s' on resume", nid)
-        # Restore shared state if the run was state-aware.
-        saved_state = record.state.get("shared_state")
-        if self._state_schema is not None and isinstance(saved_state, dict):
-            try:
-                context.state = self._state_schema.model_validate(saved_state)
-            except Exception:
-                logger.warning("Could not restore shared state on resume for run '%s'", run_id)
-        return context, list(record.completed_nodes), record.sequence
+            raise PipelineError("Run is paused; pass approve_pause=True to resume")
+        context = PipelineContext(inputs=record.state["inputs"], state=shared_state)
+        for nid, result in restored.items():
+            context.set_node_result(nid, result)
+        return context, list(completed), record.sequence, record.node_id, execution_start
 
     def _save_checkpoint(
         self,
@@ -1402,6 +1475,7 @@ class PipelineEngine(AuditRecordingSupport):
         all_results: dict[str, NodeResult],
         paused: bool = False,
         pause_reason: str | None = None,
+        execution_start: str | None = None,
     ) -> None:
         """Persist state after a successful node. No-op if no checkpointer.
 
@@ -1411,12 +1485,12 @@ class PipelineEngine(AuditRecordingSupport):
         if self._checkpointer is None:
             return
         completed_successful = [nid for nid, nr in all_results.items() if nr.success and not nr.skipped]
-        state = {
-            "inputs": _serialize_value(context.inputs),
-            "results": {nid: all_results[nid].model_dump(mode="json") for nid in completed_successful},
-            "shared_state": _serialize_value(context.state),
-        }
         try:
+            state = {
+                "inputs": _serialize_value(context.inputs),
+                "results": {nid: all_results[nid].model_dump(mode="json") for nid in completed_successful},
+                "shared_state": _serialize_value(context.state),
+            }
             self._checkpointer.save(
                 CheckpointRecord(
                     pipeline_name=self._dag.name,
@@ -1427,10 +1501,11 @@ class PipelineEngine(AuditRecordingSupport):
                     completed_nodes=completed_successful,
                     paused=paused,
                     pause_reason=pause_reason,
+                    execution_start=execution_start,
                 )
             )
         except Exception:
-            logger.exception("Checkpoint save failed for run '%s' at '%s'", run_id, node_id)
+            raise PipelinePersistenceError("Pipeline checkpoint save failed") from None
 
     def _record_audit(
         self,

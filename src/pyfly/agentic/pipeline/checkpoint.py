@@ -32,7 +32,7 @@ import os
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class CheckpointRecord(BaseModel):
@@ -41,8 +41,12 @@ class CheckpointRecord(BaseModel):
     ``paused`` and ``pause_reason`` are set when a node returns
     :class:`pyfly.agentic.pipeline.engine.Pause`. Default
     to ``False`` / ``None`` so existing records from earlier phases load
-    cleanly under the new schema.
+    cleanly under the new schema. ``execution_start`` preserves an explicit
+    ``start_at`` boundary across resumes; ``None`` represents the normal entry
+    point or an older record without this metadata.
     """
+
+    model_config = ConfigDict(strict=True)
 
     pipeline_name: str
     run_id: str
@@ -52,6 +56,7 @@ class CheckpointRecord(BaseModel):
     completed_nodes: list[str]
     paused: bool = False
     pause_reason: str | None = None
+    execution_start: str | None = None
 
 
 @runtime_checkable

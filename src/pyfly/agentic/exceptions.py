@@ -151,6 +151,12 @@ class PipelineError(AgenticError):
     """Raised for errors during pipeline construction or execution."""
 
 
+class PipelinePersistenceError(PipelineError):
+    """Checkpoint persistence or restoration failed; external effects must not be retried automatically."""
+
+    retryable = False
+
+
 # -- Memory ------------------------------------------------------------------
 
 
@@ -233,6 +239,12 @@ class VectorStoreConnectionError(VectorStoreError):
 
 class WorkflowError(AgenticError):
     """Base exception for the dynamic-workflow orchestration engine."""
+
+
+class WorkflowPersistenceError(WorkflowError):
+    """Journal persistence failed; already completed effects must not be retried automatically."""
+
+    retryable = False
 
 
 class WorkflowNotFoundError(WorkflowError):

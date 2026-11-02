@@ -28,6 +28,7 @@ Two builder modes exist:
   via :class:`Checkpointer` enables resume after failure and mid-pipeline start.
 """
 
+from pyfly.agentic.exceptions import PipelinePersistenceError
 from pyfly.agentic.pipeline.audit import (
     AuditEntry,
     AuditLog,
@@ -95,6 +96,7 @@ __all__ = [
     "PipelineEngine",
     "PipelineEventHandler",
     "PipelineResult",
+    "PipelinePersistenceError",
     "QueryableAuditLog",
     "ReasoningStep",
     "RetrievalStep",
