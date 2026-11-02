@@ -13,19 +13,35 @@
 # limitations under the License.
 """PyFly Resilience — retry, circuit breaker, rate limiting, bulkhead, timeout, fallback."""
 
+from typing import TYPE_CHECKING, Any
+
 from pyfly.resilience.bulkhead import Bulkhead, bulkhead
 from pyfly.resilience.circuit_breaker import CircuitBreaker, CircuitState, circuit_breaker
 from pyfly.resilience.fallback import fallback
+from pyfly.resilience.queued_bulkhead import QueuedBulkhead
 from pyfly.resilience.rate_limiter import RateLimiter, rate_limiter
-from pyfly.resilience.registry import ResilienceRegistry
 from pyfly.resilience.retry import retry
 from pyfly.resilience.time_limiter import time_limiter
+
+if TYPE_CHECKING:
+    from pyfly.resilience.registry import ResilienceRegistry
+
+
+def __getattr__(name: str) -> Any:
+    if name == "ResilienceRegistry":
+        from pyfly.resilience.registry import ResilienceRegistry
+
+        globals()[name] = ResilienceRegistry
+        return ResilienceRegistry
+    raise AttributeError(name)
+
 
 __all__ = [
     "Bulkhead",
     "CircuitBreaker",
     "CircuitState",
     "RateLimiter",
+    "QueuedBulkhead",
     "ResilienceRegistry",
     "bulkhead",
     "circuit_breaker",
