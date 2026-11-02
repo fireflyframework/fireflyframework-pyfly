@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.11.03` | 2026-11-01 | Atomic login challenge consumption, revoked-cookie fencing and capped reauthentication restoration. |
 | `26.11.02` | 2026-11-01 | Optional read-only session deadlines and server-observed completed login rotations. |
 | `26.11.01` | 2026-11-01 | Native structured Lab inputs, isolated runner snapshots and backward-compatible text scoring. |
 | `26.10.32` | 2026-10-31 | Consume disabled Azure email logging options before aiohttp transport. |
@@ -132,20 +133,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.11.02"
+print(pyfly.__version__)  # → "26.11.03"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.11.2
+pyfly --version            # → pyfly, version 26.11.3
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.11.02) (Python 3.13.9)
+:: PyFly Framework :: (v26.11.03) (Python 3.13.9)
 ```
 
 ---
