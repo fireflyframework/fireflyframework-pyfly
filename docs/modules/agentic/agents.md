@@ -868,24 +868,30 @@ agent = Agent(
 
 #### OutputGuardMiddleware
 
-Scans LLM output for PII, secrets, harmful content, and custom patterns
-**after** the agent runs. By default, unsafe outputs raise an
-`OutputGuardError`. Set `sanitise=True` to redact matches instead.
+Scans final LLM output for PII, secrets, harmful content, and custom patterns
+before ordinary after hooks, conversation memory, or a caller receives the result.
+Unsafe outputs raise `OutputGuardError`; observed provider usage is still recorded.
+Strings are scanned literally. Supported structured outputs use their JSON
+serialization plus literal string fields, including fields hidden from `repr` and
+escaped values. Unsupported serialization fails closed. Custom serializers define
+the serialized contract; this is not inspection of arbitrary private Python state.
 
 ```python
 from pyfly.agentic.agents.builtin_middleware import OutputGuardMiddleware
 
 agent = Agent(
     name="safe-output",
-    middleware=[OutputGuardMiddleware()], # reject mode
-)
-
-# Or sanitise mode — replaces matched content with [REDACTED]
-agent = Agent(
-    name="redacted-output",
-    middleware=[OutputGuardMiddleware(sanitise=True)],
+    middleware=[OutputGuardMiddleware()],
 )
 ```
+
+Native Agent admission is **block-only**, including when `sanitise=True` was
+configured. Replacing only `.output` would leave unsafe provider messages accessible
+through `all_messages()` and `new_messages()`, and could replace a structured output
+with a string. Rejection preserves the native result contract without exposing it.
+The legacy direct `OutputGuardMiddleware.after_run()` redaction helper remains
+available for compatibility, but does not sanitise message history and is not the
+Agent admission path. Use it only when you explicitly own that sensitive history.
 
 Optionally restrict blocking to specific categories:
 
@@ -1114,7 +1120,7 @@ agent = Agent(
         LoggingMiddleware(), # Structured logging
         ObservabilityMiddleware(), # Distributed tracing
         PromptGuardMiddleware(sanitise=True), # Input validation
-        OutputGuardMiddleware(sanitise=True), # Output sanitization
+        OutputGuardMiddleware(), # Reject unsafe final output
         CostGuardMiddleware(budget_usd=100.0), # Budget enforcement
         PromptCacheMiddleware(cache_system_prompt=True), # 90%+ cost savings
         CircuitBreakerMiddleware(failure_threshold=5), # Resilience
@@ -1156,7 +1162,7 @@ async with await agent.run_stream(
 
 Parameters:
 
-- **`streaming_mode`** — Either `"buffered"` (default) or `"incremental"`.
+- **`streaming_mode`** — `"buffered"` (default), `"incremental"`, or `"guarded"`.
 - **`debounce_ms`** — For incremental mode, minimum milliseconds between tokens (default: 0).
 
 The incremental mode provides access to `stream_tokens()` which yields individual
@@ -1164,7 +1170,56 @@ tokens, while buffered mode provides `stream_text()` for complete chunks.
 
 ### Streaming with Middleware
 
-All middleware work seamlessly with both streaming modes:
+Ordinary middleware work with buffered and incremental modes. An attached
+`OutputGuardMiddleware` automatically selects guarded streaming for the default
+buffered mode. Guarded streaming consumes and validates the complete final output
+before exposing the original PydanticAI stream, including typed `get_output()`,
+usage, and message methods. It does not deliver incremental content. Explicit
+`streaming_mode="incremental"` with an output admission guard raises `ValueError`
+before calling the model. A non-null `event_stream_handler` is also rejected before
+model calls when output admission is configured; it would otherwise receive raw
+provider content while buffering. Request `streaming_mode="guarded"` explicitly to
+buffer even without an output guard.
+
+Guarded streaming has finite defaults from native `AgenticConfig`:
+`guarded_stream_max_bytes=1048576` and `guarded_stream_timeout=30.0`. Set these through
+`pyfly.agentic`, or override a call with positive `guarded_max_bytes` and finite
+`guarded_timeout`. A shorter existing `timeout` wins. The deadline covers stream
+entry, consumption, and admission. Invalid limits fail before model calls.
+
+The byte limit counts UTF-8 JSON for all currently retained final-response parts,
+including text, thinking, and structured output tool arguments. Repeated snapshots
+are not added together. Native `stream_response(debounce_by=None)` is consumed
+internally; overflow raises `AgentError` before any content handle is released.
+Timeout, cancellation, or rejection closes the provider without retry/replay and
+records the usage observed so far; interrupted provider usage may be incomplete.
+A provider can deliver an oversized chunk before the next check. This is an
+admission bound, not a hard process-memory limit or a bound on prompts, tool effects,
+or earlier internal model responses.
+
+Unsafe guarded runs always raise `OutputGuardError`, including with `sanitise=True`.
+Custom middleware can implement optional `admit_output(context, result)` to require
+admission instead of its own `after_run` call. Admission hooks are immutable
+predicates: return the exact original result with unchanged serialized output, types,
+and native message history. Mutation or replacement is rejected before another hook,
+memory, or a stream handle is exposed. Ordinary hooks run in
+reverse order. Unchanged observers do not repeat admission. Changed output is
+re-admitted before the next hook; changed native result types or provider history
+are rejected. Unsupported snapshot serialization fails closed. Guarded streaming
+finishes model usage accounting, checked ordinary hooks, and admitted memory before
+exposing a native stream handle. Usage is recorded even if a later check rejects
+output. Context exit closes the provider without repeating these operations. Model-completion events describe the admitted model
+run, not completion of arbitrary consumer work inside the context. Unguarded
+hook/memory ordering stays unchanged.
+
+An ordinary `after_run` hook alone does not protect incremental content. Guards
+inspect final output, not provider-internal events, intermediate tool results, or
+arbitrary user code. A completed observer's side effects or lifecycle event cannot
+be undone if a later hook fails. Guards do not undo tools already run. Keep native
+instrumentation content capture disabled (the default); provider-level content
+instrumentation runs before output admission.
+
+For example, ordinary streaming middleware can be composed as follows:
 
 ```python
 from pyfly.agentic.agents.prompt_cache import PromptCacheMiddleware
