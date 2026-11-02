@@ -55,6 +55,7 @@ from pyfly.session.adapters.redis import _json_default, _json_object_hook
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
+    from sqlalchemy.engine import CursorResult
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 _logger = logging.getLogger(__name__)
@@ -262,7 +263,9 @@ class SqlSessionStore:
         from sqlalchemy import LargeBinary, func, select, update
         from sqlalchemy import cast as sql_cast
         from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.ext.asyncio import AsyncSession
 
+        from pyfly.data.relational.dialect_customizers import begin_immediate
         from pyfly.data.transaction import current_unit_of_work
 
         validate_claim(old_id, new_id, expected, names, ttl)
@@ -275,7 +278,9 @@ class SqlSessionStore:
         table = self._table
         # A separate, owned transaction commits the claim before the caller can perform external I/O.
         try:
-            async with self.engine.begin() as connection:
+            async with AsyncSession(self.engine) as connection, connection.begin():
+                if backend == "sqlite":
+                    await begin_immediate(connection)
                 raw = (
                     await connection.execute(
                         select(table.c.data).where(table.c.session_id == old_id, table.c.expires_at > self._clock())
@@ -306,7 +311,7 @@ class SqlSessionStore:
                         expires_at=now + timedelta(seconds=ttl),
                     )
                 )
-                won = changed.rowcount == 1
+                won = cast("CursorResult[Any]", changed).rowcount == 1
         except IntegrityError:
             # The continuation id was already occupied. The transaction rolled back unchanged.
             return None

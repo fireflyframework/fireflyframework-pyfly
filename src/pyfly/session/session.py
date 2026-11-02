@@ -129,6 +129,9 @@ class HttpSession:
         self._previous_id = self._id
         self._id = session_id
         self._data = data
+        now = time.time()
+        self._data.setdefault("_created_at", now)
+        self._data["_last_accessed"] = now
         self._stored_id = session_id
         self._is_new = False
         self._modified = False
