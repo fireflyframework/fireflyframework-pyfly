@@ -13,6 +13,51 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 
 
+@pytest.mark.parametrize("stage", ["send", "body", "close"])
+async def test_stream_vendor_failures_are_sanitized_native_client_errors(stage):
+    from pyfly.client.exceptions import ServiceClientException
+
+    class Wire(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"first"
+            if stage == "body":
+                raise httpx.ReadError("synthetic-signed-secret")
+
+        async def aclose(self):
+            if stage == "close":
+                raise httpx.ReadError("synthetic-signed-secret")
+
+    def handler(request):
+        if stage == "send":
+            raise httpx.ConnectError("synthetic-signed-secret")
+        return httpx.Response(200, stream=Wire())
+
+    client = HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False)
+    try:
+        with pytest.raises(ServiceClientException, match="HTTP stream transport failed") as captured:
+            async with client.stream(
+                "GET", "https://provider.invalid/path?private=synthetic", sanitize_errors=True
+            ) as response:
+                async for _ in response.stream:
+                    pass
+        assert "synthetic" not in str(captured.value) and captured.value.__cause__ is None
+    finally:
+        await client.stop()
+
+
+async def test_default_stream_preserves_vendor_timeout_for_existing_sdk_bridges():
+    def handler(request):
+        raise httpx.ReadTimeout("synthetic timeout")
+
+    client = HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False)
+    try:
+        with pytest.raises(httpx.ReadTimeout):
+            async with client.stream("GET", "https://provider.invalid"):
+                pass
+    finally:
+        await client.stop()
+
+
 async def test_native_di_client_policy_ignores_environment_proxy_and_preserves_host(monkeypatch):
     observed = []
 
@@ -117,3 +162,45 @@ async def test_suppressed_cookies_never_replay_a_previous_capability_response(mo
             else:
                 await port.request("POST", "http://native.invalid", suppress_cookies=True)
         assert cookies == [None, None]
+
+
+async def test_signed_download_suppresses_inherited_credentials_without_mutating_client():
+    observed = []
+
+    def serve(request):
+        observed.append((request.headers.get("authorization"), request.headers.get("cookie")))
+        return httpx.Response(200, content=b"download")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(serve),
+        auth=httpx.BasicAuth("application", "synthetic-secret"),
+        headers={"Authorization": "Bearer synthetic-token", "Cookie": "session=synthetic"},
+        follow_redirects=True,
+    ) as client:
+        port = HttpxClientAdapter(client=client)
+        async with port.stream(
+            "GET",
+            "https://download.invalid/file",
+            suppress_cookies=True,
+            suppress_authorization=True,
+            auth=None,
+            follow_redirects=False,
+        ) as response:
+            assert await response.aread() == b"download"
+        assert observed == [(None, None)]
+        assert client.headers["Authorization"] == "Bearer synthetic-token"
+        assert client.headers["Cookie"] == "session=synthetic"
+        assert not client.is_closed
+
+
+async def test_stream_response_exposes_public_typed_contract():
+    from pyfly.client import StreamingHttpResponsePort
+
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"typed"))
+        ) as client,
+        HttpxClientAdapter(client=client).stream("GET", "https://native.invalid") as response,
+    ):
+        assert isinstance(response, StreamingHttpResponsePort)
+        assert await response.aread() == b"typed"

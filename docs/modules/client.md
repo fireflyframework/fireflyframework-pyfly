@@ -544,7 +544,9 @@ response hook runs too late to prevent a disallowed outbound request.
 `StreamingHttpClientPort` is an optional capability beside `HttpClientPort`.
 The native `ClientAutoConfiguration` registers both types as the same adapter
 instance. Consume responses with `async with port.stream(method, url, ...) as response`
-and `response.aiter_bytes()`; exiting the context closes the response without
+and `response.aiter_bytes()`. The structural `StreamingHttpResponsePort` specifies
+status, headers, consumed-body state and byte iteration for vendor-independent
+implementations. Exiting the context closes the response without
 closing a borrowed client. Timeout mappings accept `connect`, `read`, `write`,
 and `pool` seconds.
 
@@ -553,6 +555,15 @@ For capability-bound requests, pass `suppress_cookies=True` to `stream`,
 mutating the shared jar and disallows redirects, custom authentication flows,
 and client event hooks that could reintroduce cookies. Ordinary requests retain
 the client's cookie behavior.
+
+`stream(..., suppress_authorization=True)` also strips inherited or explicit
+Authorization headers and disables authentication flows. Use it with cookie
+suppression for a separate unauthenticated signed-download request. Neither option
+allows redirects or custom event hooks. Opt in to `sanitize_errors=True` to turn
+vendor transport failures during stream opening, reading or closure into
+`ServiceTransportException` with a sanitized message. Default streaming retains the existing vendor exception types, including
+timeouts used by SDK bridges. This option adds no retries; cancellation continues
+to propagate after response cleanup.
 
 The native shared-client bean reads these application settings (separate from
 declarative retry and circuit-breaker settings):

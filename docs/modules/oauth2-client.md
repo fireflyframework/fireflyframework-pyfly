@@ -72,6 +72,29 @@ explicitly supplied confidential-client secret; public clients send no secret.
 
 ## Code exchange and refresh
 
+Applications building their own authorization URL can reuse the same URI and
+scope validation as the native acquisition client:
+
+```python
+from pyfly.oauth2 import serialize_oauth_scopes, validate_oauth_uri
+
+redirect_uri = "https://application.example.com/connections/callback"
+validate_oauth_uri(redirect_uri)
+scope_parameter = serialize_oauth_scopes(("openid", "api.read"))
+```
+
+`validate_oauth_uri(uri, *, allow_loopback_http=False)` checks the URI syntax and
+HTTPS policy; it does not register or authorize that callback. Compare it with
+the exact configured callback and validate the pending authorization state before
+exchanging a code. `serialize_oauth_scopes(scopes)` validates bounded RFC 6749
+tokens and preserves their order; it does not decide which scopes a caller may
+request or retain.
+
+The read-only `OAuth2Client.client_id` and `OAuth2Client.endpoints` properties let
+an application verify that a supplied client matches its connection configuration
+without accessing private attributes or exposing the client secret. The component
+that owns the client remains responsible for its lifetime.
+
 `exchange_code(code, *, redirect_uri, code_verifier, authentication="client_secret_post", resource=None)`
 keeps the existing form authentication and wire format when the new options are
 omitted. For providers requiring HTTP Basic, explicitly choose

@@ -17,7 +17,12 @@ from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
 from pyfly.client.circuit_breaker import CircuitBreaker, CircuitState
 from pyfly.client.declarative import delete, get, http_client, patch, post, put, service_client
 from pyfly.client.exceptions import ResponseTooLargeException, UnsupportedContentEncodingException
-from pyfly.client.ports.outbound import BoundedHttpClientPort, HttpClientPort, StreamingHttpClientPort
+from pyfly.client.ports.outbound import (
+    BoundedHttpClientPort,
+    HttpClientPort,
+    StreamingHttpClientPort,
+    StreamingHttpResponsePort,
+)
 from pyfly.client.post_processor import HttpClientBeanPostProcessor
 from pyfly.client.protocols import (
     GraphQLClient,
@@ -42,6 +47,7 @@ __all__ = [
     "HttpClientBeanPostProcessor",
     "HttpClientPort",
     "StreamingHttpClientPort",
+    "StreamingHttpResponsePort",
     "HttpxClientAdapter",
     "ResponseTooLargeException",
     "UnsupportedContentEncodingException",
