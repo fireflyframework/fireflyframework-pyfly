@@ -54,7 +54,7 @@ from pydantic import BaseModel
 
 from pyfly.agentic.exceptions import PipelineError
 from pyfly.agentic.pipeline.audit import AuditLog
-from pyfly.agentic.pipeline.checkpoint import Checkpointer
+from pyfly.agentic.pipeline.checkpoint import AsyncCheckpointer, Checkpointer
 from pyfly.agentic.pipeline.context import PipelineContext
 from pyfly.agentic.pipeline.dag import DAG, DAGEdge, DAGNode, FailureStrategy
 from pyfly.agentic.pipeline.engine import (
@@ -140,7 +140,7 @@ class PipelineBuilder:
         name: str = "pipeline",
         *,
         state: type[BaseModel] | None = None,
-        checkpointer: Checkpointer | None = None,
+        checkpointer: Checkpointer | AsyncCheckpointer | None = None,
         recursion_limit: int = 25,
         event_handler: EventHandler | PipelineEventHandler | None = None,
         audit_log: AuditLog | None = None,

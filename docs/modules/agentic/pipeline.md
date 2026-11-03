@@ -482,6 +482,117 @@ The configured `EventHandler` receives an ``on_node_pause`` callback when this
 happens (the callback is optional — partial handlers without it continue to
 work).
 
+
+### Durable relational approval
+
+For a persisted static `A → Pause → B` run, enable the opt-in native
+`DurableRunStore`. This is separate from the host-controlled legacy
+`approve_pause=True` API above. A durable engine refuses that boolean,
+explicit start cursors, injected contexts, shared state schemas/reducers,
+conditional edges, cycles, parallel graphs and node retries before effects.
+The existing synchronous `FileCheckpointer` remains compatible. The engine
+also awaits the public `AsyncCheckpointer.save/load_latest` transport.
+
+```yaml
+pyfly:
+  agentic:
+    enabled: true
+    durable:
+      enabled: true
+      max-bytes: 1048576
+  data:
+    relational:
+      enabled: true
+      url: postgresql+asyncpg://user@localhost/app
+      ddl-auto: none
+  audit:
+    enabled: true
+```
+
+Native DI supplies the same primary `SqlAlchemyTransactionManager`,
+`SessionProvider` and `AuditJournal` to the relational adapter. Custom
+`DurableRunStore` beans override the default. SQLite must be file-backed;
+SQLite and PostgreSQL are supported. The adapter rejects a split audit
+transaction participant. Migrations must include `framework_metadata` and
+its additive `pyfly_agentic_durable_runs` / `pyfly_agentic_durable_events`
+tables. With `ddl-auto: none`, missing tables/columns fail startup; the
+adapter never resets data or silently creates a production schema.
+
+The public domain and adapter imports are:
+
+```python
+from pyfly.agentic.pipeline.durable import (
+    BoundDurableCheckpointer, DurableBinding, DurableRunKey, DurableRunStore,
+    durable_graph_digest,
+)
+from pyfly.agentic.pipeline.durable.sql import SqlDurableRunStore
+```
+
+Bind a key with all three `AuditScope` fields and a generated run ID. A
+`DurableBinding` pins the definition/revision, pipeline name, canonical native
+graph digest, host execution-plan digest, ordered node IDs and exactly one
+interior pause node. `durable_graph_digest(dag)` works on a model-free DAG
+whose steps are `None`; it binds topology, edge ports, failure policy and
+normalized timeout values under `graph_version="pyfly-linear-v1"`. It does
+not attest Python executors. The host plan digest must bind executor/compiler
+version, instructions, models, tools, input/output schemas and authority.
+
+Create the run, then `claim(..., expected_generation=1)` and pass
+`BoundDurableCheckpointer(store, claim)` to the real `PipelineEngine`. Start
+with the pinned `run_id` and original non-`None` JSON input; `{}` is a valid
+empty input. At the pause, the checkpoint, task, run state, monotonic lifecycle
+event and native audit fact commit together and the claim is released.
+`waiting_approval` is nonterminal. Returned mutation objects remain provisional
+until the caller's outer transaction commits.
+
+An authorized server calls `decide(..., task_id=..., expected_generation=1,
+decision="approve" | "reject", actor=..., idempotency_key=...,
+policy_digest=...)` in its primary business write unit. It must validate the
+current principal, issuer, scope, permission, separation of duties and policy
+there, then project its own run/job/event and semantic audit in that same unit.
+An `AuditActor` argument is a trusted host fact, not HTTP authentication. The
+native adapter additionally requires an independent human subject. Same-key
+retries are stable only for the exact actor, policy, task, generation and
+decision; conflicting requests change nothing. Reject is terminal. Approve
+queues generation2; no worker effect is admitted until a new fenced claim.
+
+After a process restart, load the same key/binding, claim that approved
+generation and run the engine with the same `run_id` and no initial input.
+`checkpoint_for(claim)` releases the pause marker only for the persisted
+approved generation. A and the original JSON input are restored; the engine
+continues after the pause without a browser-supplied approval flag. Outputs
+are JSON representations, not pickled Python objects; hosts validate any
+required output model on hydration. Call `finish` with the observed terminal
+outcome inside the final business projection transaction.
+
+For remote workers, implement the public `DurableCheckpointer` protocol:
+`validate_run(pipeline_name, run_id, inputs, *, resume)`, `before_node(node_id)`,
+`save(record)` and `load_latest(pipeline_name, run_id)`, with its server-pinned
+`binding`. RPC authentication must derive the run/claim/binding on the server;
+a worker-supplied actor, binding or approval flag grants no authority. Validate
+both the worker lease and native claim at every effect. `renew` preserves an
+unexpired claim's generation/epoch; it cannot resurrect an expired owner.
+
+`version` increases under CAS on every committed mutation, including renewal.
+Persisted events use that monotonic version as cursor, with pages of1–100;
+identical retries create no event. Events and audit hold reference facts,
+not checkpoint content. Envelopes contain input/output under the host's
+storage access controls: JSON depth32, at most100000 values and a default1MiB
+total envelope budget. They reject nonfinite numbers and arbitrary objects.
+They do not provide blanket SQL-driver logging redaction or encryption.
+
+Cancellation is a server-authorized CAS only for queued/waiting versions;
+it fences the generation/epoch and makes the task no longer approvable.
+Running work is never reported cancelled without resolving its effects.
+Expired active claims are not automatically reclaimed or replayed. A matching
+expired claim may be closed only as `unknown`; reconcile uncertain external
+effects and unknown commit outcomes explicitly. Persistence/audit errors are
+content-free and non-retryable. A caught nested failure still makes the shared
+outer unit rollback-only. This contract does not claim exactly-once external
+model/tool effects, general workflow migration, durable parallel barriers,
+arbitrary human forms, deadlines, reassignment or distributed consensus clocks.
+
+
 ### Audit Log
 
 Distinct from the ``Checkpointer`` (which stores the *latest* state for

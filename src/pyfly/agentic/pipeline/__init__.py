@@ -39,6 +39,7 @@ from pyfly.agentic.pipeline.audit import (
 )
 from pyfly.agentic.pipeline.builder import PipelineBuilder
 from pyfly.agentic.pipeline.checkpoint import (
+    AsyncCheckpointer,
     Checkpointer,
     CheckpointRecord,
     FileCheckpointer,
@@ -76,6 +77,7 @@ __all__ = [
     "BranchStep",
     "CallableStep",
     "CheckpointRecord",
+    "AsyncCheckpointer",
     "Checkpointer",
     "DAGEdge",
     "DAGNode",

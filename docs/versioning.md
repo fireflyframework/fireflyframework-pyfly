@@ -64,6 +64,7 @@ rare case where a substantial change needs an additional review window.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| `26.11.06` | 2026-11-02 | Transactional independent approvals and fenced worker continuation through native Data and Audit. |
 | `26.11.05` | 2026-11-02 | Fail-closed durable state, preserved resume boundaries and authoritative parallel pause barriers. |
 | `26.11.04` | 2026-11-01 | Guarded output admission before publication and bounded native streaming. |
 | `26.11.03` | 2026-11-01 | Atomic login challenge consumption, revoked-cookie fencing and capped reauthentication restoration. |
@@ -135,20 +136,20 @@ shipped, with the version metadata updated.
 
 ```python
 import pyfly
-print(pyfly.__version__)  # → "26.11.05"
+print(pyfly.__version__)  # → "26.11.06"
 ```
 
 The CLI reads the installed distribution metadata and reports the normalized
 package version:
 
 ```bash
-pyfly --version            # → pyfly, version 26.11.5
+pyfly --version            # → pyfly, version 26.11.6
 ```
 
 The startup banner displays the leading-zero form:
 
 ```
-:: PyFly Framework :: (v26.11.05) (Python 3.13.9)
+:: PyFly Framework :: (v26.11.06) (Python 3.13.9)
 ```
 
 ---
