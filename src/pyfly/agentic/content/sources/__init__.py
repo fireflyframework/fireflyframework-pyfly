@@ -14,21 +14,52 @@
 
 """Content sources: external systems that yield files for ingestion.
 
-The :class:`ContentSource` Protocol is the stable contract; concrete
-implementations such as :class:`SharePointSource` may live in this package
-today and migrate to a dedicated infrastructure repository in the future
-without changes to the Protocol or to consumer code.
+ContentSource preserves the v1 local-Path contract. ContentSourceV2 adds
+stateless ordered change pages and bounded streaming for delegated cloud sources.
+Applications own durable checkpoints, OAuth callback identity and reader fences.
 """
 
 from __future__ import annotations
 
 from pyfly.agentic.content.sources.base import ContentSource, RawFile
+from pyfly.agentic.content.sources.dtos import (
+    Account,
+    Change,
+    ChangePage,
+    Cursor,
+    DownloadReceipt,
+    ItemPage,
+    RemoteItem,
+    SourceScope,
+)
+from pyfly.agentic.content.sources.errors import SourceError
+from pyfly.agentic.content.sources.google_drive import GoogleDriveSource
 from pyfly.agentic.content.sources.local_folder import (
     LocalFolderSource,
     LocalFolderSourceConfig,
 )
+from pyfly.agentic.content.sources.microsoft import OneDriveSource, SharePointSource
+from pyfly.agentic.content.sources.oauth import ReadOnlySourceOAuth, SourceOAuthConfig
+from pyfly.agentic.content.sources.ports import AsyncByteSink, ContentSourceV2, DelegatedTokenSource
 
 __all__ = [
+    "Account",
+    "AsyncByteSink",
+    "Change",
+    "ChangePage",
+    "ContentSourceV2",
+    "Cursor",
+    "DelegatedTokenSource",
+    "DownloadReceipt",
+    "GoogleDriveSource",
+    "ItemPage",
+    "OneDriveSource",
+    "ReadOnlySourceOAuth",
+    "RemoteItem",
+    "SharePointSource",
+    "SourceError",
+    "SourceOAuthConfig",
+    "SourceScope",
     "ContentSource",
     "LocalFolderSource",
     "LocalFolderSourceConfig",
