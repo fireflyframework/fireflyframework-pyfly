@@ -8,7 +8,37 @@ import pytest
 
 from pyfly.agentic.content.sources.errors import SourceError
 from pyfly.agentic.content.sources.oauth import ReadOnlySourceOAuth, SourceOAuthConfig
-from pyfly.oauth2 import generate_pkce
+from pyfly.oauth2 import OAuth2Client, OAuth2Endpoints, generate_pkce
+
+
+async def test_native_oauth_client_is_borrowed_and_must_match_source_configuration():
+    from pyfly.oauth2 import OAuth2Client, OAuth2Endpoints
+
+    config = SourceOAuthConfig("google_drive", "source-client", "https://app.example/callback")
+    client = OAuth2Client(
+        config.client_id,
+        OAuth2Endpoints(config.token_endpoint),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json={"access_token": "synthetic", "token_type": "Bearer", "scope": " ".join(config.scopes)}
+            )
+        ),
+    )
+    try:
+        async with ReadOnlySourceOAuth(config, client=client) as oauth:
+            assert (await oauth.exchange_code("code", code_verifier=generate_pkce().verifier)).access_token
+        assert not client._http.is_closed
+        with pytest.raises(ValueError, match="match"):
+            ReadOnlySourceOAuth(SourceOAuthConfig("google_drive", "another-client", config.redirect_uri), client=client)
+        with pytest.raises(ValueError, match="match"):
+            ReadOnlySourceOAuth(
+                SourceOAuthConfig("onedrive", config.client_id, config.redirect_uri, tenant_id="consumers"),
+                client=client,
+            )
+        with pytest.raises(ValueError, match="supplied"):
+            ReadOnlySourceOAuth(config, client=client, client_secret="synthetic-secret")
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.parametrize("provider", ["sharepoint", "onedrive", "google_drive"])
@@ -37,7 +67,13 @@ async def test_native_delegated_code_and_rotated_refresh_contract(provider):
             },
         )
 
-    async with ReadOnlySourceOAuth(config, transport=httpx.MockTransport(handler)) as oauth:
+    async with ReadOnlySourceOAuth(
+        config,
+        client=OAuth2Client(
+            config.client_id, OAuth2Endpoints(config.token_endpoint), transport=httpx.MockTransport(handler)
+        ),
+        owns_client=True,
+    ) as oauth:
         pkce = generate_pkce()
         url = oauth.authorization_url(state="random-bound-state", code_challenge=pkce.challenge, nonce="bound-nonce")
         query = parse_qs(urlsplit(url).query)
@@ -55,16 +91,21 @@ async def test_wider_or_missing_granted_scopes_are_not_accepted(scope):
     config = SourceOAuthConfig("onedrive", "client", "https://app.example/callback", tenant_id="consumers")
     async with ReadOnlySourceOAuth(
         config,
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                json={
-                    "access_token": "private",
-                    "token_type": "Bearer",
-                    **({"scope": scope} if scope is not None else {}),
-                },
-            )
+        client=OAuth2Client(
+            config.client_id,
+            OAuth2Endpoints(config.token_endpoint),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={
+                        "access_token": "private",
+                        "token_type": "Bearer",
+                        **({"scope": scope} if scope is not None else {}),
+                    },
+                )
+            ),
         ),
+        owns_client=True,
     ) as oauth:
         with pytest.raises(SourceError, match="scope_mismatch"):
             await oauth.exchange_code("code", code_verifier=generate_pkce().verifier)
@@ -76,11 +117,16 @@ async def test_google_exact_profile_alias_is_accepted_without_discarding_extra_s
     for extra in ("", " https://www.googleapis.com/auth/userinfo.email", " https://www.googleapis.com/auth/drive"):
         async with ReadOnlySourceOAuth(
             config,
-            transport=httpx.MockTransport(
-                lambda request, extra=extra: httpx.Response(
-                    200, json={"access_token": "synthetic", "token_type": "Bearer", "scope": base + extra}
-                )
+            client=OAuth2Client(
+                config.client_id,
+                OAuth2Endpoints(config.token_endpoint),
+                transport=httpx.MockTransport(
+                    lambda request, extra=extra: httpx.Response(
+                        200, json={"access_token": "synthetic", "token_type": "Bearer", "scope": base + extra}
+                    )
+                ),
             ),
+            owns_client=True,
         ) as oauth:
             if extra:
                 with pytest.raises(SourceError, match="scope_mismatch"):
@@ -99,7 +145,13 @@ async def test_refresh_omitted_scope_uses_exact_previously_granted_subset():
         seen.append(parse_qs(request.content.decode()))
         return httpx.Response(200, json={"access_token": "synthetic-new", "token_type": "Bearer"})
 
-    async with ReadOnlySourceOAuth(config, transport=httpx.MockTransport(handler)) as oauth:
+    async with ReadOnlySourceOAuth(
+        config,
+        client=OAuth2Client(
+            config.client_id, OAuth2Endpoints(config.token_endpoint), transport=httpx.MockTransport(handler)
+        ),
+        owns_client=True,
+    ) as oauth:
         tokens = await oauth.refresh_token("synthetic-refresh", granted_scopes=granted)
     assert tokens.scope == granted[0]
     assert seen[0]["scope"] == [granted[0]]
@@ -111,11 +163,16 @@ async def test_refresh_explicit_scope_cannot_expand_or_lose_required_read(scope)
     config = SourceOAuthConfig("google_drive", "client", "https://app.example/callback")
     async with ReadOnlySourceOAuth(
         config,
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                200, json={"access_token": "synthetic", "token_type": "Bearer", "scope": scope}
-            )
+        client=OAuth2Client(
+            config.client_id,
+            OAuth2Endpoints(config.token_endpoint),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, json={"access_token": "synthetic", "token_type": "Bearer", "scope": scope}
+                )
+            ),
         ),
+        owns_client=True,
     ) as oauth:
         with pytest.raises(SourceError, match="scope_mismatch"):
             await oauth.refresh_token("refresh", granted_scopes=("https://www.googleapis.com/auth/drive.readonly",))
@@ -167,7 +224,13 @@ async def test_invalid_prior_grant_is_rejected_before_any_token_request(provider
     )
     seen = []
     async with ReadOnlySourceOAuth(
-        config, transport=httpx.MockTransport(lambda request: seen.append(request))
+        config,
+        client=OAuth2Client(
+            config.client_id,
+            OAuth2Endpoints(config.token_endpoint),
+            transport=httpx.MockTransport(lambda request: seen.append(request)),
+        ),
+        owns_client=True,
     ) as oauth:
         with pytest.raises(SourceError, match="scope_mismatch"):
             await oauth.refresh_token("refresh", granted_scopes=scopes)

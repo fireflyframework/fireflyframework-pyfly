@@ -7,8 +7,6 @@ from __future__ import annotations
 from typing import Any, Literal, Self
 from urllib.parse import urlencode
 
-import httpx
-
 from pyfly.agentic.content.sources.dtos import (
     Change,
     ChangePage,
@@ -22,6 +20,7 @@ from pyfly.agentic.content.sources.errors import SourceError
 from pyfly.agentic.content.sources.parsing import identifier, path_id, resume, rows, size, text
 from pyfly.agentic.content.sources.ports import AsyncByteSink, DelegatedTokenSource
 from pyfly.agentic.content.sources.transport import SourceTransport
+from pyfly.client.ports.outbound import StreamingHttpClientPort
 
 _FIELDS = "id,name,mimeType,size,version,parents,driveId,trashed,modifiedTime,capabilities(canDownload)"
 _EXPORTS = {
@@ -41,14 +40,20 @@ class GoogleDriveSource:
         scope: SourceScope,
         tokens: DelegatedTokenSource,
         *,
-        transport: httpx.AsyncBaseTransport | None = None,
+        http_client: StreamingHttpClientPort | None = None,
+        owns_http_client: bool = False,
         timeout: float = 30,
     ) -> None:
         if scope.account.provider != "google_drive":
             raise ValueError("Provider identity does not match this adapter")
         self.scope = scope
         self._http = SourceTransport(
-            scope.account, tokens, host="www.googleapis.com", transport=transport, timeout=timeout
+            scope.account,
+            tokens,
+            host="www.googleapis.com",
+            http_client=http_client,
+            owns_http_client=owns_http_client,
+            timeout=timeout,
         )
 
     async def __aenter__(self) -> Self:

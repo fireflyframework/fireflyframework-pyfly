@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, runtime_checkable
 
@@ -38,7 +39,45 @@ class BoundedHttpClientPort(HttpClientPort, Protocol):
 
 
 @runtime_checkable
-class StreamingHttpClientPort(HttpClientPort, Protocol):
-    """Optional incremental-response capability; its context owns response cleanup."""
+class StreamingHttpResponsePort(Protocol):
+    """Vendor-neutral response surface owned by a streaming request context.
 
-    def stream(self, method: str, url: str, **kwargs: Any) -> AbstractAsyncContextManager[Any]: ...
+    A consumed response exposes its retained content. An unconsumed asynchronous
+    response exposes an async byte stream; callers must not close it independently
+    of the request context when cancellation-protected cleanup is required.
+    """
+
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+    @property
+    def is_stream_consumed(self) -> bool: ...
+
+    @property
+    def content(self) -> bytes: ...
+
+    @property
+    def stream(self) -> AsyncIterable[bytes] | Iterable[bytes]: ...
+
+    def aiter_bytes(self, chunk_size: int | None = None) -> AsyncIterator[bytes]: ...
+
+    def aiter_raw(self, chunk_size: int | None = None) -> AsyncIterator[bytes]: ...
+
+    async def aread(self) -> bytes: ...
+
+
+@runtime_checkable
+class StreamingHttpClientPort(HttpClientPort, Protocol):
+    """Incremental responses with context-owned cleanup.
+
+    Implementations honor explicit redirect/auth and credential-suppression
+    options. ``sanitize_errors=True`` requests native ServiceTransportException
+    errors without vendor request/response details; it never adds retries.
+    """
+
+    def stream(
+        self, method: str, url: str, **kwargs: Any
+    ) -> AbstractAsyncContextManager[StreamingHttpResponsePort]: ...

@@ -11,6 +11,7 @@ from pyfly.agentic.content.sources.dtos import Account, Cursor, SourceScope
 from pyfly.agentic.content.sources.errors import SourceError
 from pyfly.agentic.content.sources.google_drive import GoogleDriveSource
 from pyfly.agentic.content.sources.microsoft import OneDriveSource, SharePointSource
+from pyfly.client import HttpxClientAdapter
 
 
 class Tokens:
@@ -44,6 +45,102 @@ class Stream(httpx.AsyncByteStream):
 
     async def aclose(self):
         self.closed = True
+
+
+async def test_native_stream_port_is_borrowed_and_signed_redirect_suppresses_client_credentials():
+    from pyfly.client import HttpxClientAdapter
+
+    scope = SourceScope(Account("onedrive", "reader"), "drive")
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        assert "cookie" not in request.headers
+        if request.url.host == "tenant.sharepoint.com":
+            assert "authorization" not in request.headers
+            return httpx.Response(200, stream=Stream([b"abcdef"]))
+        assert request.headers["authorization"] == "Bearer synthetic-delegated-token"
+        if request.url.path.endswith("/content"):
+            return httpx.Response(302, headers={"location": "https://tenant.sharepoint.com/signed"})
+        return httpx.Response(200, json=graph_item())
+
+    client = HttpxClientAdapter(
+        client=httpx.AsyncClient(
+            headers={"Authorization": "Bearer synthetic-default", "Cookie": "synthetic-session=private"},
+            auth=httpx.BasicAuth("synthetic-user", "synthetic-password"),
+            follow_redirects=True,
+            transport=httpx.MockTransport(handler),
+            trust_env=False,
+        ),
+        owns_client=True,
+    )
+    try:
+        async with OneDriveSource(
+            scope, Tokens(), http_client=client, download_hosts=frozenset({"tenant.sharepoint.com"})
+        ) as source:
+            receipt = await source.download(await source.get_item("f1"), Sink(), max_bytes=10)
+        assert receipt.size_bytes == 6 and len(seen) == 5
+        assert not client._client.is_closed
+    finally:
+        await client.stop()
+
+
+async def test_source_transport_accepts_vendor_free_native_stream_port():
+    from contextlib import asynccontextmanager
+
+    import pyfly.client as native_client
+    from pyfly.agentic.content.sources.transport import SourceTransport
+
+    response_port = getattr(native_client, "StreamingHttpResponsePort", None)
+    assert response_port is not None
+
+    class Response:
+        status_code = 200
+        headers = {}
+        is_stream_consumed = False
+        content = b""
+
+        def __init__(self):
+            self.stream = self.aiter_raw()
+
+        async def aiter_raw(self, chunk_size=None):
+            yield b'{"value": []}'
+
+        async def aiter_bytes(self, chunk_size=None):
+            async for chunk in self.aiter_raw(chunk_size):
+                yield chunk
+
+        async def aread(self):
+            self.content = b"".join([chunk async for chunk in self.stream])
+            self.is_stream_consumed = True
+            return self.content
+
+    class Client:
+        stopped = False
+
+        async def request(self, method, url, **kwargs):
+            raise AssertionError("Source reads must stay streamed")
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            self.stopped = True
+
+        @asynccontextmanager
+        async def stream(self, method, url, **kwargs):
+            assert method == "GET" and kwargs["follow_redirects"] is False
+            assert kwargs["suppress_cookies"] is True and kwargs["auth"] is None
+            assert kwargs["sanitize_errors"] is True
+            response = Response()
+            assert isinstance(response, response_port)
+            yield response
+
+    client = Client()
+    source = SourceTransport(Account("onedrive", "reader"), Tokens(), host="graph.microsoft.com", http_client=client)
+    assert await source.json("https://graph.microsoft.com/v1.0/drives/drive/root/delta") == {"value": []}
+    await source.aclose()
+    assert not client.stopped
 
 
 def graph_item(**changes):
@@ -94,7 +191,12 @@ async def test_graph_ordered_pages_tombstone_and_bound_checkpoint(cls, provider)
             },
         )
 
-    async with cls(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with cls(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         page = await source.changes()
         assert [change.item.name for change in page.changes] == ["report.docx", "renamed.docx"]
         assert page.checkpoint is None and page.next_cursor is not None
@@ -124,7 +226,11 @@ async def test_graph_stream_redirect_strips_bearer_and_measures_receipt():
 
     sink = Sink()
     async with OneDriveSource(
-        scope, Tokens(), transport=httpx.MockTransport(handler), download_hosts=frozenset({"tenant.sharepoint.com"})
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+        download_hosts=frozenset({"tenant.sharepoint.com"}),
     ) as source:
         item = await source.get_item("f1")
         receipt = await source.download(item, sink, max_bytes=10)
@@ -149,9 +255,16 @@ async def test_provider_failures_never_become_deletions(status, code):
     async with SharePointSource(
         scope,
         Tokens(),
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(status, json={"secret": "must-not-escape"}, headers={"retry-after": "12"})
+        http_client=HttpxClientAdapter(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    status, json={"secret": "must-not-escape"}, headers={"retry-after": "12"}
+                )
+            ),
+            owns_transport=True,
+            trust_env=False,
         ),
+        owns_http_client=True,
     ) as source:
         with pytest.raises(SourceError, match=code) as caught:
             await source.changes()
@@ -175,7 +288,12 @@ async def test_google_removed_stays_ambiguous_and_shared_drive_cursor_is_explici
             },
         )
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         start = await source.start_cursor()
         page = await source.changes(start)
     assert page.changes[0].kind == "removed" and page.changes[0].item is None
@@ -189,9 +307,14 @@ async def test_google_download_permission_is_current_and_not_importer_owned():
     async with GoogleDriveSource(
         scope,
         tokens,
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, json=google_item(capabilities={"canDownload": False}))
+        http_client=HttpxClientAdapter(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=google_item(capabilities={"canDownload": False}))
+            ),
+            owns_transport=True,
+            trust_env=False,
         ),
+        owns_http_client=True,
     ) as source:
         with pytest.raises(SourceError, match="access_denied"):
             await source.check_access("f1")
@@ -207,7 +330,12 @@ async def test_partial_stream_has_no_receipt_and_closes_response():
             return httpx.Response(200, stream=data)
         return httpx.Response(200, json=google_item())
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         item = await source.get_item("f1")
         sink = Sink()
         with pytest.raises(SourceError, match="transport_error"):
@@ -233,7 +361,12 @@ async def test_graph_rejects_unbound_continuations_without_second_request(target
         seen.append(request)
         return httpx.Response(200, json={"value": [], "@odata.nextLink": target})
 
-    async with OneDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with OneDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         with pytest.raises(SourceError, match="unsafe_url"):
             await source.changes()
     assert len(seen) == 1
@@ -253,7 +386,13 @@ async def test_signed_download_urls_are_not_emitted_by_http_client_logging(caplo
 
     with caplog.at_level("DEBUG"):
         async with OneDriveSource(
-            scope, Tokens(), transport=httpx.MockTransport(handler), download_hosts=frozenset({"tenant.sharepoint.com"})
+            scope,
+            Tokens(),
+            http_client=HttpxClientAdapter(
+                transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False
+            ),
+            owns_http_client=True,
+            download_hosts=frozenset({"tenant.sharepoint.com"}),
         ) as source:
             await source.download(await source.get_item("f1"), Sink(), max_bytes=10)
     assert "private-signed-value" not in caplog.text
@@ -275,7 +414,12 @@ async def test_stream_bytes_are_bounded_and_short_stream_has_no_receipt(chunks, 
         )
 
     sink = Sink()
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         with pytest.raises(SourceError, match=expected):
             await source.download(await source.get_item("f1"), sink, max_bytes=max_bytes)
     assert data.closed and sum(map(len, sink.chunks)) <= max_bytes
@@ -293,7 +437,12 @@ async def test_google_explicit_native_export_keeps_version_and_measured_size():
             return httpx.Response(200, stream=Stream([b"original-export"]))
         return httpx.Response(200, json=google_item(mimeType="application/vnd.google-apps.document", size=None))
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         item = await source.get_item("f1")
         assert item.size_bytes is None
         with pytest.raises(SourceError, match="unsupported"):
@@ -314,7 +463,12 @@ async def test_google_version_change_after_bytes_never_produces_receipt():
         reads += 1
         return httpx.Response(200, json=google_item(version="2" if reads == 3 else "1"))
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         with pytest.raises(SourceError, match="version_changed"):
             await source.download(await source.get_item("f1"), Sink(), max_bytes=10)
 
@@ -334,7 +488,12 @@ async def test_shortcuts_are_never_followed(provider, cls, body):
         seen.append(request)
         return httpx.Response(200, json=body)
 
-    async with cls(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with cls(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         with pytest.raises(SourceError, match="unsupported"):
             await source.download(await source.get_item("f1"), Sink(), max_bytes=10)
     assert all("remote" not in str(r.url) for r in seen)
@@ -348,7 +507,12 @@ async def test_google_page_token_is_not_a_url_and_incomplete_listing_is_not_abse
         seen.append(request)
         return httpx.Response(200, json={"files": [], "incompleteSearch": True})
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         with pytest.raises(SourceError, match="resync_required"):
             await source.children("folder", Cursor(scope, "children:folder", "https://evil.example/"))
     assert seen[0].url.host == "www.googleapis.com" and seen[0].url.params["corpora"] == "drive"
@@ -361,7 +525,14 @@ async def test_remote_path_segments_cannot_change_endpoint(bad_id):
     async with OneDriveSource(
         scope,
         Tokens(),
-        transport=httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(200, json=graph_item())),
+        http_client=HttpxClientAdapter(
+            transport=httpx.MockTransport(
+                lambda request: seen.append(request) or httpx.Response(200, json=graph_item())
+            ),
+            owns_transport=True,
+            trust_env=False,
+        ),
+        owns_http_client=True,
     ) as source:
         with pytest.raises(SourceError):
             await source.get_item(bad_id)
@@ -376,7 +547,12 @@ async def test_personal_google_changes_exclude_shared_drive_feed():
         seen.append(request)
         return httpx.Response(200, json={"changes": [], "newStartPageToken": "next"})
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         await source.changes(Cursor(scope, "changes", "start"))
     assert seen[0].url.params["includeItemsFromAllDrives"] == "false"
     assert seen[0].url.params["restrictToMyDrive"] == "true"
@@ -390,7 +566,12 @@ async def test_bounded_json_stops_stream_and_closes_before_full_body():
         Account("onedrive", "reader"),
         Tokens(),
         host="graph.microsoft.com",
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=data)),
+        http_client=HttpxClientAdapter(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=data)),
+            owns_transport=True,
+            trust_env=False,
+        ),
+        owns_http_client=True,
         max_json_bytes=10,
     )
     try:
@@ -420,7 +601,12 @@ async def test_stream_cancellation_closes_response_without_receipt():
             else httpx.Response(200, json=google_item())
         )
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         item = await source.get_item("f1")
         task = asyncio.create_task(source.download(item, BlockingSink(), max_bytes=10))
         await asyncio.wait_for(reached.wait(), 2)
@@ -452,7 +638,12 @@ async def test_cancellation_during_completed_stream_close_waits_for_cleanup():
             else httpx.Response(200, json=google_item())
         )
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         item = await source.get_item("f1")
         task = asyncio.create_task(source.download(item, Sink(), max_bytes=10))
         await asyncio.wait_for(closing.wait(), 2)
@@ -477,7 +668,12 @@ async def test_graph_can_capture_future_changes_cursor():
             },
         )
 
-    async with OneDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with OneDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         cursor = await source.start_cursor()
     assert cursor.scope == scope and cursor.operation == "changes"
 
@@ -492,7 +688,12 @@ async def test_download_receipt_is_bound_to_verified_account_and_drive():
             else httpx.Response(200, json=google_item())
         )
 
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         receipt = await source.download(await source.get_item("f1"), Sink(), max_bytes=10)
     assert receipt.scope == scope
 
@@ -507,7 +708,12 @@ async def test_google_export_has_its_own_limit_before_streaming():
         return httpx.Response(200, json=google_item(mimeType="application/vnd.google-apps.document", size=None))
 
     sink = Sink()
-    async with GoogleDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with GoogleDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         with pytest.raises(SourceError, match="size_exceeded"):
             await source.download(
                 await source.get_item("f1"),
@@ -527,7 +733,12 @@ async def test_graph_documented_function_token_cursor_preserves_exact_drive_endp
         seen.append(request)
         return httpx.Response(200, json={"value": [], "@odata.deltaLink": link})
 
-    async with SharePointSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with SharePointSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         page = await source.changes()
         await source.changes(page.checkpoint)
     assert len(seen) == 2
@@ -544,7 +755,12 @@ async def test_malformed_download_redirect_is_a_typed_failure_before_external_io
             return httpx.Response(302, headers={"location": "https://[broken"})
         return httpx.Response(200, json=graph_item())
 
-    async with OneDriveSource(scope, Tokens(), transport=httpx.MockTransport(handler)) as source:
+    async with OneDriveSource(
+        scope,
+        Tokens(),
+        http_client=HttpxClientAdapter(transport=httpx.MockTransport(handler), owns_transport=True, trust_env=False),
+        owns_http_client=True,
+    ) as source:
         with pytest.raises(SourceError, match="unsafe_url"):
             await source.download(await source.get_item("f1"), Sink(), max_bytes=10)
     assert all(request.url.host == "graph.microsoft.com" for request in seen)

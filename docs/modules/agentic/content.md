@@ -302,10 +302,19 @@ Trusted custom HTTP transports own any allocation they make before yielding a
 chunk. Schedule throttled requests using the bounded `retry_after` value when
 present; a missing value requires the application's bounded backoff policy.
 
+Source adapters accept an already started `StreamingHttpClientPort` through
+`http_client=`. Supplied clients are borrowed; set `owns_http_client=True` only
+when transferring their lifetime to the source adapter. Without a supplied port,
+the source owns a native `HttpxClientAdapter` configured without environment
+proxies or automatic redirects. Configure vendor transports on that native
+adapter, not on the source. Custom ports must honor the stream's explicit
+credential-suppression and redirect options and must not buffer the whole body.
+
 Graph downloads can redirect to temporary signed content URLs. Configure exact
 trusted HTTPS download hostnames; arbitrary hosts, IP literals, additional
 redirects and cross-endpoint continuation links are rejected. Bearer headers are
-never forwarded to a download host. The adapter suppresses HTTPX/HTTPCore request
+never forwarded to a download host, including default authorization on an injected
+client. Source requests suppress cookies and authentication challenge flows. The adapter suppresses HTTPX/HTTPCore request
 logs only within the current provider task, preventing signed URLs or redirect
 headers from entering those libraries' default logs. Custom transports and
 external tracing must apply equivalent redaction. The default empty host set
@@ -326,6 +335,11 @@ Other native export types are unsupported by this first adapter contract.
 for authorization-code/PKCE exchange and refresh. Source API transport exposes
 GET only; token POST requests remain confined to the configured native OAuth
 endpoint. No client-credentials fallback or remote mutation method is exposed.
+
+An application can supply a native `OAuth2Client` through `client=`. Its client ID
+and exact endpoints must match the source configuration; credentials are then
+configured on that client. It remains borrowed unless `owns_client=True` is
+explicit. The wrapper owns its default internally created acquisition client.
 
 Microsoft uses `openid`, `profile`, `offline_access` and delegated `Files.Read.All`
 for accessible drive content, with an explicit tenant UUID or OneDrive `consumers`.

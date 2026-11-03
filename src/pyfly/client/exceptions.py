@@ -51,6 +51,10 @@ class ResponseTooLargeException(ServiceClientException):
     """The response exceeds the caller's bounded payload limit (not retryable)."""
 
 
+class ServiceTransportException(ServiceClientException):
+    """A streaming transport failed without exposing vendor request or response details."""
+
+
 class UnsupportedContentEncodingException(ServiceClientException):
     """A bounded response uses unsupported content encoding (not retryable)."""
 

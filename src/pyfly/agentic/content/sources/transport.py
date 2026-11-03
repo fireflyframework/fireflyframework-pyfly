@@ -10,17 +10,19 @@ import ipaddress
 import json
 import logging
 import math
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from datetime import timedelta
 from typing import Any
 from urllib.parse import urlsplit
-
-import httpx
 
 from pyfly.agentic.content.sources.dtos import Account, bounded
 from pyfly.agentic.content.sources.errors import ErrorCode, SourceError
 from pyfly.agentic.content.sources.ports import AsyncByteSink, DelegatedTokenSource
+from pyfly.client.adapters.httpx_adapter import HttpxClientAdapter
+from pyfly.client.exceptions import ServiceClientException
+from pyfly.client.ports.outbound import StreamingHttpClientPort, StreamingHttpResponsePort
 from pyfly.oauth2.acquisition import _close_safely
 
 _SOURCE_HTTP: ContextVar[bool] = ContextVar("pyfly_source_http", default=False)
@@ -98,7 +100,8 @@ class SourceTransport:
         tokens: DelegatedTokenSource,
         *,
         host: str,
-        transport: httpx.AsyncBaseTransport | None = None,
+        http_client: StreamingHttpClientPort | None = None,
+        owns_http_client: bool = False,
         timeout: float = 30,
         max_json_bytes: int = 1024 * 1024,
         download_hosts: frozenset[str] = frozenset(),
@@ -111,13 +114,19 @@ class SourceTransport:
         self.timeout = timeout
         self.max_json_bytes = max_json_bytes
         self.download_hosts = checked_hosts(download_hosts)
-        self.client = httpx.AsyncClient(transport=transport, trust_env=False, follow_redirects=False, timeout=timeout)
+        self._owns_client = http_client is None or owns_http_client
+        self.client: StreamingHttpClientPort = (
+            http_client
+            if http_client is not None
+            else HttpxClientAdapter(trust_env=False, follow_redirects=False, timeout=timedelta(seconds=timeout))
+        )
 
     async def aclose(self) -> None:
-        await _close_safely(self.client.aclose)
+        if self._owns_client:
+            await _close_safely(self.client.stop)
 
     @asynccontextmanager
-    async def request(self, url: str, *, authenticated: bool = True) -> AsyncIterator[httpx.Response]:
+    async def request(self, url: str, *, authenticated: bool = True) -> AsyncIterator[StreamingHttpResponsePort]:
         host = self.host if authenticated else redirect_host(url)
         if host is None or (not authenticated and host not in self.download_hosts):
             raise SourceError("unsafe_url")
@@ -133,23 +142,27 @@ class SourceTransport:
         try:
             with _private_http():
                 async with asyncio.timeout(self.timeout):
-                    response = await self.client.send(
-                        self.client.build_request("GET", url, headers=headers), stream=True
-                    )
-                    try:
+                    async with self.client.stream(
+                        "GET",
+                        url,
+                        headers=headers,
+                        follow_redirects=False,
+                        auth=None,
+                        suppress_cookies=True,
+                        suppress_authorization=not authenticated,
+                        sanitize_errors=True,
+                    ) as response:
                         if response.headers.get("content-encoding", "identity").lower() != "identity":
                             raise SourceError("invalid_response")
                         self.check_status(response)
                         yield response
-                    finally:
-                        await _close_safely(response.aclose)
         except TimeoutError:
             raise SourceError("timeout") from None
-        except httpx.HTTPError:
+        except ServiceClientException:
             raise SourceError("transport_error") from None
 
     @staticmethod
-    def check_status(response: httpx.Response) -> None:
+    def check_status(response: StreamingHttpResponsePort) -> None:
         status = response.status_code
         if status in {200, 302, 307}:
             return
@@ -166,15 +179,15 @@ class SourceTransport:
         raise SourceError(codes.get(status, "invalid_response"), retry_after=seconds if status == 429 else None)
 
     @staticmethod
-    async def chunks(response: httpx.Response) -> AsyncIterator[bytes]:
+    async def chunks(response: StreamingHttpResponsePort) -> AsyncIterator[bytes]:
         # Mock/custom transports can return prebuffered bodies; their allocation
         # is trusted transport work, not the network client's buffering policy.
         if response.is_stream_consumed:
             yield response.content
         else:
-            if not isinstance(response.stream, httpx.AsyncByteStream):
+            if not isinstance(response.stream, AsyncIterable):
                 raise SourceError("invalid_response")
-            # Own close in request(): aiter_raw closes outside our cancellation shield.
+            # Raw iteration leaves cleanup to the native stream context's cancellation shield.
             async for chunk in response.stream:
                 yield chunk
 
@@ -222,7 +235,7 @@ class SourceTransport:
             return await self._copy(response, sink, max_bytes, expected_size)
 
     async def _copy(
-        self, response: httpx.Response, sink: AsyncByteSink, max_bytes: int, expected_size: int | None
+        self, response: StreamingHttpResponsePort, sink: AsyncByteSink, max_bytes: int, expected_size: int | None
     ) -> tuple[int, str]:
         declared = response.headers.get("content-length")
         if declared is not None and (not declared.isdecimal() or len(declared) > 20):

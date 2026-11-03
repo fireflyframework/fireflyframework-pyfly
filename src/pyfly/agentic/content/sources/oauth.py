@@ -10,8 +10,6 @@ from typing import Any, Self
 from urllib.parse import urlencode
 from uuid import UUID
 
-import httpx
-
 from pyfly.agentic.content.sources.dtos import Provider, bounded
 from pyfly.agentic.content.sources.errors import SourceError
 from pyfly.oauth2 import OAuth2Client, OAuth2Endpoints, OAuth2Tokens
@@ -90,18 +88,27 @@ class ReadOnlySourceOAuth:
         config: SourceOAuthConfig,
         *,
         client_secret: str | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
+        client: OAuth2Client | None = None,
+        owns_client: bool = False,
     ) -> None:
         self.config = config
-        self._client = OAuth2Client(
-            config.client_id, OAuth2Endpoints(config.token_endpoint), client_secret=client_secret, transport=transport
+        endpoints = OAuth2Endpoints(config.token_endpoint)
+        if client is not None:
+            if client_secret is not None:
+                raise ValueError("Configure credentials on the supplied native OAuth client")
+            if client.client_id != config.client_id or client.endpoints != endpoints:
+                raise ValueError("The supplied native OAuth client must match the source configuration")
+        self._owns_client = client is None or owns_client
+        self._client = (
+            client if client is not None else OAuth2Client(config.client_id, endpoints, client_secret=client_secret)
         )
 
     async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()
 
     def authorization_url(self, *, state: str, code_challenge: str, nonce: str) -> str:
         bounded(state)

@@ -263,6 +263,14 @@ class OAuth2Client:
     async def __aenter__(self) -> OAuth2Client:
         return self
 
+    @property
+    def client_id(self) -> str:
+        return self._client_id
+
+    @property
+    def endpoints(self) -> OAuth2Endpoints:
+        return self._endpoints
+
     async def __aexit__(self, *_: Any) -> None:
         await self.aclose()
 

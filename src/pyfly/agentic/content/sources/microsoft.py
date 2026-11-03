@@ -8,8 +8,6 @@ import re
 from typing import Any, Literal, Self
 from urllib.parse import unquote, urlsplit
 
-import httpx
-
 from pyfly.agentic.content.sources.dtos import (
     Change,
     ChangePage,
@@ -23,6 +21,7 @@ from pyfly.agentic.content.sources.errors import SourceError
 from pyfly.agentic.content.sources.parsing import identifier, path_id, resume, rows, size, text
 from pyfly.agentic.content.sources.ports import AsyncByteSink, DelegatedTokenSource
 from pyfly.agentic.content.sources.transport import SourceTransport, checked_url, redirect_host
+from pyfly.client.ports.outbound import StreamingHttpClientPort
 
 
 class _GraphSource:
@@ -33,7 +32,8 @@ class _GraphSource:
         scope: SourceScope,
         tokens: DelegatedTokenSource,
         *,
-        transport: httpx.AsyncBaseTransport | None = None,
+        http_client: StreamingHttpClientPort | None = None,
+        owns_http_client: bool = False,
         timeout: float = 30,
         download_hosts: frozenset[str] = frozenset(),
     ) -> None:
@@ -45,7 +45,8 @@ class _GraphSource:
             scope.account,
             tokens,
             host="graph.microsoft.com",
-            transport=transport,
+            http_client=http_client,
+            owns_http_client=owns_http_client,
             timeout=timeout,
             download_hosts=download_hosts,
         )
