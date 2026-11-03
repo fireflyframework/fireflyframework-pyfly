@@ -49,13 +49,18 @@ def test_native_limiter_releases_stream_capacity(wrap, mode: str, ending: str) -
 async def _exercise_limited_stream(wrap, mode: str, ending: str) -> None:
     limiter = ConcurrencyLimiter(max_running=1)
     first_chunk = asyncio.Event()
+    provider_finished = asyncio.Event()
 
     async def stream(messages, info):
-        for index in range(8):
-            if ending == "error" and index == 4:
-                raise RuntimeError("local stream failure")
-            yield f"{index} "
-            await asyncio.sleep(0.03)
+        try:
+            for index in range(8):
+                assert limiter.available_count == 0
+                if ending == "error" and index == 4:
+                    raise RuntimeError("local stream failure")
+                yield f"{index} "
+                await asyncio.sleep(0.03)
+        finally:
+            provider_finished.set()
 
     async def respond(messages, info):
         return ModelResponse(parts=[TextPart("capacity available")])
@@ -74,7 +79,9 @@ async def _exercise_limited_stream(wrap, mode: str, ending: str) -> None:
         async with await agent.run_stream("hello", streaming_mode=mode, timeout=1) as result:
             chunks = result.stream_tokens() if mode == "incremental" else result.stream_text()
             async for _ in chunks:
-                assert limiter.available_count == 0
+                # Final cached snapshots can outlive the provider request's permit.
+                if not provider_finished.is_set():
+                    assert limiter.available_count == 0
                 first_chunk.set()
                 if ending == "break":
                     break
