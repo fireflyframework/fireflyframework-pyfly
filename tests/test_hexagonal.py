@@ -91,6 +91,7 @@ class TestVendorIsolation:
                 # The feature-flag store is its SQL adapter, not the flag domain.
                 "and '/feature_flags/store/sqlalchemy.py:' not in l "
                 # Agentic's native persistence adapters join PyFly Data units of work.
+                "and '/agentic/pipeline/durable/sql.py:' not in l "
                 "and '/agentic/memory/relational_store.py:' not in l "
                 "and '/agentic/vectorstores/pgvector_store.py:' not in l]; "
                 "print('\\n'.join(bad) if bad else 'CLEAN'); "
