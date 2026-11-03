@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.11.07 (2026-11-02)
+
+### Added
+
+- Expose a typed streaming HTTP response port so applications can consume bounded
+  response streams without depending on a particular HTTP vendor.
+- Publish the existing OAuth URI and scope validation helpers, together with
+  read-only client identity and endpoint properties for application registration checks.
+
+### Fixed
+
+- Allow applications to suppress inherited authorization on signed downloads without
+  changing a shared client's defaults. This mode rejects redirect, authentication
+  and event-hook paths that could reintroduce credentials.
+- Provide opt-in sanitized transport errors during streaming send, body reads and
+  response cleanup. Default HTTP exception and timeout behavior remains unchanged
+  for existing SDK bridges and retry policies.
+
 ## v26.11.06 (2026-11-02)
 
 ### Added
