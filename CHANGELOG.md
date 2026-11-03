@@ -31,6 +31,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v26.11.05 (2026-11-02)
 
+### Added
+
+- Add bounded FIFO admission for asynchronous workers, with explicit waiter limits,
+  queue deadlines and cancellation-safe permit transfer. Configure queued bulkheads
+  through the native resilience registry and close them during application shutdown.
+
 ### Fixed
 
 - Stop pipeline execution when checkpoint persistence fails and reject inconsistent
@@ -42,6 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Acknowledge workflow journal entries only after successful persistence and return
   detached durable replay values so callers cannot silently rewrite earlier history.
   Propagate journal failures through native workflow composition and retry boundaries.
+- Keep resilience primitive imports independent of optional database and context
+  dependencies while preserving the public dependency-injected registry type.
 
 ### Changed
 
