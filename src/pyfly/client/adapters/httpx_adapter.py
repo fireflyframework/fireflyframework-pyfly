@@ -21,7 +21,11 @@ from datetime import timedelta
 from ssl import SSLContext
 from typing import TYPE_CHECKING, Any
 
-from pyfly.client.exceptions import ResponseTooLargeException, UnsupportedContentEncodingException
+from pyfly.client.exceptions import (
+    ResponseTooLargeException,
+    ServiceTransportException,
+    UnsupportedContentEncodingException,
+)
 from pyfly.config.properties.client import ClientTlsProperties
 
 if TYPE_CHECKING:
@@ -153,20 +157,29 @@ class HttpxClientAdapter:
 
         self._prepare_request(kwargs)
         suppress_cookies = kwargs.pop("suppress_cookies", False)
+        suppress_authorization = kwargs.pop("suppress_authorization", False)
+        sanitize_errors = kwargs.pop("sanitize_errors", False)
         redirects = kwargs.pop("follow_redirects", False)
         auth = kwargs.pop("auth", httpx.USE_CLIENT_DEFAULT)
-        if suppress_cookies:
+        if suppress_cookies or suppress_authorization:
             if redirects or auth not in (None, httpx.USE_CLIENT_DEFAULT) or self._has_custom_event_hooks():
-                raise ValueError("Cookie-suppressed streams require no redirects, auth flows, or event hooks")
+                raise ValueError("Credential-suppressed streams require no redirects, auth flows, or event hooks")
             auth = None
         request = self._client.build_request(method, url, **kwargs)
         if suppress_cookies:
             request.headers.pop("Cookie", None)
-        response = await self._client.send(request, stream=True, follow_redirects=redirects, auth=auth)
+        if suppress_authorization:
+            request.headers.pop("Authorization", None)
         try:
-            yield response
-        finally:
-            await self._close_response(response)
+            response = await self._client.send(request, stream=True, follow_redirects=redirects, auth=auth)
+            try:
+                yield response
+            finally:
+                await self._close_response(response)
+        except httpx.HTTPError:
+            if not sanitize_errors:
+                raise
+            raise ServiceTransportException("HTTP stream transport failed") from None
 
     async def request_bounded(self, method: str, url: str, *, max_response_bytes: int, **kwargs: Any) -> httpx.Response:
         """Read at most the configured identity-encoded payload before retaining it.

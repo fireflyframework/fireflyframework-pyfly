@@ -169,6 +169,20 @@ def _scope_value(scopes: tuple[str, ...]) -> str:
     return value
 
 
+def validate_oauth_uri(uri: str, *, allow_loopback_http: bool = False) -> None:
+    """Validate a configured OAuth URI without authorizing a callback destination.
+
+    Applications must still compare callbacks against their exact registered
+    addresses and bind authorization state to the initiating user.
+    """
+    _endpoint(uri, allow_loopback_http)
+
+
+def serialize_oauth_scopes(scopes: tuple[str, ...]) -> str:
+    """Validate and serialize bounded RFC 6749 scope tokens in the supplied order."""
+    return _scope_value(scopes)
+
+
 def _request_value(value: str, name: str, limit: int = 4096) -> str:
     if not isinstance(value, str) or not value or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value):
         raise ValueError(f"{name} requires a bounded nonempty UTF-8 string without controls")
@@ -262,6 +276,14 @@ class OAuth2Client:
 
     async def __aenter__(self) -> OAuth2Client:
         return self
+
+    @property
+    def client_id(self) -> str:
+        return self._client_id
+
+    @property
+    def endpoints(self) -> OAuth2Endpoints:
+        return self._endpoints
 
     async def __aexit__(self, *_: Any) -> None:
         await self.aclose()

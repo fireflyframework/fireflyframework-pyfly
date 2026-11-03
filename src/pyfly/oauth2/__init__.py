@@ -15,6 +15,8 @@ from pyfly.oauth2.acquisition import (
     PKCEPair,
     generate_pkce,
     pkce_challenge,
+    serialize_oauth_scopes,
+    validate_oauth_uri,
 )
 
 __all__ = [
@@ -26,4 +28,6 @@ __all__ = [
     "PKCEPair",
     "generate_pkce",
     "pkce_challenge",
+    "serialize_oauth_scopes",
+    "validate_oauth_uri",
 ]
