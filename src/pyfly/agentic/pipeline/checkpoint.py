@@ -46,7 +46,7 @@ class CheckpointRecord(BaseModel):
     point or an older record without this metadata.
     """
 
-    model_config = ConfigDict(strict=True)
+    model_config = ConfigDict(strict=True, revalidate_instances="always", hide_input_in_errors=True)
 
     pipeline_name: str
     run_id: str
@@ -78,6 +78,20 @@ class Checkpointer(Protocol):
     def list_runs(self, pipeline_name: str) -> list[str]:
         """Return all known run IDs for ``pipeline_name``."""
         ...
+
+
+@runtime_checkable
+class AsyncCheckpointer(Protocol):
+    """Awaitable checkpoint transport for relational stores and authenticated worker RPC.
+
+    An acknowledged save must represent durable persistence, not a queued write.
+    Authorization and scope binding belong to the implementation; an async port
+    alone does not grant permission to resume a pause.
+    """
+
+    async def save(self, record: CheckpointRecord) -> None: ...
+
+    async def load_latest(self, pipeline_name: str, run_id: str) -> CheckpointRecord | None: ...
 
 
 class FileCheckpointer:

@@ -41,7 +41,7 @@ from pyfly.agentic.config import get_config
 from pyfly.agentic.exceptions import PipelineError, PipelinePersistenceError
 from pyfly.agentic.observability.usage import default_usage_tracker
 from pyfly.agentic.pipeline.audit import AuditEntry, AuditLog, AuditStatus
-from pyfly.agentic.pipeline.checkpoint import Checkpointer, CheckpointRecord
+from pyfly.agentic.pipeline.checkpoint import AsyncCheckpointer, Checkpointer, CheckpointRecord
 from pyfly.agentic.pipeline.context import PipelineContext
 from pyfly.agentic.pipeline.dag import DAG, FailureStrategy, _mermaid_id
 from pyfly.agentic.pipeline.reducers import Reducer, apply_update, discover_reducers
@@ -282,7 +282,7 @@ class PipelineEngine(AuditRecordingSupport):
         dag: DAG,
         *,
         event_handler: EventHandler | PipelineEventHandler | None = None,
-        checkpointer: Checkpointer | None = None,
+        checkpointer: Checkpointer | AsyncCheckpointer | None = None,
         audit_log: AuditLog | None = None,
         state_schema: type[BaseModel] | None = None,
         recursion_limit: int = 25,
@@ -419,11 +419,37 @@ class PipelineEngine(AuditRecordingSupport):
             A :class:`PipelineResult` with all node outputs, trace, ``run_id``
             (use to resume later), and ``final_state`` for state-aware runs.
         """
+        from pyfly.agentic.pipeline.durable.checkpointer import GRAPH_VERSION, DurableCheckpointer, durable_graph_digest
+        from pyfly.agentic.pipeline.durable.models import DurableStateError
+
+        if isinstance(self._checkpointer, DurableCheckpointer):
+            binding = self._checkpointer.binding
+            if (
+                approve_pause
+                or context is not None
+                or state is not None
+                or self._state_schema is not None
+                or self._reducers
+                or start_at is not None
+                or self._routers
+                or self._router_mappings
+                or binding.graph_version != GRAPH_VERSION
+                or binding.pipeline_name != self._dag.name
+                or durable_graph_digest(self._dag) != binding.graph_digest
+                or tuple(self._dag.topological_sort()) != binding.node_ids
+            ):
+                raise DurableStateError("Durable engine graph or start authority differs")
+            await self._checkpointer.validate_run(
+                self._dag.name,
+                run_id,
+                context.inputs if context is not None else inputs,
+                resume=run_id is not None and context is None and inputs is None and state is None,
+            )
         resume_after_node: str | None = None
         start_node: str | None = None
         if run_id is not None and context is None and inputs is None and state is None:
             resume_run_id: str = run_id
-            context, pre_completed_list, sequence_start, resume_after_node, start_node = self._load_for_resume(
+            context, pre_completed_list, sequence_start, resume_after_node, start_node = await self._load_for_resume(
                 resume_run_id, approve_pause=approve_pause
             )
             pre_completed = set(pre_completed_list)
@@ -681,7 +707,7 @@ class PipelineEngine(AuditRecordingSupport):
                             pause_reason = nr.output.reason
                             if pending_pause is None:
                                 pending_pause = (node_id, pause_reason)
-                            self._save_checkpoint(
+                            await self._save_checkpoint(
                                 run_id=run_id,
                                 node_id=pending_pause[0],
                                 sequence=sequence,
@@ -731,7 +757,7 @@ class PipelineEngine(AuditRecordingSupport):
                                 and isinstance(nr.output, dict)
                             ):
                                 context.state = apply_update(context.state, nr.output, self._reducers)
-                            self._save_checkpoint(
+                            await self._save_checkpoint(
                                 run_id=run_id,
                                 node_id=pending_pause[0] if pending_pause else node_id,
                                 sequence=sequence,
@@ -1052,7 +1078,7 @@ class PipelineEngine(AuditRecordingSupport):
                 # HITL: node returned Pause — checkpoint paused and halt.
                 if paused_now:
                     pause_reason = nr.output.reason
-                    self._save_checkpoint(
+                    await self._save_checkpoint(
                         run_id=run_id,
                         node_id=current,
                         sequence=sequence,
@@ -1083,7 +1109,7 @@ class PipelineEngine(AuditRecordingSupport):
                 if not nr.skipped:
                     if self._state_schema is not None and context.state is not None and isinstance(nr.output, dict):
                         context.state = apply_update(context.state, nr.output, self._reducers)
-                    self._save_checkpoint(
+                    await self._save_checkpoint(
                         run_id=run_id,
                         node_id=current,
                         sequence=sequence,
@@ -1240,6 +1266,11 @@ class PipelineEngine(AuditRecordingSupport):
             # Event emission is handled centrally by _emit_node_result in run()
             return NodeResult(node_id=node_id, skipped=True, error="Skipped due to upstream failure")
 
+        from pyfly.agentic.pipeline.durable.checkpointer import DurableCheckpointer
+
+        if isinstance(self._checkpointer, DurableCheckpointer):
+            await self._checkpointer.before_node(node_id)
+
         node = self._dag.nodes[node_id]
 
         # Check condition gate
@@ -1377,7 +1408,7 @@ class PipelineEngine(AuditRecordingSupport):
         else:
             await self._dispatch("on_node_error", error=nr.error or "unknown", **common)
 
-    def _load_for_resume(
+    async def _load_for_resume(
         self, run_id: str, *, approve_pause: bool = False
     ) -> tuple[PipelineContext, list[str], int, str, str | None]:
         """Rebuild context + completed-set from the latest checkpoint.
@@ -1390,12 +1421,16 @@ class PipelineEngine(AuditRecordingSupport):
             raise PipelineError("Cannot resume: pipeline has no checkpointer configured")
         try:
             record = self._checkpointer.load_latest(self._dag.name, run_id)
+            if inspect.isawaitable(record):
+                record = await record
         except Exception:
             raise PipelinePersistenceError("Pipeline checkpoint load failed") from None
         if record is None:
             raise PipelineError("No checkpoint found for requested run")
         try:
-            record = CheckpointRecord.model_validate(record.model_dump(mode="python"), strict=True)
+            if not isinstance(record, CheckpointRecord):
+                raise ValueError
+            record = CheckpointRecord.model_validate(record, strict=True)
             completed = record.completed_nodes
             if (
                 record.pipeline_name != self._dag.name
@@ -1465,7 +1500,7 @@ class PipelineEngine(AuditRecordingSupport):
             context.set_node_result(nid, result)
         return context, list(completed), record.sequence, record.node_id, execution_start
 
-    def _save_checkpoint(
+    async def _save_checkpoint(
         self,
         *,
         run_id: str,
@@ -1491,7 +1526,7 @@ class PipelineEngine(AuditRecordingSupport):
                 "results": {nid: all_results[nid].model_dump(mode="json") for nid in completed_successful},
                 "shared_state": _serialize_value(context.state),
             }
-            self._checkpointer.save(
+            acknowledged = self._checkpointer.save(
                 CheckpointRecord(
                     pipeline_name=self._dag.name,
                     run_id=run_id,
@@ -1504,6 +1539,8 @@ class PipelineEngine(AuditRecordingSupport):
                     execution_start=execution_start,
                 )
             )
+            if inspect.isawaitable(acknowledged):
+                await acknowledged
         except Exception:
             raise PipelinePersistenceError("Pipeline checkpoint save failed") from None
 

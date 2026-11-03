@@ -53,6 +53,8 @@ Table                             Used by
 ``pyfly_sessions``                ``SqlSessionStore`` (``pyfly.session.store=postgres``)
 ``pyfly_mcp_sessions``            ``SqlMcpSessionStore``: authenticated legacy initialization metadata
 ``pyfly_mcp_session_admission``   ``SqlMcpSessionStore``: the cross-replica session admission lock
+``pyfly_agentic_durable_runs``    Durable linear runs/checkpoints and approval CAS
+``pyfly_agentic_durable_events``  Durable run lifecycle events
 ``pyfly_agentic_memory``          ``RelationalMemoryStore`` (namespace-scoped Agentic memory)
 ``pyfly_session_registrations``   ``PostgresSessionRegistry``: the sessions of each principal
 ``pyfly_session_principals``      ``PostgresSessionRegistry``: a row per principal, locked by a login
@@ -147,6 +149,10 @@ __all__ = [
     "KeyString",
     "UtcTimestamp",
     "ZonelessUtcTimestamp",
+    "agentic_durable_runs",
+    "agentic_durable_runs_table",
+    "agentic_durable_events",
+    "agentic_durable_events_table",
     "agentic_memory",
     "agentic_memory_table",
     "audit_entries",
@@ -587,6 +593,38 @@ def event_store_head_table(name: str = EVENT_STORE_HEAD) -> Table:
     return _declare("event_store_head", name, build)
 
 
+def agentic_durable_runs_table(name: str = "pyfly_agentic_durable_runs") -> Table:
+    """Versioned bounded run envelope, fenced by a scoped canonical key and real CAS."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("key_digest", key_string(64), primary_key=True),
+            Column("version", BigInteger(), nullable=False),
+            Column("payload_digest", key_string(64), nullable=False),
+            Column("payload", long_text(), nullable=False),
+        )
+
+    return _declare("agentic_durable_runs", name, build)
+
+
+def agentic_durable_events_table(name: str = "pyfly_agentic_durable_events") -> Table:
+    """Content-free lifecycle events in the run envelope's monotonic CAS order."""
+
+    def build(table_name: str) -> Table:
+        return Table(
+            table_name,
+            framework_metadata,
+            Column("key_digest", key_string(64), primary_key=True),
+            Column("sequence", BigInteger(), primary_key=True),
+            Column("payload_digest", key_string(64), nullable=False),
+            Column("payload", long_text(), nullable=False),
+        )
+
+    return _declare("agentic_durable_events", name, build)
+
+
 def audit_entries_table(name: str = AUDIT_ENTRIES) -> Table:
     """Immutable audit envelopes; mutation protection is installed by the audit schema adapter."""
 
@@ -917,6 +955,9 @@ def feature_flag_changes_table(name: str = FEATURE_FLAG_CHANGES) -> Table:
 
     return _declare("feature_flag_changes", name, build)
 
+
+agentic_durable_runs = agentic_durable_runs_table()
+agentic_durable_events = agentic_durable_events_table()
 
 agentic_memory = agentic_memory_table()
 """``pyfly_agentic_memory`` (:func:`agentic_memory_table`)."""

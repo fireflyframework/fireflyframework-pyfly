@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## v26.11.06 (2026-11-02)
+
+### Added
+
+- Add asynchronous pipeline checkpoint adapters while retaining synchronous file
+  checkpoint compatibility. The native relational durable-run port supports
+  scoped, static linear flows with one human approval on SQLite and PostgreSQL.
+- Bind persisted runs to immutable graph and execution-plan digests, original
+  input, completed results, worker claim epochs and approval generations. An
+  independent human decision can admit continuation without replaying completed
+  nodes; queued or waiting runs can be cancelled with a version check.
+- Register the opt-in durable store through native Agentic DI and framework schema
+  management. State changes, ordered lifecycle events and immutable audit facts
+  share the primary PyFly Data transaction, including rollback after a caught
+  inner persistence error.
+
+### Changed
+
+- Reject unsupported durable branching, automatic retries, shared-state reducers,
+  arbitrary starting positions and caller-supplied approval flags before effects.
+  Hosts must enforce current reviewer permissions and bind executable resources
+  into the admitted plan. Unknown external outcomes are never automatically replayed.
+
 ## v26.11.05 (2026-11-02)
 
 ### Fixed

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from opentelemetry.metrics import MeterProvider
 from opentelemetry.trace import TracerProvider
@@ -19,6 +19,7 @@ from pyfly.agentic.observability.events import AgentEvents
 from pyfly.agentic.observability.quota import QuotaManager
 from pyfly.agentic.observability.sinks import OTelMetricsSink
 from pyfly.agentic.observability.usage import UsageTracker
+from pyfly.agentic.pipeline.durable import DurableRunStore
 from pyfly.agentic.prompts.registry import PromptRegistry
 from pyfly.agentic.reasoning.registry import ReasoningPatternRegistry
 from pyfly.agentic.runtime import AgenticRuntime
@@ -84,6 +85,23 @@ class AgenticBeanPostProcessor:
 
 
 class NativeAgenticAutoConfiguration:
+    @bean
+    @conditional_on_property("pyfly.agentic.durable.enabled", having_value="true")
+    @conditional_on_missing_bean(DurableRunStore)
+    def agentic_durable_runs(self, config: Config, container: Container) -> DurableRunStore:
+        from pyfly.agentic.pipeline.durable.sql import SqlDurableRunStore
+        from pyfly.audit import AuditJournal
+        from pyfly.data.relational.framework_schema import creates_tables
+        from pyfly.data.relational.sqlalchemy import SessionProvider, SqlAlchemyTransactionManager
+
+        return SqlDurableRunStore(
+            container.resolve(SqlAlchemyTransactionManager),
+            container.resolve(SessionProvider),
+            cast(AuditJournal, container.resolve(cast(type[Any], AuditJournal))),
+            create_tables=creates_tables(config.get("pyfly.data.relational.ddl-auto", "none")),
+            max_bytes=config.get("pyfly.agentic.durable.max-bytes", 1024 * 1024),
+        )
+
     @bean
     @conditional_on_missing_bean(AgenticConfig)
     def agentic_config(self, config: Config) -> AgenticConfig:

@@ -72,6 +72,11 @@ class SqlAuditJournal:
         self.outbox = SqlOutboxStore(datasource, create_tables=create_tables)
 
     @property
+    def transaction_manager(self) -> object:
+        """The public native Data participant; hosts can require an identical joined UOW."""
+        return resolve_manager(self._target)
+
+    @property
     def engine(self) -> AsyncEngine:
         manager = resolve_manager(self._target)
         engine = getattr(manager, "engine", None)
