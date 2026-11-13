@@ -13,9 +13,11 @@ import httpx
 from openai import AsyncOpenAI
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
+from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 
 from pyfly.agentic.models.spec import ModelClientPolicy, ModelSpec
 from pyfly.client.ports.outbound import StreamingHttpClientPort
@@ -116,9 +118,56 @@ class _OwnedOllamaProvider(_OwnedProvider):
         return OllamaProvider.model_profile(model_name)
 
 
+class _OwnedOpenRouterProvider(_OwnedProvider):
+    @property
+    def name(self) -> str:
+        return "openrouter"
+
+    @staticmethod
+    def model_profile(model_name: str) -> ModelProfile | None:
+        return OpenRouterProvider.model_profile(model_name)
+
+
+def build_openrouter_provider(
+    spec: ModelSpec, secret: str | None, policy: ModelClientPolicy
+) -> _OwnedOpenRouterProvider:
+    """Own a configured OpenRouter SDK wrapper, never the borrowed native port."""
+    headers = {}
+    if app_url := os.getenv("OPENROUTER_APP_URL"):
+        headers["HTTP-Referer"] = app_url
+    if app_title := os.getenv("OPENROUTER_APP_TITLE"):
+        headers["X-Title"] = app_title
+    kwargs: dict[str, Any] = {
+        "base_url": spec.base_url or "https://openrouter.ai/api/v1",
+        "api_key": secret,
+        "max_retries": policy.max_retries,
+        "default_headers": headers,
+    }
+    if policy.timeout is not None:
+        kwargs["timeout"] = policy.timeout
+    if policy.http_client is not None:
+        kwargs["http_client"] = httpx.AsyncClient(
+            transport=_PortTransport(cast(StreamingHttpClientPort, policy.http_client), policy.connect_timeout),
+            follow_redirects=False,
+            trust_env=False,
+        )
+    return _OwnedOpenRouterProvider(AsyncOpenAI(**kwargs))
+
+
 def build_openai_model(
     spec: ModelSpec, secret: str | None, profile: ModelProfile | None, class_name: str, policy: ModelClientPolicy
 ) -> Model:
+    provider: _OwnedProvider
+    if spec.provider == "openrouter":
+        provider = build_openrouter_provider(spec, secret, policy)
+        model_classes: dict[str, type[OpenAIChatModel] | type[OpenAIResponsesModel]] = {
+            "OpenRouterModel": OpenRouterModel,
+            "OpenAIChatModel": OpenAIChatModel,
+            "OpenAIResponsesModel": OpenAIResponsesModel,
+        }
+        model_class = model_classes[class_name]
+        router_kwargs: dict[str, Any] = {"profile": profile} if profile is not None else {}
+        return model_class(spec.model, provider=provider, **router_kwargs)
     base_url = spec.base_url
     provider_class = _OwnedProvider
     if spec.provider == "ollama":

@@ -141,6 +141,10 @@ def capabilities_for(provider: str, model: str) -> ModelCapabilities:
     no thinking mode, which is the safe direction — a dropped budget shows in a trace, a 400
     fails the turn.
     """
+    if provider == "openrouter":
+        # The gateway accepts both effort and budget controls, independently of
+        # the upstream provider's native request vocabulary.
+        return ModelCapabilities(thinking=True, thinking_style="effort")
     if is_claude(model):
         return claude_capabilities(model)
     family = detect_model_family(f"{provider}:{model}")
@@ -218,7 +222,11 @@ def model_settings_for(spec: ModelSpec) -> dict[str, Any]:
     effort = _setting(settings, "effort", "effort")
     family = detect_model_family(f"{spec.provider}:{spec.model}")
 
-    if capabilities.thinking and (budget is not None or effort is not None):
+    if spec.provider == "openrouter" and spec.model_class in {None, "OpenRouterModel"}:
+        if capabilities.thinking and (budget is not None or effort is not None):
+            reasoning = {"max_tokens": budget} if budget is not None else {"effort": str(effort)}
+            out.setdefault("openrouter_reasoning", {**reasoning, "enabled": effort != "none"})
+    elif capabilities.thinking and (budget is not None or effort is not None):
         style = capabilities.thinking_style
         # One of the two is set here; a label with no budget is folded onto the table's budget.
         resolved_budget = budget if budget is not None else EFFORT_BUDGETS.get(str(effort), EFFORT_BUDGETS["medium"])
@@ -317,6 +325,10 @@ def _derived_profile(spec: ModelSpec) -> ModelProfile:
 
     Unknown ids fall back to the SDK's default profile so measured overrides still apply.
     """
+    if spec.provider == "openrouter":
+        from pydantic_ai.providers.openrouter import OpenRouterProvider
+
+        return OpenRouterProvider.model_profile(spec.model) or DEFAULT_PROFILE.copy()
     if spec.provider == "ollama":
         from pydantic_ai.profiles.openai import OpenAIModelProfile
         from pydantic_ai.providers.ollama import OllamaProvider
@@ -358,7 +370,11 @@ def _profile_fields(spec: ModelSpec, derived: ModelProfile) -> set[str]:
     """Known override keys, including optional provider fields absent from a derived profile."""
     schema: Any = ModelProfile
     family = detect_model_family(f"{spec.provider}:{spec.model}")
-    if spec.provider == "bedrock":
+    if spec.provider == "openrouter":
+        from pydantic_ai.providers.openrouter import OpenRouterModelProfile
+
+        schema = OpenRouterModelProfile
+    elif spec.provider == "bedrock":
         from pydantic_ai.providers.bedrock import BedrockModelProfile
 
         schema = BedrockModelProfile
@@ -431,6 +447,14 @@ def _anthropic(spec: ModelSpec, secret: str | None, profile: ModelProfile | None
 
 
 def _openai_provider(spec: ModelSpec, secret: str | None) -> Any:
+    if spec.provider == "openrouter":
+        from pydantic_ai.providers.openrouter import OpenRouterProvider
+
+        if spec.base_url:
+            from pyfly.agentic.models.adapters.openai_client import build_openrouter_provider
+
+            return build_openrouter_provider(spec, secret, ModelClientPolicy())
+        return OpenRouterProvider(api_key=secret)
     if spec.provider in {"azure", "azure-chat", "azure-responses"}:
         from pydantic_ai.exceptions import UserError
         from pydantic_ai.providers.azure import AzureProvider
@@ -466,6 +490,12 @@ def _openai_responses(spec: ModelSpec, secret: str | None, profile: ModelProfile
     from pydantic_ai.models.openai import OpenAIResponsesModel
 
     return OpenAIResponsesModel(spec.model, provider=_openai_provider(spec, secret), **_profile_kwargs(profile))
+
+
+def _openrouter(spec: ModelSpec, secret: str | None, profile: ModelProfile | None) -> Model:
+    from pydantic_ai.models.openrouter import OpenRouterModel
+
+    return OpenRouterModel(spec.model, provider=_openai_provider(spec, secret), **_profile_kwargs(profile))
 
 
 def _bedrock(spec: ModelSpec, secret: str | None, profile: ModelProfile | None) -> Model:
@@ -520,6 +550,7 @@ BUILDERS: Mapping[str, Builder] = {
     "AnthropicModel": _anthropic,
     "OpenAIChatModel": _openai_chat,
     "OpenAIResponsesModel": _openai_responses,
+    "OpenRouterModel": _openrouter,
     "BedrockConverseModel": _bedrock,
     "GoogleModel": _google,
     "MistralModel": _mistral,
@@ -536,7 +567,7 @@ DEFAULT_CLASS_BY_PROVIDER: Mapping[str, str] = {
     "azure-chat": "OpenAIChatModel",
     "azure-responses": "OpenAIResponsesModel",
     "ollama": "OpenAIChatModel",
-    "openrouter": "OpenAIChatModel",
+    "openrouter": "OpenRouterModel",
     "deepseek": "OpenAIChatModel",
     "groq": "OpenAIChatModel",
     "xai": "OpenAIChatModel",
@@ -569,7 +600,21 @@ class ModelFactory:
 
     def build_with_secret(self, spec: ModelSpec, secret: str | None) -> Model:
         """Construct the model with an already-resolved secret (or ``None``)."""
+        if spec.provider == "openrouter":
+            secret = secret or os.getenv("OPENROUTER_API_KEY")
+            if not secret:
+                raise ModelBuildError("OpenRouter requires a credential or OPENROUTER_API_KEY")
         class_name = spec.model_class or DEFAULT_CLASS_BY_PROVIDER.get(spec.provider)
+        if spec.provider == "openrouter" and class_name not in {
+            "OpenRouterModel",
+            "OpenAIChatModel",
+            "OpenAIResponsesModel",
+        }:
+            raise ModelBuildError(
+                "OpenRouter requires model class OpenRouterModel, OpenAIChatModel or OpenAIResponsesModel"
+            )
+        if class_name == "OpenRouterModel" and spec.provider != "openrouter":
+            raise ModelBuildError("OpenRouterModel requires provider='openrouter'")
         if class_name is None:
             if spec.base_url:
                 class_name = "OpenAIChatModel"
@@ -586,7 +631,7 @@ class ModelFactory:
                 f"{', '.join(sorted(BUILDERS))}."
             )
         if self._client_policy is not None:
-            if class_name not in {"OpenAIChatModel", "OpenAIResponsesModel"} or spec.provider in {
+            if class_name not in {"OpenAIChatModel", "OpenAIResponsesModel", "OpenRouterModel"} or spec.provider in {
                 "azure",
                 "azure-chat",
                 "azure-responses",

@@ -87,6 +87,7 @@ def _target(model: str | Model | None, profile: Mapping[str, Any] | None) -> _Ta
     if isinstance(model, Model):
         classes = {cls.__name__ for cls in type(model).__mro__}
         for class_name, candidate in (
+            ("OpenRouterModel", "openrouter"),
             ("OpenAIResponsesModel", "openai-responses"),
             ("OpenAIChatModel", "openai-chat"),
             ("AnthropicModel", "anthropic"),
@@ -106,7 +107,11 @@ def _target(model: str | Model | None, profile: Mapping[str, Any] | None) -> _Ta
         elif selector in {"google", "google-gla", "google-vertex"}:
             backend = "google"
         derived = {}
-        if backend.startswith("openai-"):
+        if backend == "openrouter":
+            from pydantic_ai.providers.openrouter import OpenRouterProvider
+
+            derived = OpenRouterProvider.model_profile(name) or {}
+        elif backend.startswith("openai-"):
             derived = openai_model_profile(name)
         elif backend == "anthropic":
             derived = anthropic_model_profile(name) or {}
@@ -185,6 +190,19 @@ def _openai_options(target: _Target, options: ModelOptions, out: dict[str, Any])
         if target.backend != "openai-responses":
             target.reject("output_verbosity", "use the Responses API for this control")
         out["openai_text_verbosity"] = options.output_verbosity
+
+
+def _openrouter_options(target: _Target, options: ModelOptions, out: dict[str, Any]) -> None:
+    if options.reasoning is None and options.reasoning_budget_tokens is None:
+        return
+    if not target.profile.get("supports_thinking", False):
+        target.reject("reasoning", "the model profile does not declare reasoning support")
+    if options.reasoning == "none":
+        out["openrouter_reasoning"] = {"enabled": False}
+    elif options.reasoning_budget_tokens is not None:
+        out["openrouter_reasoning"] = {"max_tokens": options.reasoning_budget_tokens, "enabled": True}
+    else:
+        out["openrouter_reasoning"] = {"effort": options.reasoning, "enabled": True}
 
 
 def _claude_options(target: _Target, options: ModelOptions, out: dict[str, Any]) -> None:
@@ -358,7 +376,9 @@ def resolve_model_options(
         for field in ("store_responses", "output_verbosity"):
             if getattr(options, field) is not None:
                 target.reject(field, "this provider has no corresponding control")
-        if target.backend == "anthropic" or (
+        if target.backend == "openrouter":
+            _openrouter_options(target, options, out)
+        elif target.backend == "anthropic" or (
             target.backend == "bedrock" and target.profile.get("bedrock_thinking_variant") == "anthropic"
         ):
             _claude_options(target, options, out)

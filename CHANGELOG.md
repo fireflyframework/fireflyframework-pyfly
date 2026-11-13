@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## Unreleased
+
+### Added
+
+- Add native OpenRouter support to PyFly Agentic model factories and portable
+  reasoning options, with OpenRouter credentials, gateway profiles, custom endpoints,
+  app attribution, and managed HTTP client policies.
+
+### Fixed
+
+- Keep OpenRouter requests on their configured endpoint and credential instead of
+  falling back to OpenAI defaults. Reject incompatible provider/model-class combinations
+  before constructing a client.
+
 ## v26.11.07 (2026-11-02)
 
 ### Added

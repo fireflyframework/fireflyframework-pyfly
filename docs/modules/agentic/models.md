@@ -105,7 +105,7 @@ spec = ModelSpec(
 
 | Field | Meaning |
 |---|---|
-| `provider` | `anthropic`, `openai`, `openai-chat`, `openai-responses`, `azure`, `azure-chat`, `azure-responses`, `bedrock`, `google`, `google-vertex`, `mistral`, or any OpenAI-compatible endpoint (`ollama`, `openrouter`, `deepseek`, …) with a `base_url`. |
+| `provider` | `anthropic`, `openai`, `openai-chat`, `openai-responses`, `azure`, `azure-chat`, `azure-responses`, `bedrock`, `google`, `google-vertex`, `mistral`, `openrouter`, or any OpenAI-compatible endpoint (`ollama`, `deepseek`, …) with a `base_url`. OpenRouter has a default endpoint; see [OpenRouter](#openrouter). |
 | `model` | The provider's id, as the provider names it (`anthropic.claude-opus-5` and the cross-region `us.anthropic.claude-opus-5-v1:0` on Bedrock, `claude-opus-5@…` on Vertex are recognised). |
 | `credential` | `Credential.api_key(secret)`, `Credential.reference(id, version)` redeemed through a `CredentialResolver`, or `Credential.none()`. |
 | `options` | Typed `ModelOptions` for framework-owned parameter translation and validation. |
@@ -188,7 +188,7 @@ SDK wrapper; the context owns the shared HTTP port. Incremental responses remain
 streamed through that port, with W3C context propagation and response cleanup on
 cancellation. The bridge suppresses pooled cookies and redirects.
 
-The policy supports OpenAI Chat, OpenAI Responses, and Ollama. Other provider/policy
+The policy supports OpenAI Chat, OpenAI Responses, Ollama, and OpenRouter. Other provider/policy
 combinations fail explicitly with `ModelBuildError`; omitting the policy preserves
 existing provider construction. Ollama retains its native profile and reads only
 its own endpoint/credential variables. `connect_timeout` requires a native port.
@@ -204,6 +204,89 @@ retain the value for intentional credential handling; do not log those values.
 Agent output/tool retries. Pydantic AI per-call `model_settings={"max_retries": 0}`
 can override this default; applications requiring one provider attempt must own
 that setting and set native transport retries to zero as well.
+
+## OpenRouter
+
+Use `openrouter:<vendor>/<model>` to select a model through OpenRouter. Set
+`OPENROUTER_API_KEY` in your app's environment before constructing the agent.
+The existing Agentic extra includes the native adapter; no additional package is required.
+
+```python
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import ModelOptions
+
+agent = Agent(
+    name="router-analyst",
+    model="openrouter:openai/gpt-5",
+    model_options=ModelOptions(max_tokens=4096, reasoning="low"),
+)
+result = await agent.run("Explain bounded retries.")
+```
+
+Use the full model ID from your OpenRouter catalog, including its vendor prefix.
+Tool calling, structured output, reasoning, and streaming depend on the routed model
+and endpoint; provider support does not make every model support every feature.
+
+For apps that manage a model catalog, use `ModelFactory` with `provider="openrouter"`:
+
+```python
+import os
+
+from pyfly.agentic.agents import Agent
+from pyfly.agentic.models import Credential, ModelFactory, ModelOptions, ModelSpec
+
+spec = ModelSpec(
+    provider="openrouter",
+    model="openai/gpt-5",
+    credential=Credential.api_key(os.environ["OPENROUTER_API_KEY"]),
+    options=ModelOptions(max_tokens=4096, reasoning="low"),
+)
+factory = ModelFactory()
+agent = Agent(
+    name="catalog-router-analyst",
+    model=await factory.build(spec),
+    model_options=spec.options,
+)
+result = await agent.run("Explain bounded retries.")
+```
+
+Omitting `credential` uses `OPENROUTER_API_KEY`. An explicit key or a resolved
+`Credential.reference("router-account", version=1)` takes precedence; references
+require a `CredentialResolver`, as shown in [Build](#build). Missing OpenRouter
+credentials fail rather than falling back to `OPENAI_API_KEY`.
+
+The factory defaults to `OpenRouterModel` and `https://openrouter.ai/api/v1`.
+Set `ModelSpec.base_url` to your intended OpenRouter-compatible endpoint when needed;
+it receives the selected OpenRouter credential. `OPENAI_BASE_URL` does not redirect
+OpenRouter requests. `ModelClientPolicy` supports the same retry, timeout, borrowed
+HTTP port, and cleanup behavior described in [Native DI transport and SDK policy](#native-di-transport-and-sdk-policy).
+This policy is applied through `ModelFactory`, not by constructing an agent from a string.
+
+| Portable option | OpenRouter setting |
+| --- | --- |
+| `ModelOptions(reasoning="low")` | `openrouter_reasoning={"effort": "low", "enabled": True}` |
+| `ModelOptions(reasoning="none")` | `openrouter_reasoning={"enabled": False}` |
+| `ModelOptions(reasoning_budget_tokens=4096)` | `openrouter_reasoning={"max_tokens": 4096, "enabled": True}` |
+
+Set either `reasoning` or `reasoning_budget_tokens`. Supplying both raises a
+validation error, including when `reasoning="none"`. Portable `top_k`,
+`store_responses`, and `output_verbosity` are unsupported for the native OpenRouter adapter and raise
+`ModelOptionsError`. Model profiles can impose additional restrictions.
+
+Advanced settings such as `openrouter_provider`, `openrouter_models`,
+`openrouter_reasoning`, and `openrouter_preset` pass through `model_settings` or
+`ModelSpec.settings`. For the latter, pass `factory.settings_for(spec)` to the
+agent's `model_settings`. Native settings override equivalent console aliases;
+portable options and per-call overrides follow [Typed model options](#typed-model-options).
+Optional `OPENROUTER_APP_URL` and `OPENROUTER_APP_TITLE` environment variables add
+the `HTTP-Referer` and `X-Title` attribution headers, including with a client policy.
+
+An explicit `model_class="OpenAIChatModel"` or `"OpenAIResponsesModel"` retains the
+OpenRouter endpoint and credential but selects that SDK protocol and its option
+translation. Use the default `OpenRouterModel` for native `openrouter_*` settings;
+explicit compatibility classes do not provide that translation. The selected endpoint
+must support the chosen protocol. Other model classes are rejected for OpenRouter,
+and `OpenRouterModel` requires `provider="openrouter"`.
 
 ## OpenAI: choose the API explicitly
 
