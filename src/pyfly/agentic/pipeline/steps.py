@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import warnings
 from collections.abc import Callable, Coroutine
 from typing import Any, Protocol, runtime_checkable
@@ -77,10 +78,11 @@ class AgentStep:
         # PydanticAI v2 requires text or multimodal content, not a raw mapping.
         if isinstance(prompt, dict):
             prompt = json.dumps(prompt, default=str)
-        # Propagate pipeline memory to the agent if available
+        run_kwargs = dict(self._kwargs)
+        # Borrow memory only for this invocation; the agent may be shared.
         if context.memory is not None and hasattr(self._agent, "memory"):
-            self._agent.memory = context.memory
-        result = await self._agent.run(prompt, **self._kwargs)
+            run_kwargs["memory"] = context.memory
+        result = await self._agent.run(prompt, **run_kwargs)
         return result.output if hasattr(result, "output") else str(result)
 
 
@@ -210,45 +212,21 @@ class FanInStep:
 
 
 class BatchLLMStep:
-    """Process multiple prompts in batch for cost optimization.
+    """Run ordinary agent calls concurrently in bounded groups.
 
-    Batch processing allows submitting multiple LLM requests together,
-    typically with significant cost savings (e.g., 50% discount with
-    OpenAI's batch API) and higher throughput. Results are processed
-    asynchronously with polling or callback mechanisms.
-
-    This step is ideal for:
-    - Large-scale data processing pipelines
-    - Non-real-time workloads
-    - Cost-sensitive applications
-    - High-throughput scenarios
-
-    **Note:** Batch processing introduces latency (minutes to hours) as
-    the provider processes requests asynchronously. Use regular AgentStep
-    for real-time interactions.
+    Calls use normal provider pricing. This step does not submit provider batch
+    jobs or poll for their status. Results preserve input order; individual
+    failures become ``{"error": str(exception)}`` entries.
 
     Parameters:
-        agent: The agent to use for batch processing.
-        prompts_key: Key in inputs containing the list of prompts.
-        batch_size: Maximum prompts per batch (default: 50).
-        wait_for_completion: If True, poll until batch completes.
-            If False, return batch job ID immediately.
-        poll_interval_seconds: How often to check batch status (default: 60s).
-        max_wait_seconds: Maximum time to wait for completion (default: 3600s).
-        on_batch_complete: Optional callback when batch completes.
-
-    Example::
-
-        # Process 1000 documents in batches
-        builder.add_node("batch_process", BatchLLMStep(
-            agent=classifier_agent,
-            prompts_key="documents",
-            batch_size=100,
-            wait_for_completion=True,
-        ))
-
-    Returns:
-        List of agent outputs corresponding to input prompts.
+        agent: Agent used for every prompt.
+        prompts_key: Input key containing prompts.
+        batch_size: Positive integer maximum concurrent calls (default 50).
+        wait_for_completion: Must be True; background jobs are unsupported.
+        poll_interval_seconds: Deprecated and ignored; no polling occurs.
+        max_wait_seconds: Positive finite deadline for all groups together.
+            Expiry cancels and drains outstanding calls, then raises TimeoutError.
+        on_batch_complete: Optional callback after all groups finish.
     """
 
     def __init__(
@@ -258,16 +236,32 @@ class BatchLLMStep:
         prompts_key: str = "prompts",
         batch_size: int = 50,
         wait_for_completion: bool = True,
-        poll_interval_seconds: float = 60.0,
+        poll_interval_seconds: float | None = None,
         max_wait_seconds: float = 3600.0,
         on_batch_complete: Callable[[list[Any]], None] | None = None,
         **kwargs: Any,
     ) -> None:
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if wait_for_completion is not True:
+            raise ValueError("wait_for_completion must be True; background batch jobs are unsupported")
+        if isinstance(max_wait_seconds, bool) or not isinstance(max_wait_seconds, (int, float)):
+            raise ValueError("max_wait_seconds must be positive and finite")
+        try:
+            finite = math.isfinite(max_wait_seconds)
+        except OverflowError:
+            finite = False
+        if not finite or max_wait_seconds <= 0:
+            raise ValueError("max_wait_seconds must be positive and finite")
+        if poll_interval_seconds is not None:
+            warnings.warn(
+                "poll_interval_seconds is deprecated and ignored; BatchLLMStep uses ordinary concurrent calls",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._agent = agent
         self._prompts_key = prompts_key
         self._batch_size = batch_size
-        self._wait_for_completion = wait_for_completion
-        self._poll_interval = poll_interval_seconds
         self._max_wait = max_wait_seconds
         self._on_batch_complete = on_batch_complete
         self._kwargs = kwargs
@@ -280,7 +274,7 @@ class BatchLLMStep:
             inputs: Dictionary containing prompts list.
 
         Returns:
-            List of outputs if wait_for_completion=True, otherwise batch job info.
+            Ordered outputs with per-item error mappings.
         """
         # Try to get prompts from previous node result first, then fall back to inputs
         prompts = None
@@ -313,18 +307,9 @@ class BatchLLMStep:
 
         all_results = []
 
-        for batch_idx, batch in enumerate(batches, 1):
-            logger.info(
-                "BatchLLMStep: Processing batch %d/%d (%d prompts)",
-                batch_idx,
-                len(batches),
-                len(batch),
-            )
-
-            # Process batch concurrently (not true batch API, but concurrent execution)
-            # In production, this would use provider-specific batch APIs
-            batch_results = await self._process_batch_concurrent(batch)
-            all_results.extend(batch_results)
+        async with asyncio.timeout(self._max_wait):
+            for batch in batches:
+                all_results.extend(await self._process_batch_concurrent(batch))
 
         if self._on_batch_complete:
             self._on_batch_complete(all_results)
@@ -332,25 +317,20 @@ class BatchLLMStep:
         return all_results
 
     async def _process_batch_concurrent(self, prompts: list[str]) -> list[Any]:
-        """Process a batch of prompts concurrently.
-
-        This is a concurrent implementation. For true batch API support
-        with cost savings, this would be replaced with provider-specific
-        batch submission (e.g., OpenAI Batch API, Anthropic Message Batches).
-
-        Args:
-            prompts: List of prompts to process.
-
-        Returns:
-            List of agent outputs.
-        """
-        tasks = [self._process_single_prompt(prompt) for prompt in prompts]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        """Run one group, cancelling and draining every child on interruption."""
+        tasks = [asyncio.create_task(self._process_single_prompt(prompt)) for prompt in prompts]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Handle exceptions
         outputs: list[Any] = []
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.error(
                     "BatchLLMStep: Error processing prompt %d: %s",
                     i,

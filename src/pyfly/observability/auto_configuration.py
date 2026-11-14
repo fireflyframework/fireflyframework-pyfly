@@ -163,15 +163,24 @@ class TracingAutoConfiguration:
 
         ``pyfly.observability.tracing.exporter`` selects ``otlp`` | ``console`` |
         ``none``. When unset, OTLP is used iff an endpoint is configured (via
-        ``pyfly.observability.tracing.otlp.endpoint`` or the standard
+        ``pyfly.observability.tracing.otlp.endpoint``, then
+        ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`` verbatim, then the normalized
         ``OTEL_EXPORTER_OTLP_ENDPOINT`` env var); otherwise no exporter is wired
         and a single info line is logged so the drop is not silent.
         """
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-        otlp_endpoint = config.get("pyfly.observability.tracing.otlp.endpoint") or os.environ.get(
-            "OTEL_EXPORTER_OTLP_ENDPOINT"
-        )
+        explicit_endpoint = config.get("pyfly.observability.tracing.otlp.endpoint")
+        signal_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        general_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        if explicit_endpoint:
+            otlp_endpoint = TracingAutoConfiguration._otlp_traces_endpoint(str(explicit_endpoint))
+        elif signal_endpoint:
+            otlp_endpoint = signal_endpoint
+        elif general_endpoint:
+            otlp_endpoint = TracingAutoConfiguration._otlp_traces_endpoint(general_endpoint)
+        else:
+            otlp_endpoint = None
         kind = str(config.get("pyfly.observability.tracing.exporter", "")).strip().lower()
         if not kind:
             kind = "otlp" if otlp_endpoint else "none"
@@ -197,9 +206,7 @@ class TracingAutoConfiguration:
             if headers is not None:
                 exporter_options["headers"] = headers
             exporter = (
-                OTLPSpanExporter(
-                    endpoint=TracingAutoConfiguration._otlp_traces_endpoint(otlp_endpoint), **exporter_options
-                )
+                OTLPSpanExporter(endpoint=otlp_endpoint, **exporter_options)
                 if otlp_endpoint
                 else OTLPSpanExporter(**exporter_options)
             )

@@ -674,9 +674,10 @@ automatically select a different list element for each worker.
 
 ## Batch Processing (BatchLLMStep)
 
-`BatchLLMStep` processes multiple prompts through an agent concurrently, optimizing
-for cost and throughput. It's ideal for bulk classification, extraction, or
-summarization tasks.
+`BatchLLMStep` runs ordinary agent calls in bounded concurrent groups for bulk
+classification, extraction, or summarization. Calls use normal provider pricing;
+the step does not submit provider batch jobs or qualify for batch API discounts.
+Results preserve input order, with an `{"error": ...}` entry for each failed call.
 
 ```python
 from pyfly.agentic.pipeline.steps import BatchLLMStep
@@ -709,11 +710,15 @@ classifications = result.outputs["classify"].output # List of results
 - **`prompts_key`** — Key to access prompts from either:
   - Previous step output: `context.get_node_result(prompts_key).output`
   - Initial inputs: `inputs[prompts_key]`
-- **`batch_size`** — Maximum concurrent requests (default: 50).
-- **`wait_for_completion`** — Whether to wait for all results (default: `True`).
-- **`poll_interval_seconds`** — Polling interval for batch jobs (default: 60.0).
-- **`max_wait_seconds`** — Maximum wait time for completion (default: 3600).
-- **`on_batch_complete`** — Optional callback for each batch completion.
+- **`batch_size`**: positive integer maximum concurrent requests (default: 50).
+- **`wait_for_completion`**: must be `True` (default). `False` is rejected;
+  background jobs are unsupported.
+- **`poll_interval_seconds`**: deprecated and ignored. Supplying a value emits
+  `DeprecationWarning`; no polling occurs.
+- **`max_wait_seconds`**: positive finite deadline for all groups together
+  (default: 3600 seconds). Expiry cancels and drains outstanding calls, then raises
+  `TimeoutError`.
+- **`on_batch_complete`**: optional callback with all results after all groups finish.
 
 ### Accessing Previous Step Outputs
 
@@ -884,6 +889,11 @@ marked as failed and the pipeline reports `success=False`.
 ## Pipeline Context
 
 You can attach a `MemoryManager` to the `PipelineContext` so that all steps share conversation and working memory. `AgentStep` injects the memory into downstream agent runs; `ReasoningStep` passes it to patterns via the `memory` kwarg.
+
+`AgentStep` supplies context memory for that invocation without replacing the
+shared agent's configured memory. Concurrent pipelines can reuse an agent with
+different context memories; the host still owns authorization and the choice of
+memory namespace.
 
 ```python
 from pyfly.agentic.memory import MemoryManager

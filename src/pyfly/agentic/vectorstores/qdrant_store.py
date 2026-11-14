@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 if TYPE_CHECKING:
     from qdrant_client.models import Condition
@@ -16,7 +18,9 @@ try:
         Filter,
         FilterSelector,
         HasIdCondition,
+        IsEmptyCondition,
         MatchValue,
+        PayloadField,
         PointStruct,
         VectorParams,
     )
@@ -29,6 +33,8 @@ except ImportError:
     Filter = None  # type: ignore[assignment,misc]
     FilterSelector = None  # type: ignore[assignment,misc]
     HasIdCondition = None  # type: ignore[assignment,misc]
+    IsEmptyCondition = None  # type: ignore[assignment,misc]
+    PayloadField = None  # type: ignore[assignment,misc]
     MatchValue = None  # type: ignore[assignment,misc]
 
 from pyfly.agentic.vectorstores.base import BaseVectorStore
@@ -87,14 +93,74 @@ class QdrantVectorStore(BaseVectorStore):
                 raise ValueError("Qdrant upsert requires an embedding for every document")
             points.append(
                 PointStruct(
-                    id=doc.id,
+                    id=self._point_id(namespace, doc.id),
                     vector=doc.embedding,
-                    payload={"text": doc.text, "_namespace": namespace, **doc.metadata},
+                    payload={**doc.metadata, "text": doc.text, "_namespace": namespace, "_document_id": doc.id},
                 )
             )
+        # A legacy caller-chosen UUID can coincide with a new physical ID.
+        # Refuse that collision instead of overwriting an existing tenant's data.
+        expected = {point.id: (point.payload or {})["_document_id"] for point in points}
+        existing = await self._client.retrieve(
+            collection_name=self._collection_name,
+            ids=list(expected),
+            with_payload=True,
+        )
+        for point in existing:
+            payload = point.payload or {}
+            if payload.get("_namespace") != namespace or payload.get("_document_id") != expected[point.id]:
+                raise ValueError("Qdrant point ID collision with legacy data; migrate to a new collection")
+        legacy = self._legacy_ids([doc.id for doc in documents])
+        if legacy:
+            legacy_points = await self._client.retrieve(
+                collection_name=self._collection_name,
+                ids=[id_ for id_ in legacy],
+                with_payload=True,
+            )
+            for point in legacy_points:
+                payload = point.payload or {}
+                if payload.get("_namespace") == namespace and "_document_id" in payload:
+                    logical_id = payload["_document_id"]
+                    if not isinstance(logical_id, str) or self._point_id(namespace, logical_id) != str(point.id):
+                        raise ValueError(
+                            "Legacy Qdrant reserved metadata requires explicit migration to a new collection"
+                        )
         await self._client.upsert(
             collection_name=self._collection_name,
             points=points,
+        )
+        # Lazy migration: only after the new write succeeds, retire same-tenant
+        # legacy IDs. The missing marker protects new points whose physical UUID
+        # happens to be another document's caller-supplied logical ID.
+        if legacy:
+            await self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=FilterSelector(filter=self._legacy_filter(legacy, namespace)),
+            )
+
+    @staticmethod
+    def _point_id(namespace: str, logical_id: str) -> str:
+        return str(uuid5(NAMESPACE_URL, json.dumps([namespace, logical_id], separators=(",", ":"))))
+
+    @staticmethod
+    def _legacy_ids(ids: list[str]) -> list[str | int]:
+        legacy: list[str | int] = []
+        for logical_id in ids:
+            try:
+                legacy.append(str(UUID(logical_id)))
+            except ValueError:
+                if logical_id.isascii() and logical_id.isdecimal() and int(logical_id) < 2**64:
+                    legacy.append(int(logical_id))
+        return legacy
+
+    @staticmethod
+    def _legacy_filter(ids: list[str | int], namespace: str) -> Filter:
+        return Filter(
+            must=[
+                FieldCondition(key="_namespace", match=MatchValue(value=namespace)),
+                HasIdCondition(has_id=[id_ for id_ in ids]),
+                IsEmptyCondition(is_empty=PayloadField(key="_document_id")),
+            ]
         )
 
     async def _search(
@@ -122,8 +188,11 @@ class QdrantVectorStore(BaseVectorStore):
             payload = dict(point.payload or {})
             text = payload.pop("text", "")
             payload.pop("_namespace", None)
+            logical_id = payload.pop("_document_id", None)
+            if not isinstance(logical_id, str) or self._point_id(namespace, logical_id) != str(point.id):
+                logical_id = str(point.id)
             doc = VectorDocument(
-                id=str(point.id),
+                id=logical_id,
                 text=text,
                 metadata=payload,
                 namespace=namespace,
@@ -135,14 +204,18 @@ class QdrantVectorStore(BaseVectorStore):
         # Confine the delete to the namespace AND the requested ids, so a delete
         # can never reach across namespaces even if an id is presented out of
         # scope -- mirrors the namespace filter applied on _search.
+        new_points = Filter(
+            must=[
+                FieldCondition(key="_namespace", match=MatchValue(value=namespace)),
+                HasIdCondition(has_id=[self._point_id(namespace, id_) for id_ in ids]),
+            ],
+            must_not=[IsEmptyCondition(is_empty=PayloadField(key="_document_id"))],
+        )
+        alternatives: list[Condition] = [new_points]
+        legacy = self._legacy_ids(ids)
+        if legacy:
+            alternatives.append(self._legacy_filter(legacy, namespace))
         await self._client.delete(
             collection_name=self._collection_name,
-            points_selector=FilterSelector(
-                filter=Filter(
-                    must=[
-                        FieldCondition(key="_namespace", match=MatchValue(value=namespace)),
-                        HasIdCondition(has_id=[id_ for id_ in ids]),
-                    ]
-                )
-            ),
+            points_selector=FilterSelector(filter=Filter(should=alternatives)),
         )

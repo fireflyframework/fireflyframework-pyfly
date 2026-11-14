@@ -277,16 +277,24 @@ class UsageTracker:
 
     # -- Low-level entry -------------------------------------------------
     def record(self, usage: UsageRecord, scope_ctx: ScopeContext | None = None) -> None:
+        """Record incurred usage and attempt every sink even when the budget is exceeded.
+
+        Budget rejection still propagates after sink delivery; a sink failure cannot
+        prevent delivery to later sinks or replace the budget error.
+        """
         with self._lock:
             self._records.append(usage)
             self._cumulative_cost += usage.cost_usd
             if self._max_records > 0 and len(self._records) > self._max_records:
                 excess = len(self._records) - self._max_records
                 del self._records[:excess]
-        if self._gate is not None:
-            self._gate.commit(usage, scope_ctx)
-        for sink in self._sinks:
-            _emit_safely(sink, usage)
+        try:
+            if self._gate is not None:
+                self._gate.commit(usage, scope_ctx)
+        finally:
+            # This usage was already incurred, even if it exceeds a hard budget.
+            for sink in self._sinks:
+                _emit_safely(sink, usage)
 
     # -- Sink management -------------------------------------------------
     #: The name of the budget rule a configuration's ``budget_limit_usd`` becomes. One rule,

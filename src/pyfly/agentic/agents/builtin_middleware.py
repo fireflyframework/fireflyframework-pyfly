@@ -528,6 +528,9 @@ class CacheMiddleware:
     On ``before_run``, checks the cache.  If a hit is found the cached
     result is stored in ``context.metadata["_cache_result"]`` so that the
     agent run can be skipped.  On ``after_run``, stores the result on miss.
+    Streams and requests with memory, history, explicit context, dependencies,
+    or unrepresented options bypass caching. Stateless results are isolated by
+    agent instance, model, API, and portable model options.
 
     Parameters:
         cache: A :class:`~pyfly.agentic.agents.cache.ResultCache`.
@@ -538,9 +541,16 @@ class CacheMiddleware:
 
     async def before_run(self, context: MiddlewareContext) -> None:
         """Check the cache; on hit, store result in metadata."""
-        # Native settings and model objects may contain non-serializable state.
-        # Such overrides must not reuse or populate the default result cache.
-        if "model" in context.kwargs or "model_settings" in context.kwargs:
+        # Only stateless text requests with fully represented portable options
+        # can share a result. Correlation IDs are not tenant identities.
+        if (
+            context.method == "run_stream"
+            or context.metadata.get("_cache_bypass")
+            or context.deps is not None
+            or (context.context is not None and not context.metadata.get("_cache_default_context"))
+            or not isinstance(context.prompt, str)
+            or set(context.kwargs) - {"model_options"}
+        ):
             context.metadata["_cache_bypass"] = True
             return
         namespace = context.agent_name
@@ -548,9 +558,15 @@ class CacheMiddleware:
         override = context.kwargs.get("model_options")
         if override is not None:
             options.update(override.model_dump(mode="json", exclude_unset=True))
-        if options:
+        identity = context.metadata.get("_cache_agent_identity")
+        if options or context.model or identity:
             namespace += ":" + json.dumps(
-                {"model": context.model, "api": context.metadata.get("_cache_model_api"), "options": options},
+                {
+                    "agent": identity,
+                    "model": context.model,
+                    "api": context.metadata.get("_cache_model_api"),
+                    "options": options,
+                },
                 sort_keys=True,
             )
         context.metadata["_cache_namespace"] = namespace
@@ -566,7 +582,7 @@ class CacheMiddleware:
             # Never cache a paused run — a later identical prompt would be served
             # a stale ``DeferredToolRequests`` instead of running for real.
             return result
-        if context.metadata.get("_cache_bypass"):
+        if context.method == "run_stream" or context.metadata.get("_cache_bypass"):
             return result
         if "_cache_result" not in context.metadata:
             prompt_str = str(context.prompt) if context.prompt is not None else ""

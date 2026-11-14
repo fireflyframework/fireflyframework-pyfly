@@ -94,6 +94,23 @@ async def test_namespace_isolation(store):
     assert "ns_a_doc" not in ids_b
 
 
+async def test_cross_namespace_id_conflict_rolls_back_entire_batch(store):
+    from pyfly.agentic.exceptions import VectorStoreError
+
+    await store.upsert([VectorDocument(id="shared", text="b", embedding=[1.0, 0.0, 0.0, 0.0])], namespace="b")
+    with pytest.raises(VectorStoreError, match="namespace"):
+        await store.upsert(
+            [
+                VectorDocument(id="new-a", text="a", embedding=[0.0, 1.0, 0.0, 0.0]),
+                VectorDocument(id="shared", text="a", embedding=[0.0, 1.0, 0.0, 0.0]),
+            ],
+            namespace="a",
+        )
+    assert await store.search([1.0, 0.0, 0.0, 0.0], namespace="a") == []
+    results = await store.search([1.0, 0.0, 0.0, 0.0], namespace="b")
+    assert [(r.document.id, r.score) for r in results] == [("shared", pytest.approx(1.0))]
+
+
 async def test_import_error_when_sqlite_vec_not_installed(tmp_path):
     from unittest.mock import patch
 

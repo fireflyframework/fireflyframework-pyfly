@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## Unreleased
+## v26.11.08 (2026-11-13)
 
 ### Added
 
@@ -16,9 +16,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Inspect SQLite transaction state on its worker thread to prevent an event-loop
+  deadlock with shared connections on SQLAlchemy 2.0.
+- Resolve secret-manager placeholders and environment overrides in configured
+  HTTP Basic and form-login users before authentication.
+- Honor native auto-configuration ordering so Agentic can resolve Data and Audit
+  infrastructure, and preserve model identifiers in quota configuration maps.
+- Respect OTLP trace endpoint precedence, preserving signal-specific receiver
+  paths. Deliver incurred usage to cost sinks even when a hard budget is exceeded,
+  and record traced failures once.
+- Keep pipeline and delegated memory local to each agent invocation, bypass result
+  caching for streams, and isolate cancelled cache followers from shared tool work.
+- Recheck workflow budgets after queued calls acquire concurrency capacity.
+- Bound concurrent `BatchLLMStep` calls with a total deadline and validate sizes
+  and timeouts. Reject background execution, deprecate the ignored polling option,
+  and document ordinary provider pricing rather than provider batch discounts.
+- Scope new Qdrant point IDs to namespace and logical document ID, protect reserved
+  payload fields, and retain namespace-scoped legacy reads and deletes. Successful
+  upserts retire matching legacy points; existing physical-ID collisions fail closed.
+  Upgrade or stop old writers before migration and restore already overwritten data
+  from authoritative documents or backups.
+- Reject SQLite vector upserts for document IDs owned by another namespace and
+  roll back the entire batch while preserving updates within the same namespace.
+- Scope new Chroma IDs and reserved metadata to each namespace. Preserve legacy
+  reads, but reject legacy writes and deletes that need migration; back up and
+  reindex into a new collection rather than attempting unsafe automatic cleanup.
 - Keep OpenRouter requests on their configured endpoint and credential instead of
   falling back to OpenAI defaults. Reject incompatible provider/model-class combinations
   before constructing a client.
+
+### Security
+
+- Mask credentials nested inside configuration lists, tuples, and dictionaries
+  before exposing configuration through Admin views.
+- Warn when Admin binds externally without required authentication. Document
+  authenticated operator access, CSRF handling, and network controls while
+  retaining the existing isolated-network defaults.
+- Require `pypdf>=6.21.4,<7` and the OpenTelemetry 1.45.2 family, and refresh
+  dependency locks to `certifi==2026.10.23`.
+
+### Known limitations
+
+- ChromaDB 1.5.9 retains upstream security advisories. Its server, collection
+  schemas, and configuration writers must be trusted; dense embeddings do not
+  bypass schema deserialization. Namespace isolation fixes do not repair those
+  advisories. Use another backend when this trust boundary cannot be enforced.
 
 ## v26.11.07 (2026-11-02)
 

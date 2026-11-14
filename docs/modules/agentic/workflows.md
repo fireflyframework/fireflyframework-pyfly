@@ -154,6 +154,11 @@ stack the rest of the framework uses; read live spend with
 `ctx.tokens_spent` / `ctx.cost_spent_usd` and the remaining headroom with
 `ctx.remaining_tokens()` / `ctx.remaining_cost_usd()`.
 
+Queued calls recheck the run's budget after acquiring concurrency capacity and
+before invoking the runner. Usage consumed by earlier calls can therefore stop a
+waiting call from starting. This check does not reserve a provider charge or
+cancel charges already incurred by calls in flight.
+
 ---
 
 ## Resume with a call journal

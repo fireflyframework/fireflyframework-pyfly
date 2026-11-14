@@ -129,13 +129,13 @@ async def agent(
         logger.debug("workflow '%s' resume: agent call #%d served from journal", ctx.name, seq)
         return ctx.journal.get(seq)
 
-    ctx.reserve_agent()
     display = label or (prompt[:40] if isinstance(prompt, str) else f"agent#{seq}")
-    ctx.emit("agent.start", {"label": display, "phase": ctx.current_phase, "seq": seq})
     # Forward ``using`` only when set, so runners/fakes without the parameter
     # (the 6 test fakes, SmartRoutingRunner) keep their byte-identical call shape.
     extra: dict[str, Any] = {"using": using} if using is not None else {}
     async with ctx.semaphore:
+        ctx.reserve_agent()
+        ctx.emit("agent.start", {"label": display, "phase": ctx.current_phase, "seq": seq})
         call = await ctx.runner.run(
             prompt,
             model=model,
@@ -146,8 +146,8 @@ async def agent(
             toolsets=toolsets,
             **extra,
         )
-    ctx.record_tokens(call.tokens)
-    ctx.record_cost_usd(call.cost_usd)
+        ctx.record_tokens(call.tokens)
+        ctx.record_cost_usd(call.cost_usd)
     ctx.journal.record(seq, call.output)
     ctx.emit(
         "agent.end",
@@ -239,11 +239,11 @@ async def stream(
     if not isinstance(runner, StreamingAgentRunner):
         raise WorkflowError(f"the active runner {type(runner).__name__} does not support streaming")
 
-    ctx.reserve_agent()
     display = label or (prompt[:40] if isinstance(prompt, str) else f"stream#{seq}")
-    ctx.emit("agent.start", {"label": display, "phase": ctx.current_phase, "seq": seq, "stream": True})
     extra: dict[str, Any] = {"using": using} if using is not None else {}
     async with ctx.semaphore:
+        ctx.reserve_agent()
+        ctx.emit("agent.start", {"label": display, "phase": ctx.current_phase, "seq": seq, "stream": True})
         async with runner.run_stream(
             prompt,
             model=model,
@@ -256,8 +256,8 @@ async def stream(
         ) as handle:
             yield handle
         call = handle.call if handle.call is not None else AgentCall(output=handle.output)
-    ctx.record_tokens(call.tokens)
-    ctx.record_cost_usd(call.cost_usd)
+        ctx.record_tokens(call.tokens)
+        ctx.record_cost_usd(call.cost_usd)
     ctx.journal.record(seq, call.output)
     ctx.emit(
         "agent.end",

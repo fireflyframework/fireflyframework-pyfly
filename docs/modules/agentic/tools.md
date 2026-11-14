@@ -642,6 +642,9 @@ expensive or rate-limited tool is never stampeded (it runs once per key). A fail
 is not cached and clears the in-flight slot so the next call retries. (It uses an
 `asyncio.Lock`; intended for one event loop.)
 
+Cancelling a waiting follower leaves the shared result and other callers intact.
+Cancelling the first caller cancels that in-flight execution; a later call can retry.
+
 ```python
 from pyfly.agentic.tools.cached import CachedTool
 from pyfly.agentic.tools.builtins import HttpTool

@@ -192,12 +192,17 @@ def install_sqlite_customizer(
     def _on_begin(conn: Connection) -> None:
         if is_autocommit(conn):
             return
+        dbapi_connection = conn.connection.dbapi_connection
         # StaticPool (in-memory databases) hands every session the same connection: when another
         # session already opened a transaction on it, this one joins it, as the driver's own handling
         # did, instead of failing with "cannot start a transaction within a transaction".
-        if getattr(conn.connection.driver_connection, "in_transaction", False):
+        # aiosqlite's property reads sqlite3 synchronously. Reading it off the worker can hold the
+        # GIL while waiting for SQLite's mutex, deadlocking a query that needs the GIL to finish.
+        # Its worker queue is the only way to inspect the state safely; run_async yields the loop.
+        if dbapi_connection is not None and dbapi_connection.run_async(
+            lambda driver: driver._execute(getattr, driver, "in_transaction")
+        ):
             return
-        dbapi_connection = conn.connection.dbapi_connection
         # Setting an isolation level (and resetting it when the connection returns to the pool) turns
         # the driver's own BEGIN handling back on; switch it off again before this transaction starts.
         if dbapi_connection is not None and dbapi_connection.isolation_level is not None:

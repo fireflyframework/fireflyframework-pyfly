@@ -151,9 +151,14 @@ class TestQdrantVectorStore:
         assert mock_client.delete.call_args[1]["collection_name"] == "test"
         # Delete is confined to the namespace AND the requested ids -- not a bare
         # id list (which would ignore the scope).
-        mock_mv.assert_called_once_with(value="ns1")
-        mock_fc.assert_called_once_with(key="_namespace", match=mock_mv.return_value)
-        mock_hasid.assert_called_once_with(has_id=["1", "2"])
+        assert mock_mv.call_count == 2
+        assert all(call.kwargs == {"value": "ns1"} for call in mock_mv.call_args_list)
+        assert all(call.kwargs["key"] == "_namespace" for call in mock_fc.call_args_list)
+        assert mock_hasid.call_args_list[0].kwargs["has_id"] == [
+            store._point_id("ns1", "1"),
+            store._point_id("ns1", "2"),
+        ]
+        assert mock_hasid.call_args_list[1].kwargs["has_id"] == [1, 2]
 
     @patch("pyfly.agentic.vectorstores.qdrant_store.AsyncQdrantClient", None)
     async def test_import_error_when_qdrant_not_installed(self):

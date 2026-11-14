@@ -34,8 +34,10 @@ import re
 import sys
 import threading
 import time
+import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
+from enum import Enum
 from types import NoneType
 from typing import TYPE_CHECKING, Any, Generic, Literal, cast
 
@@ -300,6 +302,10 @@ class _RuntimeStream:
         await self.__aexit__(None, None, None)
 
 
+class _DefaultMemory(Enum):
+    ATTACHED = "attached"
+
+
 class Agent(Generic[AgentDepsT, OutputT]):
     """A managed agent that wraps a Pydantic AI :class:`PydanticAgent`.
 
@@ -409,6 +415,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
         self._owned_model_ids: set[int] = set()
 
         self._name = name
+        self._cache_identity = uuid.uuid4().hex
         self._version = version
         self._description = description
         self._tags = list(tags)
@@ -587,6 +594,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
         *,
         deps: AgentDepsT = None,  # type: ignore[assignment]
         conversation_id: str | None = None,
+        memory: MemoryManager | None | _DefaultMemory = _DefaultMemory.ATTACHED,
         timeout: float | None = None,
         context: AgentContext | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
@@ -602,6 +610,9 @@ class Agent(Generic[AgentDepsT, OutputT]):
         When a :class:`MemoryManager` is attached and *conversation_id*
         is provided, the agent automatically loads conversation history
         as ``message_history`` and stores new messages after the run.
+        Pass *memory* to borrow a manager for this invocation, or ``None`` to
+        disable memory. Omitting it uses the attached manager. The agent does
+        not take ownership of a borrowed manager.
 
         To **resume** a run that paused for human-in-the-loop approval (see
         :func:`is_deferred`), pass ``deferred_tool_results`` together with
@@ -611,6 +622,11 @@ class Agent(Generic[AgentDepsT, OutputT]):
 
         Delegates to ``pydantic_ai.Agent.run``.
         """
+        selected_memory = self._memory if memory is _DefaultMemory.ATTACHED else memory
+        cache_metadata = {
+            "_cache_bypass": selected_memory is not None or conversation_id is not None,
+            "_cache_default_context": context is None,
+        }
         if deferred_tool_results is not None:
             kwargs["deferred_tool_results"] = deferred_tool_results
         if model_options is not None:
@@ -624,7 +640,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
             method="run",
             deps=deps,
             kwargs=kwargs,
-            metadata=self._model_metadata(),
+            metadata={**self._model_metadata(), **cache_metadata},
             model=self._effective_model_identifier(kwargs),
             context=context,
         )
@@ -638,7 +654,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
 
         t0 = time.monotonic()
         try:
-            await self._inject_memory(conversation_id, kwargs)
+            await self._inject_memory(conversation_id, kwargs, memory=selected_memory)
             result = await self._run_with_rate_limit_retry(
                 mw_ctx.prompt, deps=deps, timeout=timeout, retry_override=mw_ctx.metadata.get("_retry_config"), **kwargs
             )
@@ -646,9 +662,9 @@ class Agent(Generic[AgentDepsT, OutputT]):
             self._record_usage(result, elapsed_ms, correlation_id=context.correlation_id, model_identifier=mw_ctx.model)
             if self._middleware.requires_output_admission:
                 result = await self._middleware.run_after(mw_ctx, result)
-                await self._persist_memory(conversation_id, prompt, result)
+                await self._persist_memory(conversation_id, prompt, result, memory=selected_memory)
             else:
-                await self._persist_memory(conversation_id, prompt, result)
+                await self._persist_memory(conversation_id, prompt, result, memory=selected_memory)
                 result = await self._middleware.run_after(mw_ctx, result)
         except asyncio.CancelledError:
             await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
@@ -667,6 +683,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
         *,
         deps: AgentDepsT = None,  # type: ignore[assignment]
         conversation_id: str | None = None,
+        memory: MemoryManager | None | _DefaultMemory = _DefaultMemory.ATTACHED,
         timeout: float | None = None,
         context: AgentContext | None = None,
         deferred_tool_results: DeferredToolResults | None = None,
@@ -683,6 +700,11 @@ class Agent(Generic[AgentDepsT, OutputT]):
         and iterated on their provider's owning loop. A closed owner requires a
         new model/client.
         """
+        selected_memory = self._memory if memory is _DefaultMemory.ATTACHED else memory
+        cache_metadata = {
+            "_cache_bypass": selected_memory is not None or conversation_id is not None,
+            "_cache_default_context": context is None,
+        }
         if self._runtime is not None and self._runtime._audit_recorder("agentic") is not None:
             from pyfly.audit import AuditError
 
@@ -716,7 +738,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
             method="run_sync",
             deps=deps,
             kwargs=kwargs,
-            metadata=self._model_metadata(),
+            metadata={**self._model_metadata(), **cache_metadata},
             model=self._effective_model_identifier(kwargs),
             context=context,
         )
@@ -730,7 +752,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
 
             t0 = time.monotonic()
             try:
-                await self._inject_memory(conversation_id, kwargs)
+                await self._inject_memory(conversation_id, kwargs, memory=selected_memory)
                 result = await self._run_with_rate_limit_retry(
                     mw_ctx.prompt,
                     deps=deps,
@@ -744,9 +766,9 @@ class Agent(Generic[AgentDepsT, OutputT]):
                 )
                 if self._middleware.requires_output_admission:
                     result = await self._middleware.run_after(mw_ctx, result)
-                    await self._persist_memory(conversation_id, prompt, result)
+                    await self._persist_memory(conversation_id, prompt, result, memory=selected_memory)
                 else:
-                    await self._persist_memory(conversation_id, prompt, result)
+                    await self._persist_memory(conversation_id, prompt, result, memory=selected_memory)
                     result = await self._middleware.run_after(mw_ctx, result)
             except asyncio.CancelledError:
                 await self._middleware.run_error(mw_ctx, AgentError("Agent run cancelled"))
@@ -779,6 +801,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
         *,
         deps: AgentDepsT = None,  # type: ignore[assignment]
         conversation_id: str | None = None,
+        memory: MemoryManager | None | _DefaultMemory = _DefaultMemory.ATTACHED,
         timeout: float | None = None,
         context: AgentContext | None = None,
         streaming_mode: str = "buffered",
@@ -791,6 +814,8 @@ class Agent(Generic[AgentDepsT, OutputT]):
 
         The returned context manager is wrapped so that usage is recorded
         when the stream completes (i.e. on ``__aexit__``).
+        *memory* follows :meth:`run`: omitted uses the attached manager,
+        ``None`` disables it, and a supplied manager is borrowed for this stream.
 
         Args:
             streaming_mode: Streaming mode:
@@ -801,6 +826,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
         Output-admission middleware automatically selects guarded mode instead
         of buffered mode. Incremental mode is incompatible with these guards.
         """
+        selected_memory = self._memory if memory is _DefaultMemory.ATTACHED else memory
         if streaming_mode not in ("buffered", "incremental", "guarded"):
             raise ValueError(
                 f"Invalid streaming_mode: {streaming_mode!r}. Expected 'buffered', 'incremental', or 'guarded'."
@@ -853,7 +879,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
             return result
 
         try:
-            await self._inject_memory(conversation_id, kwargs)
+            await self._inject_memory(conversation_id, kwargs, memory=selected_memory)
             self._prepare_model_kwargs(kwargs)
             stream_ctx = self._agent.run_stream(mw_ctx.prompt, deps=deps, **kwargs)
         except asyncio.CancelledError:
@@ -874,6 +900,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
                 timeout=timeout,
                 conversation_id=conversation_id,
                 prompt=prompt,
+                memory=selected_memory,
             )
         if streaming_mode == "incremental":
             return _IncrementalStreamContext(
@@ -885,6 +912,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
                 timeout=timeout,
                 conversation_id=conversation_id,
                 prompt=prompt,
+                memory=selected_memory,
             )
         else:
             return _UsageTrackingStreamContext(
@@ -896,16 +924,19 @@ class Agent(Generic[AgentDepsT, OutputT]):
                 timeout=timeout,
                 conversation_id=conversation_id,
                 prompt=prompt,
+                memory=selected_memory,
             )
 
     # -- Memory integration ------------------------------------------------
 
-    async def _inject_memory(self, conversation_id: str | None, kwargs: dict[str, Any]) -> None:
+    async def _inject_memory(
+        self, conversation_id: str | None, kwargs: dict[str, Any], *, memory: MemoryManager | None
+    ) -> None:
         """If memory is attached, inject message_history into kwargs."""
-        if self._memory is None or conversation_id is None:
+        if memory is None or conversation_id is None:
             return
         if "message_history" not in kwargs:
-            kwargs["message_history"] = await self._memory.async_get_message_history(conversation_id)
+            kwargs["message_history"] = await memory.async_get_message_history(conversation_id)
             logger.debug("Agent '%s': injected memory for conversation '%s'", self._name, conversation_id)
 
     async def _persist_memory(
@@ -913,9 +944,11 @@ class Agent(Generic[AgentDepsT, OutputT]):
         conversation_id: str | None,
         prompt: Any,
         result: Any,
+        *,
+        memory: MemoryManager | None,
     ) -> None:
         """After a run, store new messages in conversation memory."""
-        if self._memory is None or conversation_id is None:
+        if memory is None or conversation_id is None:
             return
         if is_deferred(result):
             # The run paused for approval; its output is a control object, not a
@@ -927,17 +960,19 @@ class Agent(Generic[AgentDepsT, OutputT]):
         new_msgs = result.new_messages()
         prompt_text = prompt if isinstance(prompt, str) else str(prompt)
         output_text = str(result.output) if hasattr(result, "output") else ""
-        await self._memory.async_add_turn(conversation_id, prompt_text, output_text, new_msgs)
+        await memory.async_add_turn(conversation_id, prompt_text, output_text, new_msgs)
         logger.debug("Agent '%s': persisted turn to conversation '%s'", self._name, conversation_id)
 
-    async def _persist_stream_memory(self, conversation_id: str | None, prompt: Any, stream: Any) -> None:
+    async def _persist_stream_memory(
+        self, conversation_id: str | None, prompt: Any, stream: Any, *, memory: MemoryManager | None
+    ) -> None:
         """Save completed streams, preserving the provider's typed history and reasoning items."""
-        if self._memory is None or conversation_id is None or not stream.is_complete or stream.cancelled:
+        if memory is None or conversation_id is None or not stream.is_complete or stream.cancelled:
             return
         output = await stream.get_output()
         if isinstance(output, DeferredToolRequests):
             return
-        await self._memory.async_add_turn(conversation_id, str(prompt), str(output), stream.new_messages())
+        await memory.async_add_turn(conversation_id, str(prompt), str(output), stream.new_messages())
 
     # -- Usage tracking ------------------------------------------------------
 
@@ -1154,7 +1189,7 @@ class Agent(Generic[AgentDepsT, OutputT]):
         api = (
             normalize_model(model) if isinstance(model, str) else f"{type(model).__module__}.{type(model).__qualname__}"
         )
-        metadata: dict[str, Any] = {"_cache_model_api": api}
+        metadata: dict[str, Any] = {"_cache_model_api": api, "_cache_agent_identity": self._cache_identity}
         if self._model_options is not None:
             metadata["_portable_model_options"] = self._model_options.model_dump(mode="json", exclude_unset=True)
         return metadata
@@ -1434,6 +1469,7 @@ class _UsageTrackingStreamContext:
         timeout: float | None = None,
         conversation_id: str | None = None,
         prompt: Any = None,
+        memory: MemoryManager | None | _DefaultMemory = _DefaultMemory.ATTACHED,
     ) -> None:
         self._stream_ctx = stream_ctx
         self._agent = agent
@@ -1443,6 +1479,7 @@ class _UsageTrackingStreamContext:
         self._timeout = timeout
         self._conversation_id = conversation_id
         self._prompt = prompt
+        self._memory = agent.memory if memory is _DefaultMemory.ATTACHED else memory
         self._stream: Any = None
 
     async def __aenter__(self) -> Any:
@@ -1480,7 +1517,9 @@ class _UsageTrackingStreamContext:
             if self._mw_ctx is not None and guarded:
                 await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             if self._stream is not None:
-                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+                await self._agent._persist_stream_memory(
+                    self._conversation_id, self._prompt, self._stream, memory=self._memory
+                )
             if self._mw_ctx is not None and not guarded:
                 await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             return result
@@ -1526,7 +1565,9 @@ class _GuardedStreamContext(_UsageTrackingStreamContext):
                 admitted = await self._agent._middleware.run_after(self._mw_ctx, stream, output_admitted=True)
                 if admitted is not stream:
                     raise AgentError("After hooks cannot return a replacement native stream")
-                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, stream)
+                await self._agent._persist_stream_memory(
+                    self._conversation_id, self._prompt, stream, memory=self._memory
+                )
             return stream
         except BaseException as exc:
             # __aexit__ is not called by async-with when entry fails. Close the
@@ -1577,6 +1618,7 @@ class _IncrementalStreamContext:
         timeout: float | None = None,
         conversation_id: str | None = None,
         prompt: Any = None,
+        memory: MemoryManager | None | _DefaultMemory = _DefaultMemory.ATTACHED,
     ) -> None:
         self._stream_ctx = stream_ctx
         self._agent = agent
@@ -1586,6 +1628,7 @@ class _IncrementalStreamContext:
         self._timeout = timeout
         self._conversation_id = conversation_id
         self._prompt = prompt
+        self._memory = agent.memory if memory is _DefaultMemory.ATTACHED else memory
         self._stream: Any = None
         self._wrapper: _IncrementalStreamWrapper | None = None
 
@@ -1630,7 +1673,9 @@ class _IncrementalStreamContext:
             if self._mw_ctx is not None and guarded:
                 await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             if self._stream is not None:
-                await self._agent._persist_stream_memory(self._conversation_id, self._prompt, self._stream)
+                await self._agent._persist_stream_memory(
+                    self._conversation_id, self._prompt, self._stream, memory=self._memory
+                )
             if self._mw_ctx is not None and not guarded:
                 await self._agent._middleware.run_after(self._mw_ctx, self._stream)
             return result

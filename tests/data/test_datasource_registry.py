@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import threading
 import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -546,6 +547,25 @@ class TestSqliteSetup:
 
 class TestSqliteBegin:
     """The pysqlite/aiosqlite BEGIN recipe: reads run inside the transaction."""
+
+    async def test_begin_inspects_transaction_state_on_the_sqlite_worker(
+        self, sqlite_file: DataSource, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import aiosqlite
+
+        event_loop_thread = threading.get_ident()
+        original = aiosqlite.Connection.in_transaction
+
+        def _worker_transaction_state(connection: aiosqlite.Connection) -> bool:
+            # Fail before entering sqlite3: a direct read here can hold the GIL while waiting
+            # for the SQLite mutex held by a query, deadlocking the entire event loop.
+            assert threading.get_ident() != event_loop_thread
+            return bool(original.__get__(connection))
+
+        monkeypatch.setattr(aiosqlite.Connection, "in_transaction", property(_worker_transaction_state))
+        async with sqlite_file.engine.begin() as connection:
+            await connection.execute(text("INSERT INTO registry_account (id, balance) VALUES (1, 7)"))
+        assert await _scalar(sqlite_file.engine, "SELECT balance FROM registry_account WHERE id = 1") == 7
 
     async def test_begin_precedes_the_first_read(self, sqlite_file: DataSource) -> None:
         seen = _statements(sqlite_file.engine)

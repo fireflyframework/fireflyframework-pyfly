@@ -58,7 +58,10 @@ async def test_native_di_providers_export_real_spans_and_metrics_and_close_once(
         metric_options["headers"] = {"Authorization": "Bearer metric-test"}
     before = trace.get_tracer_provider(), metrics.get_meter_provider()
     selections = [AgenticAutoConfiguration, TracingAutoConfiguration, MeterProviderAutoConfiguration]
-    if not agentic_first:
+    if agentic_first:
+        # Force late provider selection despite production's infrastructure-first priority.
+        monkeypatch.setattr(AgenticAutoConfiguration, "__pyfly_order__", -1)
+    else:
         selections.reverse()
     context = ApplicationContext(
         Config(

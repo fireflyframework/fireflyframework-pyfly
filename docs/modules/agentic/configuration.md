@@ -4,6 +4,10 @@ The native module binds **`pyfly.agentic`** to `AgenticConfig`. Activation
 is separate: `pyfly.agentic.enabled` defaults to `false`; its environment switch is
 `PYFLY_AGENTIC_ENABLED`. Installing dependencies does not enable it.
 
+Native auto-configuration honors dependency ordering: Data and Audit bean
+definitions are registered before Agentic resolves its infrastructure. Enable
+and configure the required native modules when selecting a persistent backend.
+
 The table lists every field in the native typed model. Preserve underscores in
 YAML and environment keys. `None` below is a Python default; use YAML `null` or
 JSON `null` for a nullable override. Keep provider credentials in provider
@@ -29,6 +33,8 @@ export PYFLY_AGENTIC_QUOTA_RATE_LIMITS='{"openai-responses:gpt-6-luna": 30}'
 ```
 
 Quota dictionary keys are model identifiers, and values are requests per minute.
+The binder preserves the identifiers exactly, including hyphens, periods, and
+colons; it normalizes configuration field names rather than keys inside this map.
 See the supported controls in the [observability guide](observability.md).
 These limits are local runtime controls, not provider account quotas.
 
