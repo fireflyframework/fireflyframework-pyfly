@@ -96,6 +96,7 @@ async def test_one_pool_per_database_every_pool_configured_every_pool_disposed(
     # ddl-auto=none: the framework stores check their tables at start, as migrations would have created them.
     from pyfly.data.relational.framework_schema import (
         cache_entries,
+        cache_windows,
         ensure_tables,
         event_store,
         event_store_head,
@@ -104,7 +105,9 @@ async def test_one_pool_per_database_every_pool_configured_every_pool_disposed(
     )
 
     migrations = create_async_engine(url, poolclass=NullPool)
-    await ensure_tables(migrations, orchestration_state, cache_entries, event_store, event_store_head, snapshots)
+    await ensure_tables(
+        migrations, orchestration_state, cache_entries, cache_windows, event_store, event_store_head, snapshots
+    )
     await migrations.dispose()
     context = ApplicationContext(relational_backend.config(overrides))
     await context.start()

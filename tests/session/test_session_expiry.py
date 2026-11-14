@@ -130,6 +130,22 @@ async def test_redis_expiry_uses_server_time_without_returning_session_data() ->
     client.get.assert_not_awaited()
 
 
+async def test_redis_expiry_does_not_drift_with_server_microseconds() -> None:
+    client = AsyncMock()
+    # The deadline is 00:00:59.623 in all three observations, including the second boundary.
+    query = AsyncMock(
+        side_effect=[
+            [1793491200, 123118, 59500],
+            [1793491200, 123865, 59500],
+            [1793491201, 999, 58623],
+        ]
+    )
+    client.register_script = lambda script: query
+    store = RedisSessionStore(client)
+    deadline = datetime(2026, 11, 1, 0, 0, 59, 623000, tzinfo=UTC)
+    assert [await store.expires_at("session") for _ in range(3)] == [deadline] * 3
+
+
 def test_expiry_is_optional_for_existing_custom_stores() -> None:
     from pyfly.session import SessionExpiryStore, SessionStore
 

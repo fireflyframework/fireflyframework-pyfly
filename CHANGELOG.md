@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Remove sub-millisecond jitter from Redis session expiry observations without
+  renewing or recreating sessions; document approximate deadlines on older servers.
+- Correct integration fixtures for externally migrated PostgreSQL cache tables
+  and verify the documented fail-closed OAuth behavior on MySQL and MariaDB.
 - Inspect SQLite transaction state on its worker thread to prevent an event-loop
   deadlock with shared connections on SQLAlchemy 2.0.
 - Resolve secret-manager placeholders and environment overrides in configured

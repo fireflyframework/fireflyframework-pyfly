@@ -222,7 +222,10 @@ All three shipped stores implement it. SQL reads the stored UTC `expires_at`
 on the primary in a fresh read-only unit, even when a caller has a replica
 snapshot. Memory observes its remaining monotonic TTL and expresses it in
 UTC at the observation time. Redis compatibility reads server time and
-`PTTL` atomically without reading session attributes. Missing, expired or
+`PTTL` in one script without reading session attributes. It expresses the deadline
+at millisecond precision, matching Redis expiry storage. Older Redis versions
+sample the two clocks separately, so this remains an approximate observation;
+millisecond precision does not guarantee an exact or unchanging deadline. Missing, expired or
 non-expiring entries return `None`. A custom store without this optional
 port remains supported; an application must show no countdown when the
 deadline is unknown.
