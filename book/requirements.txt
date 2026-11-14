@@ -1,4 +1,4 @@
-Markdown>=3.11.2,<4
+Markdown>=3.11.3,<4
 Pygments>=2.21.0,<3
 PyYAML>=6.0.3,<7
 WeasyPrint>=70.0,<71
