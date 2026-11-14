@@ -111,8 +111,8 @@ clear the dependency advisory. Do not expose upstream multimodal evaluation to
 untrusted inputs; use isolated workers with restricted filesystem and egress
 access when evaluating untrusted data.
 
-ChromaDB 1.5.9 is still the latest published version inspected, and its four
-alerts have no published patched version:
+The 26.10.1 review evaluated ChromaDB 1.5.9 against four advisories that had no
+published patched version at that time:
 [code injection](https://github.com/advisories/GHSA-36p7-vc44-83pf),
 [cross-tenant data access](https://github.com/advisories/GHSA-2wm9-hf6c-p5cr),
 [incomplete RBAC scoping](https://github.com/advisories/GHSA-xph7-9rjv-w5fr), and
@@ -124,7 +124,15 @@ Agentic namespace metadata as a tenant authorization boundary. Use separate
 instances for direct clients in different trust domains. Applications that
 cannot satisfy those restrictions should select a different supported backend.
 
+The 26.11.08 review confirmed that dense-vector upserts still deserialize collection
+schemas and can reconstruct configured embedding functions. Dense embeddings do
+not mitigate this path. The server, collection schemas, and every configuration
+writer must be trusted. The adapter's namespace fixes do not repair these upstream
+advisories or establish a safe contract for untrusted remote servers.
+
 The Chroma adapter combines namespace and metadata predicates with `$and` so an
-equality filter cannot replace the requested namespace. It still shares document
-IDs across its collection; its namespace behavior does not inherit PostgreSQL's
-26.10.0 write-conflict guarantee. See [vector-store authorization](security.md#vector-store-authorization).
+equality filter cannot replace the requested namespace. Version 26.10.1 still shared
+document IDs across its collection. Version 26.11.08 derives namespace-scoped IDs
+for new records and rejects unsafe legacy mutations; see the
+[Chroma upgrade requirements](vectorstores.md#chromadb). This does not replace
+[vector-store authorization](security.md#vector-store-authorization).

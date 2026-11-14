@@ -190,10 +190,13 @@ class SqliteVecVectorStore(BaseVectorStore):
         conn.execute("BEGIN")
         try:
             for doc in documents:
-                conn.execute(
-                    f"INSERT INTO {self._shadow}(id, ns) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET ns=excluded.ns",
+                cursor = conn.execute(
+                    f"INSERT INTO {self._shadow}(id, ns) VALUES(?, ?) "
+                    f"ON CONFLICT(id) DO UPDATE SET ns=excluded.ns WHERE {self._shadow}.ns=excluded.ns",
                     (doc.id, namespace),
                 )
+                if cursor.rowcount != 1:
+                    raise VectorStoreError("Upsert rejected: document ID is unavailable in this namespace.")
                 row = conn.execute(f"SELECT rowid FROM {self._shadow} WHERE id = ?", (doc.id,)).fetchone()
                 rowid = row[0]
                 conn.execute(f"DELETE FROM {self._tbl} WHERE rowid = ?", (rowid,))

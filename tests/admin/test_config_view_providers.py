@@ -24,6 +24,60 @@ from pyfly.context.application_context import ApplicationContext
 from pyfly.core.config import Config
 
 
+@pytest.mark.asyncio
+async def test_nested_containers_are_redacted_in_all_configuration_views():
+    services = [
+        {
+            "password": "nested-marker",
+            "options": {"uri": "https://alice:uri-marker@example.test"},
+            "labels": ["public", {"api-key": "key-marker"}],
+            "enabled": True,
+            "port": 443,
+        }
+    ]
+    ctx = ApplicationContext(
+        Config({"pyfly": {"services": services, "admin": {"enabled": True}}}), auto_configurations=[]
+    )
+    expected = [
+        {
+            "password": "******",
+            "options": {"uri": "https://alice:******@example.test"},
+            "labels": ["public", {"api-key": "******"}],
+            "enabled": True,
+            "port": 443,
+        }
+    ]
+    env = await EnvProvider(ctx).get_env()
+    config = await ConfigProvider(ctx).get_config()
+    actuator = await EnvEndpoint(ctx).handle()
+    assert env["properties"]["pyfly.services"] == expected
+    assert config["groups"]["pyfly.services"]["pyfly.services"]["value"] == expected
+    for source in actuator["propertySources"]:
+        if "pyfly.services" in source["properties"]:
+            assert source["properties"]["pyfly.services"]["value"] == expected
+    assert services[0]["password"] == "nested-marker"
+    assert ctx.config.mask_value("passwords", ["secret-a", {"nested": "secret-b"}]) == [
+        "******",
+        {"nested": "******"},
+    ]
+    assert ctx.config.mask_value("values", ({"token": "secret-c"}, 7)) == ({"token": "******"}, 7)
+    from starlette.testclient import TestClient
+
+    from pyfly.web.adapters.starlette.app import create_app
+
+    await ctx.start()
+    try:
+        client = TestClient(create_app(context=ctx))
+        for path in ("/admin/api/env", "/admin/api/config"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert "nested-marker" not in response.text
+            assert "uri-marker" not in response.text
+            assert "key-marker" not in response.text
+    finally:
+        await ctx.stop()
+
+
 def _ctx() -> ApplicationContext:
     cfg = Config(
         {

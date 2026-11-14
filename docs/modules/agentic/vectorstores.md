@@ -95,10 +95,29 @@ Install: `python -m pip install -e ".[agentic,agentic-vectorstores-chroma]"`
 
 ChromaDB 1.5.9 retains known upstream advisories. Keep embedded use within one
 trust domain and restrict any remote server to trusted application access.
-Metadata namespaces, caller-provided filters and collection-wide document IDs do
-not provide the PostgreSQL adapter's namespace-write guarantee. Read the
+Trust the server, collection schemas, and every writer of collection configuration.
+Supplying dense embeddings does not bypass schema deserialization: ordinary
+upserts can still reconstruct configured embedding functions. Do not connect this
+adapter to an untrusted server or allow untrusted users to change collection
+configuration. Choose another supported backend if those conditions cannot hold.
+Namespaces and caller-provided filters do not authorize access. Read the
 [security restrictions](dependency-upgrade-26101.md#remaining-optional-package-advisories)
 before using Chroma for shared data.
+
+New writes derive a physical UUIDv5 ID from the namespace and logical document
+ID. The adapter owns the `_namespace` and `_document_id` metadata fields and
+returns the logical ID in search results. Different namespaces can reuse a
+logical ID. Existing physical-ID collisions with incompatible records are
+rejected.
+
+Legacy records remain readable. An upsert or delete that targets a same-namespace
+legacy record fails closed with a migration error: Chroma cannot atomically guard
+legacy cleanup using a missing identity marker. Back up the collection and
+reindex authoritative documents into a new collection before resuming those
+operations. The adapter does not clean up legacy records automatically. Stop or upgrade all old writers
+before adopting the new ID scheme; the collision check cannot protect mixed
+old and new writers. Previously overwritten data requires restoration from
+authoritative documents or backups.
 
 ### Pinecone
 
@@ -129,6 +148,32 @@ store = QdrantVectorStore(
 ```
 
 Install: `python -m pip install -e ".[agentic,agentic-vectorstores-qdrant]"`
+
+New writes derive the physical Qdrant UUIDv5 point ID from the namespace and
+logical document ID. The same logical ID can therefore exist in different
+namespaces. Search returns your logical ID from the `_document_id` payload field.
+The adapter owns `text`, `_namespace`, and `_document_id`; metadata cannot override
+these fields. Namespace selection remains the host's authorization responsibility.
+
+Existing points without `_document_id` remain searchable and deletable within
+their recorded namespace. After a new upsert succeeds, the adapter removes the
+matching legacy UUID or numeric IDs only in that same namespace. A collision
+between a new physical ID and incompatible legacy data is rejected; migrate to
+a new collection in that case.
+
+Legacy points that already contain caller-supplied `_document_id` metadata also
+require explicit migration to a new collection before an upsert. The adapter
+rejects that ambiguous update instead of creating a duplicate or removing data
+whose identity it cannot establish.
+
+Stop or upgrade every old writer before relying on the new ID scheme or lazy
+migration. The pre-write collision check is not an atomic conditional insert;
+mixed old and new writers are unsafe.
+
+Back up existing collections and reindex from authoritative documents when
+upgrading a shared collection. Previously overwritten cross-namespace data
+cannot be recovered by this change. The adapter does not migrate entire
+collections or perform external backup operations.
 
 ### PostgreSQL / pgvector
 
@@ -224,6 +269,13 @@ returns results carrying only the document `id` and `score` (text/metadata are n
 stored by this backend).
 
 Install: `python -m pip install -e ".[agentic,agentic-vectorstores-sqlite-vec]"`
+
+Document IDs remain unique across the SQLite store. An upsert for an ID already
+owned by another namespace raises `VectorStoreError` and rolls back the entire
+batch. Updates within the same namespace remain supported. This preserves
+existing data without changing the database schema or moving documents between
+namespaces. Supply globally unique document IDs when different namespaces need
+to store documents with the same business identifier.
 
 ---
 

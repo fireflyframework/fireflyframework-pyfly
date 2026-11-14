@@ -228,7 +228,7 @@ def _users_from_config(config: Config, key: str) -> list[Any]:
     """Build :class:`UserDetails` from a config map of pre-hashed users at *key*."""
     from pyfly.security.user_details import UserDetails
 
-    raw = config.get(key, {})
+    raw = config.effective_section(key)
     users: list[Any] = []
     if isinstance(raw, dict):
         for username, props in raw.items():

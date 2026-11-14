@@ -35,6 +35,8 @@ F = TypeVar("F", bound=Callable[..., Any])
 def traced(name: str | None = None, **span_attrs: Any) -> Callable[[F], F]:
     """Add an OpenTelemetry span around the decorated function.
 
+    The span context records an escaping exception once, honoring its content policy.
+
     Parameters:
         name: Span name.  Defaults to the function's qualified name.
         **span_attrs: Additional span attributes.
@@ -45,21 +47,13 @@ def traced(name: str | None = None, **span_attrs: Any) -> Callable[[F], F]:
 
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            with default_tracer.custom_span(span_name, **span_attrs) as span:
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as exc:
-                    default_tracer.set_error(span, exc)
-                    raise
+            with default_tracer.custom_span(span_name, **span_attrs):
+                return await func(*args, **kwargs)
 
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            with default_tracer.custom_span(span_name, **span_attrs) as span:
-                try:
-                    return func(*args, **kwargs)
-                except Exception as exc:
-                    default_tracer.set_error(span, exc)
-                    raise
+            with default_tracer.custom_span(span_name, **span_attrs):
+                return func(*args, **kwargs)
 
         # Detect whether the original function is async or sync at decoration
         # time, then return the matching wrapper so callers see the same

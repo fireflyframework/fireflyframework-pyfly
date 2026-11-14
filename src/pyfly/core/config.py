@@ -239,7 +239,17 @@ class Config:
     def mask_value(self, key: str, value: Any) -> Any:
         """Mask sensitive values: fully if *key* names a secret, else redact any
         password embedded in a URI value (Spring Boot Sanitizer parity)."""
-        if _is_sensitive_key(key):
+        sensitive = _is_sensitive_key(key)
+        if isinstance(value, dict):
+            return {
+                nested_key: self.mask_value(key if sensitive else str(nested_key), nested_value)
+                for nested_key, nested_value in value.items()
+            }
+        if isinstance(value, list):
+            return [self.mask_value(key, item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self.mask_value(key, item) for item in value)
+        if sensitive:
             return _MASK
         if isinstance(value, str) and "://" in value:
             return _sanitize_uri(value)

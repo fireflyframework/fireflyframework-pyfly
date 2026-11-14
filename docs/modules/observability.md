@@ -506,13 +506,19 @@ Exporter selection rules (see `TracingAutoConfiguration._install_span_processor`
 
 - `pyfly.observability.tracing.exporter` chooses `otlp`, `console`, or `none`
   explicitly.
-- When `exporter` is unset, OTLP is auto-selected **iff** an endpoint is
-  configured — either `pyfly.observability.tracing.otlp.endpoint` or the
-  standard `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable. Otherwise no
+- When `exporter` is unset, OTLP is selected if an endpoint is configured through
+  `pyfly.observability.tracing.otlp.endpoint`,
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT`. Otherwise no
   exporter is wired and a single info line is logged so the drop is not silent.
 - `console` uses the OpenTelemetry `ConsoleSpanExporter`.
-- `otlp` requires `opentelemetry-exporter-otlp` (OTLP/HTTP); if it is not
-  installed a warning is logged and spans are dropped.
+- `otlp` requires `opentelemetry-exporter-otlp-proto-http`; a missing exporter
+  raises a startup error. Install it or explicitly select `none` or `console`.
+
+Trace endpoint precedence is explicit PyFly configuration, then
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`.
+The signal-specific environment URL is used verbatim, including custom receiver
+paths. PyFly configuration and the general environment URL gain `/v1/traces`
+when their path is empty or `/`; existing paths are preserved.
 
 You can still configure the SDK yourself instead — for example to use a gRPC
 exporter — by registering your own `TracerProvider`:

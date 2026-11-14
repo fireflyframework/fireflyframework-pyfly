@@ -530,7 +530,9 @@ assert store.load_by_key("working", "vendor").content == "Acme Corp"
 
 ---
 
-## Conversation Export & Import
+<a id="conversation-export-import"></a>
+
+## Conversation export and import
 
 `ConversationMemory` supports exporting and importing conversations as
 JSON-serialisable dictionaries. This is useful for backup, migration,

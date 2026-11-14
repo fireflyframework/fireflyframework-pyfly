@@ -726,7 +726,7 @@ class DelegationRouter:
 
         if self._memory is not None and hasattr(agent, "memory"):
             agent_name = getattr(agent, "name", "delegated")
-            agent.memory = self._memory.fork(working_scope_id=f"delegation:{agent_name}")
+            kwargs.setdefault("memory", self._memory.fork(working_scope_id=f"delegation:{agent_name}"))
 
         return await agent.run(prompt, deps=deps, **kwargs)
 

@@ -211,7 +211,9 @@ Here are the most commonly used configuration fields:
 Configuration is owned by `AgenticRuntime`. `get_config()` resolves the active runtime;
 create a fresh runtime for each isolated application or test.
 
-### Model Providers & Authentication
+<a id="model-providers-authentication"></a>
+
+### Model providers and authentication
 
 Before you can run an agent against a real LLM, you need credentials for your model
 provider. PyFly Agentic delegates model communication entirely to

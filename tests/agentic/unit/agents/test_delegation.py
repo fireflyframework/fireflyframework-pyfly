@@ -504,7 +504,7 @@ async def test_router_route_keeps_existing_signature():
 
 @pytest.mark.asyncio
 async def test_router_execute_forks_memory_when_attached():
-    """If memory is attached, the chosen agent's memory is replaced by a forked scope."""
+    """A fork is borrowed for the invocation without replacing agent memory."""
 
     class _Fork:
         def __init__(self, scope_id: str) -> None:
@@ -524,7 +524,7 @@ async def test_router_execute_forks_memory_when_attached():
     router = DelegationRouter([a], RoundRobinStrategy(), memory=mem)
     await router.route("p")
     assert mem.forks == ["delegation:a"]
-    assert isinstance(a.memory, _Fork)
+    assert a.memory is None
 
 
 @pytest.mark.asyncio

@@ -1141,7 +1141,12 @@ class ApplicationContext:
         """
         evaluator = ConditionEvaluator(self._config, self._container)
 
-        for cls, _reg in list(self._container._registrations.items()):
+        configurations = list(self._container._registrations.items())
+        if auto:
+            # Stable ordering preserves discovery order for equal priorities and
+            # leaves the preceding user-configuration/override pass unchanged.
+            configurations.sort(key=lambda entry: get_order(entry[0]))
+        for cls, _reg in configurations:
             if getattr(cls, "__pyfly_stereotype__", "") != "configuration":
                 continue
             is_auto = getattr(cls, "__pyfly_auto_configuration__", False)

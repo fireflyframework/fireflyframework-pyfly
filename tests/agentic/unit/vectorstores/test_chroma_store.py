@@ -23,7 +23,7 @@ class TestChromaVectorStore:
         await store.upsert([VectorDocument(id="1", text="hello", embedding=[1.0, 0.0])])
         mock_collection.upsert.assert_called_once()
         call_kwargs = mock_collection.upsert.call_args
-        assert call_kwargs[1]["ids"] == ["1"]
+        assert call_kwargs[1]["ids"] == ["184f60e3-72ea-5549-9d3b-53550ffea629"]
         assert call_kwargs[1]["documents"] == ["hello"]
         assert call_kwargs[1]["embeddings"] == [[1.0, 0.0]]
 
@@ -42,7 +42,7 @@ class TestChromaVectorStore:
             namespace="custom_ns",
         )
         call_kwargs = mock_collection.upsert.call_args
-        assert call_kwargs[1]["metadatas"] == [{"_namespace": "custom_ns"}]
+        assert call_kwargs[1]["metadatas"] == [{"_namespace": "custom_ns", "_document_id": "1"}]
 
     @patch("pyfly.agentic.vectorstores.chroma_store.chromadb")
     async def test_search(self, mock_chromadb):
@@ -128,7 +128,16 @@ class TestChromaVectorStore:
 
         store = ChromaVectorStore(collection_name="test")
         await store.delete(["1", "2"])
-        mock_collection.delete.assert_called_once_with(ids=["1", "2"], where={"_namespace": "default"})
+        assert [call.kwargs for call in mock_collection.delete.call_args_list] == [
+            {
+                "ids": ["184f60e3-72ea-5549-9d3b-53550ffea629"],
+                "where": {"$and": [{"_namespace": "default"}, {"_document_id": "1"}]},
+            },
+            {
+                "ids": ["5d57f83e-1691-551b-91ea-78ad82ba7423"],
+                "where": {"$and": [{"_namespace": "default"}, {"_document_id": "2"}]},
+            },
+        ]
 
     @patch("pyfly.agentic.vectorstores.chroma_store.chromadb")
     async def test_custom_client(self, mock_chromadb):

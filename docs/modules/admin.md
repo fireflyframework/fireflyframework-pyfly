@@ -67,6 +67,11 @@ http://localhost:9090/admin
 
 This is the default separate management port. If management and application ports are equal, use the application port. Data administration additionally requires explicit registrations and authenticated access as described below.
 
+This quick start assumes an isolated development network. Monitoring authentication
+and the separate management listener's security filters are off by default.
+Use the [production access configuration](#production-access) before exposing the
+dashboard beyond that boundary.
+
 The dashboard auto-discovers beans, health indicators, loggers,
 scheduled tasks, HTTP mappings, caches, CQRS handlers, transactions, and
 metrics from the running `ApplicationContext` and presents them in built-in
@@ -276,6 +281,12 @@ The displayed known subtotal excludes unknown observations. Numeric legacy
 totals, cumulative budgets and enforcement remain unchanged; historical calls
 are never repriced from current tariffs. This is process-local estimated usage,
 not an invoice or a project-isolated ledger.
+
+These views have separate data sources: **Agentic** reads the retained runtime
+usage ledger, **Metrics** reads process and optional Prometheus metrics, and
+**HTTP Traces** reads the local request ring buffer. The dashboard does not query
+an OTLP collector or reconstruct exported GenAI span trees. Configure an external
+telemetry backend to inspect exported model spans and OpenTelemetry metrics.
 
 Quota information shows whether management is enabled, the configured daily budget,
 and remaining requests in configured per-minute rate limits. Model/provider identifiers
@@ -730,17 +741,59 @@ still boot and then surface the API's `401`/`403` responses in the UI. When
 Its mutations also require the CSRF cookie/header pair, even with bearer authentication.
 The monitoring and model-admin guards both apply when monitoring authentication is enabled.
 
-### Example: Restrict to OPS and ADMIN Roles
+### Production access
+
+Enable both Admin authorization and the security filter chain on the separate
+management listener. Business app security alone does not secure port
+9090. This example uses HTTP Basic with a stored bcrypt password hash and keeps
+the listener on loopback behind an authenticated, TLS-protected operator ingress:
 
 ```yaml
 pyfly:
   admin:
     enabled: true
-    require_auth: true
-    allowed_roles:
-      - ADMIN
-      - OPS
+    require-auth: true
+    allowed-roles: [ADMIN, OPS]
+  management:
+    server:
+      port: 9090
+      address: 127.0.0.1
+    security:
+      enabled: true
+  security:
+    enabled: true
+    http-basic:
+      enabled: true
+      error-mode: "401"
+      users:
+        operator:
+          password-hash: "${ADMIN_PASSWORD_HASH}"
+          roles: "OPS"
+          enabled: true
+    csrf:
+      enabled: true
+      cookie-gated: false
 ```
+
+Supply `ADMIN_PASSWORD_HASH` from your secret manager and install the authentication
+dependencies described in [HTTP Basic authentication](security.md#http-basic).
+Configure any app authorization gate to admit the intended Admin and
+actuator routes for operators. The proxy must preserve authentication headers and
+prevent untrusted traffic from reaching the management listener directly. Keep
+network policy or firewall restrictions even when authentication is enabled.
+
+Keep CSRF protection active: the dashboard obtains `XSRF-TOKEN` on a safe request
+and sends `X-XSRF-TOKEN` on mutations. Strict mode also requires this pair for
+non-browser writes. If you use form login or OAuth 2.0 instead of HTTP Basic, configure
+the corresponding authentication and session filters, secure session cookies,
+and logout handling on the management origin. Merely setting `require-auth` does
+not create a login mechanism or establish a session. See the
+[security guide](security.md) for those host authentication flows.
+
+An externally bound Admin listener with `require-auth: false` emits a startup
+warning, including a reminder when separate management security filters are off.
+The warning does not add authentication or change the
+network-isolated defaults.
 
 ---
 

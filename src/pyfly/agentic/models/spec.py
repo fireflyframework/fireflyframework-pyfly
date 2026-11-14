@@ -149,8 +149,10 @@ class ModelSpec:
 
     Parameters:
         provider: The provider key — ``anthropic``, ``openai``, ``azure``, ``bedrock``,
-            ``google-vertex``, ``google``, ``mistral``, or any OpenAI-compatible endpoint
-            (``ollama``, ``openrouter``, ``deepseek``, …) with a ``base_url``.
+            ``google-vertex``, ``google``, ``mistral``, ``openrouter``, or any OpenAI-compatible
+            endpoint (``ollama``, ``deepseek``, …) with a ``base_url``. OpenRouter uses its
+            native model adapter and endpoint by default, with ``OPENROUTER_API_KEY`` when
+            no explicit credential is supplied; its model ids include the upstream vendor.
             ``openai`` and ``azure`` retain their Chat Completions defaults. Select explicitly
             with ``openai-chat``, ``openai-responses``, ``azure-chat`` or ``azure-responses``.
         model: The provider's model id, exactly as the provider names it.

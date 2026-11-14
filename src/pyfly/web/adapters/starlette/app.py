@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
+import logging
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
 
@@ -189,6 +191,39 @@ def create_app(
     # already-started context), degrade to shared so the endpoints are never
     # silently unreachable.
     _serve_separately = management_separated and lifespan is not None
+
+    if admin_enabled and context is not None:
+        from pyfly.admin.config import AdminProperties
+        from pyfly.config.properties.server import resolve_app_host
+
+        if not context.config.bind(AdminProperties).require_auth:
+            if _serve_separately and management_props is not None:
+                admin_host = management_props.address or resolve_app_host(context.config)
+                admin_port = management_props.port
+            else:
+                admin_host = _os.environ.get("_PYFLY_SERVER_HOST") or resolve_app_host(context.config)
+                admin_port = _main_port
+            try:
+                loopback = ipaddress.ip_address(admin_host.strip("[]")).is_loopback
+            except ValueError:
+                loopback = admin_host.lower().rstrip(".") == "localhost"
+            if not loopback:
+                security_hint = ""
+                if _serve_separately and str(
+                    context.config.get("pyfly.management.security.enabled", "false")
+                ).lower() not in ("true", "1", "yes"):
+                    security_hint = (
+                        " The separate management listener excludes application security/session/CSRF filters;"
+                        " set pyfly.management.security.enabled=true to include them."
+                    )
+                logging.getLogger(__name__).warning(
+                    "Admin is externally bound at %s:%s without required authentication. "
+                    "Set pyfly.admin.require-auth=true and configure authentication/roles, "
+                    "or restrict the listener to loopback and isolate it at the network boundary.%s",
+                    admin_host,
+                    admin_port,
+                    security_hint,
+                )
 
     # --- Build the WebFilter chain ---
     # RequestContextFilter runs first (HIGHEST_PRECEDENCE) so REQUEST-scoped beans

@@ -8,6 +8,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
+from pyfly.container.ordering import LOWEST_PRECEDENCE, order
 from pyfly.context.conditions import auto_configuration, conditional_on_property
 from pyfly.core.config import Config
 
@@ -32,8 +33,13 @@ def bind_agentic_config(config: Config) -> AgenticConfig:
     for key, guidance in REMOVED_NATIVE_FIELDS.items():
         if "PYFLY_AGENTIC_" + key.upper() in os.environ:
             raise ValueError(f"{key} was removed; {guidance}")
-    bound = config.bind(AgenticConfig)
-    values = bound.model_dump()
+    # Agentic fields are flat; dictionaries below them contain literal payload
+    # keys (not schema fields), including provider/model quota identifiers.
+    # Resolve placeholders and environment overlays before relaxing field names.
+    values = {
+        key.replace("-", "_").replace(" ", "_").lower(): value
+        for key, value in config.effective_section("pyfly.agentic").items()
+    }
     for field in AgenticConfig.model_fields:
         raw = os.environ.get("PYFLY_AGENTIC_" + field.upper())
         if raw is not None:
@@ -55,6 +61,7 @@ def require_agentic_dependencies() -> None:
 
 
 @auto_configuration
+@order(LOWEST_PRECEDENCE)
 @conditional_on_property("pyfly.agentic.enabled", having_value="true")
 class AgenticAutoConfiguration:
     def __new__(cls) -> Any:

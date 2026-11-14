@@ -301,8 +301,13 @@ pyfly:
     instrumentation-include-content: false
 ```
 
-The tracing exporter accepts `console`, `otlp`, or `none`. OTLP trace base URLs
-acquire `/v1/traces`; an endpoint already ending in `/v1/traces` is preserved.
+The tracing exporter accepts `console`, `otlp`, or `none`. Trace endpoints resolve
+in this order: `pyfly.observability.tracing.otlp.endpoint`,
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`.
+The signal-specific environment endpoint is used verbatim. PyFly configuration
+and general OTLP URLs acquire `/v1/traces` when their path is empty or `/`;
+existing paths are preserved. A trace-specific environment URL does not configure a
+metrics reader.
 Use a separate metrics endpoint when the receiver is trace-only. Standard OTLP
 configuration includes `OTEL_EXPORTER_OTLP_ENDPOINT`, signal-specific endpoint
 variables, and `OTEL_EXPORTER_OTLP_TRACES_HEADERS` /
@@ -665,6 +670,11 @@ Runtime methods:
 
 For the single-tenant case, the `budget_limit_usd` config field auto-installs a
 runtime-wide HARD `BudgetRule` (`name="config_global"`) on the default tracker.
+
+A hard breach detected after a call still retains its incurred usage and delivers
+the record to configured cost sinks before raising `BudgetExceededError`.
+Enforcement cannot undo a provider charge; exported usage includes the call that
+crossed the limit.
 
 ## Cost Sinks
 

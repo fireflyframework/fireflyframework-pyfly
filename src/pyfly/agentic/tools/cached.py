@@ -115,18 +115,23 @@ class CachedTool:
 
         assert inflight is not None
         if not is_leader:
-            return await inflight  # a concurrent miss is already computing this key
+            return await asyncio.shield(inflight)
 
         try:
             result = await self._tool.execute(**kwargs)
-        except BaseException as exc:
             async with self._lock:
-                self._inflight.pop(key, None)
+                self._put(key, result, time.monotonic())
+        except BaseException as exc:
             if not inflight.done():
-                inflight.set_exception(exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    inflight.cancel()
+                else:
+                    inflight.set_exception(exc)
+                    # Retrieve once even if no follower remains to observe it.
+                    inflight.exception()
             raise
-        async with self._lock:
-            self._put(key, result, time.monotonic())
+        finally:
+            # Single-loop dictionary mutation needs no await in cancellation cleanup.
             self._inflight.pop(key, None)
         if not inflight.done():
             inflight.set_result(result)

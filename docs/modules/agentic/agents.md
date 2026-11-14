@@ -371,6 +371,10 @@ agent, a score in `[0.0, 1.0]`, and a short reason) plus free-form metadata.
 `pyfly.agentic.routing.decision` OTel event); `execute()` runs the chosen agent
 and forks memory if attached; `route()` is the one-call convenience.
 
+Delegation supplies forked memory to the selected invocation without changing
+the shared target agent's configured memory. Authorization and the parent memory
+scope remain the caller's responsibility.
+
 ```mermaid
 flowchart TD
     PROMPT["Prompt and agent pool"] --> DECIDE["DelegationRouter.decide"]
@@ -958,6 +962,9 @@ agent = Agent(
 ```
 
 #### CacheMiddleware
+
+Streaming calls bypass result-cache reads and writes. A completed result is not
+reused as a live stream, and stream objects are never stored in the result cache.
 
 Caches agent results via a `ResultCache`. On `before_run`, checks the cache;
 on `after_run`, stores the result on miss.
