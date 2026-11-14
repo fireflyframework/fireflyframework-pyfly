@@ -146,14 +146,21 @@ class RedisSessionStore:
         await self._client.set(self._key(session_id), raw.encode(), ex=ttl)
 
     async def expires_at(self, session_id: str) -> datetime | None:
-        """Observe server time and remaining TTL atomically; never read attributes or touch the key."""
+        """Observe the server deadline in milliseconds, approximately on legacy Redis.
+
+        Use TIME and PTTL for compatibility with Redis versions before PEXPIRETIME. Never read attributes,
+        renew the expiry or recreate a missing key. Older Redis versions can sample different
+        server instants, so the observation can vary with elapsed time inside the script.
+        """
         if self._expiry is None:
             self._expiry = self._client.register_script(_EXPIRY)
         result = await self._expiry(keys=[self._key(session_id)])
         if not result or len(result) != 3 or int(result[2]) <= 0:
             return None
+        # Discard TIME's sub-millisecond remainder: Redis stores millisecond deadlines. This removes
+        # fractional jitter but cannot make legacy TIME/PTTL clock samples simultaneous.
         return datetime.fromtimestamp(int(result[0]), UTC) + timedelta(
-            microseconds=int(result[1]), milliseconds=int(result[2])
+            milliseconds=int(result[1]) // 1000 + int(result[2])
         )
 
     async def replace(self, session_id: str, data: dict[str, Any], ttl: int) -> bool:

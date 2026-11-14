@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections.abc import AsyncIterator, Iterator
 from contextvars import ContextVar
@@ -50,13 +51,14 @@ from sqlalchemy.util import await_only
 from pyfly.data.relational.framework_schema import FrameworkSchemaError, session_registrations, sessions
 from pyfly.kernel.exceptions import OptimisticLockingFailureException
 from pyfly.security.context import SecurityContext
+from pyfly.session import SessionClaimUnavailable
 from pyfly.session.adapters.postgres_registry import PostgresSessionRegistry
 from pyfly.session.adapters.sql_session_store import SqlSessionStore
 from pyfly.session.concurrency import ConcurrencyControlPolicy, SessionConcurrencyController, SessionRegistration
 from pyfly.testing.statement_counter import statement_verb
 from tests.integration import _session_logins as logins
 from tests.integration._repository_harness import repository_datasources
-from tests.support.backend_matrix import RelationalBackend
+from tests.support.backend_matrix import MARIADB, MYSQL, PG, SQLITE_FILE, RelationalBackend
 
 CONCURRENCY = 20
 
@@ -125,6 +127,7 @@ async def test_evict_oldest_keeps_the_cap_under_concurrent_logins(relational_bac
         assert resolving == survivors
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 @pytest.mark.parametrize("strategy", ["evict-oldest", "reject-new"])
 @pytest.mark.parametrize(("max_sessions", "concurrent"), [(1, 8), (2, 16)])
 async def test_concurrent_logins_through_the_login_flow_keep_the_cap(
@@ -147,6 +150,7 @@ async def test_concurrent_logins_through_the_login_flow_keep_the_cap(
         )
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 @pytest.mark.parametrize("strategy", ["evict-oldest", "reject-new"])
 async def test_a_session_write_after_the_login_keeps_the_cap(
     relational_backend: RelationalBackend, strategy: str
@@ -165,6 +169,7 @@ async def test_a_session_write_after_the_login_keeps_the_cap(
         )
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 @pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
 async def test_a_revoked_session_stays_revoked(relational_backend: RelationalBackend, revocation: str) -> None:
     async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
@@ -173,6 +178,7 @@ async def test_a_revoked_session_stays_revoked(relational_backend: RelationalBac
         await logins.a_revoked_session_stays_revoked(replica, revocation)
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 @pytest.mark.parametrize("via", ["logout", "logout-filter"])
 async def test_a_logout_survives_a_registry_outage(relational_backend: RelationalBackend, via: str) -> None:
     """The registry's table is gone (its database fails from then on) while the session store answers."""
@@ -186,6 +192,7 @@ async def test_a_logout_survives_a_registry_outage(relational_backend: Relationa
         await logins.a_logout_survives_a_registry_outage(replica, via, break_registry)
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 @pytest.mark.parametrize("via", ["logout", "logout-filter"])
 async def test_a_cancelled_logout_still_ends_the_session(relational_backend: RelationalBackend, via: str) -> None:
     async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
@@ -194,6 +201,7 @@ async def test_a_cancelled_logout_still_ends_the_session(relational_backend: Rel
         await logins.a_cancelled_logout_still_ends_the_session(replica, via, registry)
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 @pytest.mark.parametrize("revocation", ["eviction", "logout", "logout-filter"])
 async def test_a_rotation_after_a_revocation_brings_nothing_back(
     relational_backend: RelationalBackend, revocation: str
@@ -204,6 +212,7 @@ async def test_a_rotation_after_a_revocation_brings_nothing_back(
         await logins.a_rotation_after_a_revocation_brings_nothing_back(replica, revocation)
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 async def test_a_rotation_moves_a_live_session(relational_backend: RelationalBackend) -> None:
     async with _replicas(relational_backend, count=1) as [(store, registry, _engine)]:
         await logins.a_rotation_moves_a_live_session(
@@ -211,6 +220,7 @@ async def test_a_rotation_moves_a_live_session(relational_backend: RelationalBac
         )
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 async def test_a_login_stands_when_its_pre_authentication_session_is_gone(
     relational_backend: RelationalBackend,
 ) -> None:
@@ -220,6 +230,7 @@ async def test_a_login_stands_when_its_pre_authentication_session_is_gone(
         )
 
 
+@pytest.mark.backends(SQLITE_FILE, PG)
 async def test_one_login_at_a_time_through_the_login_flow_keeps_the_latest_sessions(
     relational_backend: RelationalBackend,
 ) -> None:
@@ -227,6 +238,48 @@ async def test_one_login_at_a_time_through_the_login_flow_keeps_the_latest_sessi
         flows = [logins.Replica(store, _controller(store, registry, max_sessions=2)) for store, registry, _ in replicas]
 
         await logins.concurrent_logins_keep_the_cap(flows, max_sessions=2, evict_oldest=True, concurrent=1, rounds=4)
+
+
+@pytest.mark.backends(MYSQL, MARIADB)
+async def test_unsupported_atomic_claim_leaves_the_session_unchanged(relational_backend: RelationalBackend) -> None:
+    async with _replicas(relational_backend, count=1) as [(store, _registry, _engine)]:
+        old_id = await logins.start_login(store)
+        before = await store.get(old_id)
+        with pytest.raises(SessionClaimUnavailable, match="unsupported"):
+            await store.claim_attributes(
+                old_id, "continuation", {"oauth2_state": f"state-{old_id}"}, ("oauth2_state",), 60
+            )
+        assert await store.get(old_id) == before
+        assert not await store.exists("continuation")
+
+
+@pytest.mark.backends(MYSQL, MARIADB)
+async def test_unsupported_oauth_claim_rejects_before_exchange_without_authentication(
+    relational_backend: RelationalBackend,
+) -> None:
+    async with _replicas(relational_backend, count=1) as [(store, registry, engine)]:
+        replica = logins.Replica(store, _controller(store, registry, max_sessions=1))
+        exchanges: list[bool] = []
+
+        async def record_exchange() -> None:
+            exchanges.append(True)
+
+        replica.handler.during_exchange = record_exchange
+        old_id = await logins.start_login(store)
+        before = await store.get(old_id)
+        request = logins.callback_request(old_id)
+        response = await logins.run_callback(replica, request)
+
+        assert response.status_code == 400
+        assert json.loads(response.body) == {"error": "session_claim_unavailable"}
+        assert exchanges == []
+        assert logins.session_cookies(response) == []
+        assert request.state.session.invalidated
+        assert await store.get(old_id) == before
+        assert await registry.list_sessions(replica.principal) == []
+        assert await logins.authenticated_as(replica, old_id) is None
+        async with engine.connect() as connection:
+            assert (await connection.execute(select(sessions.c.session_id))).scalars().all() == [old_id]
 
 
 async def test_eviction_reaches_a_session_held_by_another_replica(relational_backend: RelationalBackend) -> None:

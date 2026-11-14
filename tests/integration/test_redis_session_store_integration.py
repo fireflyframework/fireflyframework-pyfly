@@ -23,10 +23,23 @@ tests/integration/test_redis_session_store_integration.py``
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 
 import pytest
 
 from pyfly.testing import requires_docker
+
+
+@pytest.fixture
+def legacy_redis_url() -> Iterator[str]:
+    from pyfly.testing import redis_container
+    from tests.integration.conftest import _started
+
+    container = _started(lambda: redis_container("redis:6.2-alpine"), "Redis 6.2")
+    try:
+        yield f"redis://{container.get_container_host_ip()}:{container.get_exposed_port(6379)}/0"
+    finally:
+        container.stop()
 
 
 @requires_docker
@@ -145,16 +158,81 @@ async def test_expiry_reads_server_deadline_without_renewing_or_recreating(redis
         sid = "expiry-" + uuid.uuid4().hex
         assert await store.expires_at(sid) is None
         await store.save(sid, {"private": "not returned by expiry"}, ttl=60)
-        before = datetime.now(UTC)
+        # Set a known server deadline: the Docker VM and the client need not share a clock.
+        server_seconds, _ = await client.time()
+        await client.pexpireat("pyfly:session:" + sid, (server_seconds + 60) * 1000 + 487)
         deadline = await store.expires_at(sid)
-        assert deadline is not None and before < deadline <= datetime.now(UTC) + timedelta(seconds=60)
+        assert deadline == datetime.fromtimestamp(server_seconds + 60, UTC) + timedelta(milliseconds=487)
         ttl_before = await client.pttl("pyfly:session:" + sid)
         assert await store.expires_at(sid) == deadline
         assert await client.pttl("pyfly:session:" + sid) <= ttl_before
+        assert await store.get(sid) == {"private": "not returned by expiry"}
         await store.delete(sid)
         assert await store.expires_at(sid) is None
         assert not await store.exists(sid)
+        await store.save(sid, {}, ttl=60)
+        await client.pexpireat("pyfly:session:" + sid, 1)
+        assert await store.expires_at(sid) is None
+        assert not await store.exists(sid)
+        await client.set("pyfly:session:" + sid, b"{}")
+        assert await store.expires_at(sid) is None
+        assert await client.pttl("pyfly:session:" + sid) == -1
     finally:
+        await client.delete("pyfly:session:" + sid)
+        await client.aclose()
+
+
+@requires_docker
+@pytest.mark.brokers
+@pytest.mark.asyncio
+async def test_legacy_expiry_stays_within_server_observation_window_without_writes(legacy_redis_url: str) -> None:
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    import redis.asyncio as aioredis
+
+    from pyfly.session.adapters.redis import RedisSessionStore
+
+    client = aioredis.from_url(legacy_redis_url)
+    sid = "legacy-expiry-" + uuid.uuid4().hex
+    key = "pyfly:session:" + sid
+    try:
+        assert (await client.info("server"))["redis_version"].startswith("6.2.")
+        store = RedisSessionStore(client)
+        assert await store.expires_at(sid) is None
+        await store.save(sid, {"private": "unchanged"}, ttl=60)
+        server_seconds, _ = await client.time()
+        deadline_ms = (server_seconds + 60) * 1000 + 487
+        await client.pexpireat(key, deadline_ms)
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        ttl_before = await client.pttl(key)
+
+        for _ in range(100):
+            before_seconds, before_microseconds = await client.time()
+            observed = await store.expires_at(sid)
+            after_seconds, after_microseconds = await client.time()
+            elapsed_us = (after_seconds - before_seconds) * 1_000_000 + after_microseconds - before_microseconds
+            # TIME runs before PTTL, so the legacy estimate can be early. Round the measured window
+            # up to cover crossing a millisecond boundary, without assuming a fixed error tolerance.
+            elapsed_ms = (elapsed_us + 999) // 1000
+            assert observed is not None and observed.microsecond % 1000 == 0
+            observed_ms = (observed - epoch) // timedelta(milliseconds=1)
+            assert deadline_ms - elapsed_ms <= observed_ms <= deadline_ms
+
+        assert await client.pttl(key) <= ttl_before
+        assert await store.get(sid) == {"private": "unchanged"}
+        await store.delete(sid)
+        assert await store.expires_at(sid) is None
+        assert not await store.exists(sid)
+        await store.save(sid, {}, ttl=60)
+        await client.pexpireat(key, 1)
+        assert await store.expires_at(sid) is None
+        assert not await store.exists(sid)
+        await client.set(key, b"{}")
+        assert await store.expires_at(sid) is None
+        assert await client.pttl(key) == -1
+    finally:
+        await client.delete(key)
         await client.aclose()
 
 
